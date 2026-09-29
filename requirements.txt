@@ -1,0 +1,5 @@
+# OmniAgent - local-only dependencies.
+# Nothing here calls a hosted API: the openai client is pointed at Ollama.
+
+openai>=1.40.0,<3.0.0
+pydantic>=2.7.0,<3.0.0
