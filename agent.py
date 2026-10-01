@@ -15,9 +15,10 @@ The loop is deliberately small and readable:
 from __future__ import annotations
 
 import re
-from typing import Callable, Dict, List, Optional
+from collections.abc import Callable
 
 from openai import APIConnectionError, APIStatusError, OpenAI
+from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, Field
 
 from tools import describe_tools, run_tool, tool_names
@@ -98,6 +99,39 @@ _ACTION_INPUT_RE = re.compile(
 _INLINE_CALL_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*$", re.DOTALL)
 
 _NO_ARG_INPUTS = {"", "none", "null", "n/a", "na", "-", "nothing", "()", "no input"}
+_BRACKET_PAIRS = {"()", "<>", "[]"}
+
+#: Shortest string that can still be a quoted or bracketed wrapper.
+_MIN_WRAPPED_LENGTH = 2
+
+#: Ollama answers an unknown model tag with a 404.
+_HTTP_NOT_FOUND = 404
+
+
+def _is_wrapped(value: str) -> bool:
+    """True when the value is long enough to carry a matching pair of delimiters."""
+    return len(value) >= _MIN_WRAPPED_LENGTH
+
+
+
+# --------------------------------------------------------------------------- #
+# message constructors
+# --------------------------------------------------------------------------- #
+# The OpenAI client types each role as its own TypedDict, so a plain
+# {"role": ..., "content": ...} dict does not type-check. These three keep the
+# call sites readable without scattering casts around.
+
+
+def _system(content: str) -> ChatCompletionMessageParam:
+    return {"role": "system", "content": content}
+
+
+def _user(content: str) -> ChatCompletionMessageParam:
+    return {"role": "user", "content": content}
+
+
+def _assistant(content: str) -> ChatCompletionMessageParam:
+    return {"role": "assistant", "content": content}
 
 
 class AgentConfig(BaseModel):
@@ -116,10 +150,10 @@ class Step(BaseModel):
     """One iteration of the loop, kept for inspection and testing."""
 
     thought: str = ""
-    action: Optional[str] = None
-    action_input: Optional[str] = None
-    observation: Optional[str] = None
-    final_answer: Optional[str] = None
+    action: str | None = None
+    action_input: str | None = None
+    observation: str | None = None
+    final_answer: str | None = None
     raw: str = ""
 
 
@@ -167,14 +201,17 @@ def _clean_action_input(raw: str) -> str:
         value = re.sub(r"^```[a-zA-Z0-9_+-]*\n?", "", value)
         value = re.sub(r"\n?```$", "", value).strip()
     value = value.strip("`").strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+    if _is_wrapped(value) and value[0] in "\"'":
         value = value[1:-1].strip()
     if value.lower() in _NO_ARG_INPUTS:
         return ""
     # Small models like to wrap the placeholder: "(none)", "<none>", "[none]".
-    if len(value) >= 2 and value[0] + value[-1] in {"()", "<>", "[]"}:
-        if value[1:-1].strip().lower() in _NO_ARG_INPUTS:
-            return ""
+    if (
+        _is_wrapped(value)
+        and value[0] + value[-1] in _BRACKET_PAIRS
+        and value[1:-1].strip().lower() in _NO_ARG_INPUTS
+    ):
+        return ""
     return value
 
 
@@ -183,7 +220,7 @@ class ReActAgent:
 
     def __init__(
         self,
-        config: Optional[AgentConfig] = None,
+        config: AgentConfig | None = None,
         printer: Callable[[str], None] = print,
     ) -> None:
         self.config = config or AgentConfig()
@@ -199,8 +236,8 @@ class ReActAgent:
         )
         # Long-term memory: only user questions and final answers, so the
         # scratchpad from an earlier turn never pollutes the next one.
-        self.history: List[Dict[str, str]] = []
-        self.last_trace: List[Step] = []
+        self.history: list[ChatCompletionMessageParam] = []
+        self.last_trace: list[Step] = []
 
     # -- public API -------------------------------------------------------- #
 
@@ -209,7 +246,7 @@ class ReActAgent:
         self.history.clear()
         self.last_trace.clear()
 
-    def check_connection(self) -> List[str]:
+    def check_connection(self) -> list[str]:
         """Return the model tags the local server offers, or raise AgentError."""
         try:
             return [m.id for m in self.client.models.list().data]
@@ -219,11 +256,13 @@ class ReActAgent:
                 "Is Ollama running? Start it with 'ollama serve'."
             ) from exc
         except APIStatusError as exc:
-            raise AgentError(f"Model server returned HTTP {exc.status_code}: {exc.message}") from exc
+            raise AgentError(
+                f"Model server returned HTTP {exc.status_code}: {exc.message}"
+            ) from exc
 
     def run(self, question: str) -> str:
         """Answer one question, running the ReAct loop until it settles."""
-        scratchpad: List[Dict[str, str]] = [{"role": "user", "content": question}]
+        scratchpad: list[ChatCompletionMessageParam] = [_user(question)]
         self.last_trace = []
 
         for iteration in range(1, self.config.max_steps + 1):
@@ -232,7 +271,7 @@ class ReActAgent:
             self.last_trace.append(step)
             self._trace(iteration, step)
 
-            scratchpad.append({"role": "assistant", "content": reply})
+            scratchpad.append(_assistant(reply))
 
             if step.final_answer is not None:
                 return self._remember(question, step.final_answer)
@@ -245,14 +284,14 @@ class ReActAgent:
                     "Thought: ...\nAction: <tool name>\nAction Input: <input>\n"
                     "or:\nThought: ...\nFinal Answer: <answer>"
                 )
-                scratchpad.append({"role": "user", "content": nudge})
+                scratchpad.append(_user(nudge))
                 step.observation = "(format correction sent)"
                 continue
 
             observation = run_tool(step.action, step.action_input or "")
             step.observation = observation
             self._trace_observation(observation)
-            scratchpad.append({"role": "user", "content": f"Observation: {observation}"})
+            scratchpad.append(_user(f"Observation: {observation}"))
 
         # Out of steps: ask for the best answer it can give from what it has.
         fallback = self._force_final_answer(scratchpad)
@@ -260,10 +299,12 @@ class ReActAgent:
 
     # -- internals --------------------------------------------------------- #
 
-    def _messages(self, scratchpad: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        return [{"role": "system", "content": self.system_prompt}, *self.history, *scratchpad]
+    def _messages(
+        self, scratchpad: list[ChatCompletionMessageParam]
+    ) -> list[ChatCompletionMessageParam]:
+        return [_system(self.system_prompt), *self.history, *scratchpad]
 
-    def _complete(self, scratchpad: List[Dict[str, str]], stop: bool = True) -> str:
+    def _complete(self, scratchpad: list[ChatCompletionMessageParam], stop: bool = True) -> str:
         try:
             response = self.client.chat.completions.create(
                 model=self.config.model,
@@ -277,23 +318,20 @@ class ReActAgent:
             ) from exc
         except APIStatusError as exc:
             hint = ""
-            if exc.status_code == 404:
+            if exc.status_code == _HTTP_NOT_FOUND:
                 hint = f" Pull the model first: 'ollama pull {self.config.model}'."
             raise AgentError(f"Model server error (HTTP {exc.status_code}).{hint}") from exc
 
         content = response.choices[0].message.content or ""
         return content.strip()
 
-    def _force_final_answer(self, scratchpad: List[Dict[str, str]]) -> str:
+    def _force_final_answer(self, scratchpad: list[ChatCompletionMessageParam]) -> str:
         scratchpad.append(
-            {
-                "role": "user",
-                "content": (
-                    f"You have used all {self.config.max_steps} available steps. "
-                    "Reply now with 'Thought:' followed by 'Final Answer:' only, "
-                    "using what you already know. Do not request another tool."
-                ),
-            }
+            _user(
+                f"You have used all {self.config.max_steps} available steps. "
+                "Reply now with 'Thought:' followed by 'Final Answer:' only, "
+                "using what you already know. Do not request another tool."
+            )
         )
         reply = self._complete(scratchpad, stop=False)
         step = _parse(reply)
@@ -303,8 +341,8 @@ class ReActAgent:
         return reply or "I ran out of reasoning steps before reaching an answer."
 
     def _remember(self, question: str, answer: str) -> str:
-        self.history.append({"role": "user", "content": question})
-        self.history.append({"role": "assistant", "content": answer})
+        self.history.append(_user(question))
+        self.history.append(_assistant(answer))
         return answer
 
     def _trace(self, iteration: int, step: Step) -> None:

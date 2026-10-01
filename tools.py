@@ -11,15 +11,15 @@ from __future__ import annotations
 import ast
 import math
 import operator
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Dict
 
 # --------------------------------------------------------------------------- #
 # calculate
 # --------------------------------------------------------------------------- #
 
-_BIN_OPS: Dict[type, Callable[[float, float], float]] = {
+_BIN_OPS: dict[type, Callable[[float, float], float]] = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
     ast.Mult: operator.mul,
@@ -29,14 +29,14 @@ _BIN_OPS: Dict[type, Callable[[float, float], float]] = {
     ast.Pow: operator.pow,
 }
 
-_UNARY_OPS: Dict[type, Callable[[float], float]] = {
+_UNARY_OPS: dict[type, Callable[[float], float]] = {
     ast.UAdd: operator.pos,
     ast.USub: operator.neg,
 }
 
-_CONSTANTS: Dict[str, float] = {"pi": math.pi, "e": math.e, "tau": math.tau}
+_CONSTANTS: dict[str, float] = {"pi": math.pi, "e": math.e, "tau": math.tau}
 
-_FUNCTIONS: Dict[str, Callable[..., float]] = {
+_FUNCTIONS: dict[str, Callable[..., float]] = {
     "abs": abs,
     "round": round,
     "min": min,
@@ -70,7 +70,7 @@ class CalculationError(ValueError):
     """Raised when an expression is unsupported or cannot be evaluated."""
 
 
-def _eval_node(node: ast.AST) -> float:
+def _eval_node(node: ast.AST) -> float:  # noqa: PLR0912 - one branch per allowed node type
     if isinstance(node, ast.Expression):
         return _eval_node(node.body)
 
@@ -80,21 +80,19 @@ def _eval_node(node: ast.AST) -> float:
         return node.value
 
     if isinstance(node, ast.BinOp):
-        op = _BIN_OPS.get(type(node.op))
-        if op is None:
+        binary_op = _BIN_OPS.get(type(node.op))
+        if binary_op is None:
             raise CalculationError(f"unsupported operator: {type(node.op).__name__}")
         left, right = _eval_node(node.left), _eval_node(node.right)
-        if op is operator.pow and abs(right) > _MAX_EXPONENT:
+        if binary_op is operator.pow and abs(right) > _MAX_EXPONENT:
             raise CalculationError(f"exponent too large (max {_MAX_EXPONENT})")
-        return op(left, right)
+        return binary_op(left, right)
 
     if isinstance(node, ast.UnaryOp):
-        op = _UNARY_OPS.get(type(node.op))
-        if op is None:
-            raise CalculationError(
-                f"unsupported unary operator: {type(node.op).__name__}"
-            )
-        return op(_eval_node(node.operand))
+        unary_op = _UNARY_OPS.get(type(node.op))
+        if unary_op is None:
+            raise CalculationError(f"unsupported unary operator: {type(node.op).__name__}")
+        return unary_op(_eval_node(node.operand))
 
     if isinstance(node, ast.Name):
         if node.id not in _CONSTANTS:
@@ -190,7 +188,7 @@ class Tool:
     run: Callable[[str], str]
 
 
-TOOLS: Dict[str, Tool] = {
+TOOLS: dict[str, Tool] = {
     "calculate": Tool(
         name="calculate",
         signature="calculate(expression: str)",
@@ -241,5 +239,5 @@ def run_tool(name: str, tool_input: str) -> str:
         return f"Error: unknown tool {name!r}. Available tools are: {tool_names()}."
     try:
         return tool.run(tool_input)
-    except Exception as exc:  # defensive: a tool must never crash the loop
+    except Exception as exc:  # noqa: BLE001 - a tool must never crash the loop
         return f"Error: tool {name!r} raised {type(exc).__name__}: {exc}"

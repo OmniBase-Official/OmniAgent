@@ -86,9 +86,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("OMNIAGENT_BASE_URL", DEFAULT_BASE_URL),
         help=f"OpenAI-compatible endpoint (default: {DEFAULT_BASE_URL}).",
     )
-    parser.add_argument("--max-steps", type=int, default=8, help="Max ReAct iterations (default: 8).")
-    parser.add_argument("--temperature", type=float, default=0.1, help="Sampling temperature (default: 0.1).")
-    parser.add_argument("--quiet", action="store_true", help="Hide the Thought/Action/Observation trace.")
+    parser.add_argument(
+        "--max-steps", type=int, default=8, help="Max ReAct iterations (default: 8)."
+    )
+    parser.add_argument(
+        "--temperature", type=float, default=0.1, help="Sampling temperature (default: 0.1)."
+    )
+    parser.add_argument(
+        "--quiet", action="store_true", help="Hide the Thought/Action/Observation trace."
+    )
     parser.add_argument("--ask", metavar="QUESTION", help="Answer one question and exit.")
     return parser.parse_args(argv)
 
@@ -105,7 +111,11 @@ def preflight(agent: ReActAgent) -> bool:
     print(Style.dim(f"    model    : {agent.config.model}"))
 
     if available and agent.config.model not in available:
-        print(Style.red(f"[!] Model '{agent.config.model}' is not installed on this Ollama server."))
+        print(
+            Style.red(
+                f"[!] Model '{agent.config.model}' is not installed on this Ollama server."
+            )
+        )
         print(Style.dim(f"    installed: {', '.join(available) or '(none)'}"))
         print(Style.dim(f"    fix      : ollama pull {agent.config.model}"))
         return False

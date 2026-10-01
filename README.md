@@ -18,7 +18,8 @@ keeps the loop in plain sight so you can read it, break it, and change it:
 | [`main.py`](main.py) | CLI entry point: argument parsing, preflight checks, REPL. |
 | [`agent.py`](agent.py) | The ReAct engine: system prompt, completion calls, output parsing, tool dispatch, memory. |
 | [`tools.py`](tools.py) | Tool implementations and the registry the prompt is generated from. |
-| [`test_offline.py`](test_offline.py) | Tests for the tools and the parser — runs without a model. |
+| [`observability.py`](observability.py) | Structured JSON-lines logging: session/turn/step context, credential redaction, truncation. |
+| [`tests/`](tests) | pytest suite for the tools, the parser and the logger — runs without a model. |
 
 ---
 
@@ -145,10 +146,16 @@ python -m venv .venv
 ```
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
 On macOS/Linux, activate with `source .venv/bin/activate`.
+
+To work on OmniAgent itself, install the lint/type/test toolchain too:
+
+```bash
+pip install -e ".[dev]"
+```
 
 ---
 
@@ -219,15 +226,43 @@ OmniAgent: 15% of 2400 plus the square root of 169 is 373, and today is Tuesday,
 
 ---
 
-## Tests
+## Logging
 
-The tools and the parser are covered by tests that need no model running:
+The console trace is for you; the log stream is for machines. Pass a log file
+and every step becomes one JSON object per line:
 
-```bash
-python test_offline.py
+```json
+{"ts":"2026-10-01T10:07:48.512Z","level":"INFO","logger":"omniagent","event":"agent.tool.call","message":"agent.tool.call","session_id":"a3f91c2b7e04","turn":1,"step":2,"tool":"calculate"}
 ```
 
-`pytest -q test_offline.py` works too, if you have pytest installed.
+Context is ambient — `session_id`, `turn` and `step` attach themselves through
+`observability.bind()` rather than being threaded through every call site.
+Fields whose names look like credentials (`api_key`, `token`, `password`, ...)
+are masked, including inside nested dicts, and long values such as prompts are
+truncated, so a log file stays safe to paste into a bug report.
+
+Logs never go to stdout: that belongs to the human-readable trace. Use a file,
+or `console=True` to stream JSON to stderr.
+
+---
+
+## Tests
+
+The tools, the parser and the logging core are covered by a pytest suite that
+needs no model running:
+
+```bash
+pytest
+```
+
+The same three gates run in development, and all three must be green:
+
+```bash
+ruff check . && mypy && pytest
+```
+
+`mypy` runs with `strict = true` over every module and the tests — see
+[`pyproject.toml`](pyproject.toml).
 
 ---
 
@@ -245,9 +280,10 @@ python test_offline.py
 
 ## Requirements
 
-- Python 3.9+ (developed on 3.12)
+- Python 3.10+ (developed on 3.12)
 - Ollama, running locally
-- `openai` and `pydantic` — see [`requirements.txt`](requirements.txt)
+- `openai` and `pydantic` — see [`pyproject.toml`](pyproject.toml)
+  (`requirements.txt` is kept as a mirror for `pip install -r`)
 
 ## License
 
