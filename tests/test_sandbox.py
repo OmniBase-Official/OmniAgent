@@ -60,25 +60,42 @@ def test_relative_traversal_is_refused(workspace: Workspace, escape: str) -> Non
         workspace.resolve(escape)
 
 
-@pytest.mark.parametrize(
-    "escape",
-    [
-        "..\\outside\\secret.txt",
-        "src\\..\\..\\outside\\secret.txt",
-        "..\\..\\Windows\\System32\\drivers\\etc\\hosts",
-    ],
-)
-def test_windows_style_traversal_is_refused(workspace: Workspace, escape: str) -> None:
-    """Refused everywhere, though not for the same reason everywhere.
+WINDOWS_STYLE_TRAVERSALS = [
+    "..\\outside\\secret.txt",
+    "src\\..\\..\\outside\\secret.txt",
+    "..\\..\\Windows\\System32\\drivers\\etc\\hosts",
+]
 
-    On Windows a backslash separates path components, so this is a traversal
-    and the containment check rejects it. On POSIX a backslash is an ordinary
-    character, so the whole thing is one filename beginning with '.' and the
-    hidden-file rule rejects it instead. What matters is that neither platform
-    hands back the file, which is what this asserts -- CI on Linux caught an
-    earlier version of this test asserting the Windows wording.
+
+@pytest.mark.parametrize("escape", WINDOWS_STYLE_TRAVERSALS)
+def test_a_windows_style_traversal_never_reaches_the_secret(
+    workspace: Workspace, escape: str
+) -> None:
+    """The same string is a traversal on one platform and a filename on the other.
+
+    On Windows a backslash separates components, so this walks out of the
+    workspace and the containment check refuses it. On POSIX a backslash is an
+    ordinary filename character, so the whole string names one file *inside*
+    the workspace -- which is not an escape, and resolving it is correct. Two
+    earlier versions of this test got that wrong: one asserted the Windows
+    error message, the next asserted that resolving always raises. CI on Linux
+    caught both.
+
+    What is true on every platform is that the file outside is never returned.
     """
-    with pytest.raises(SandboxError):
+    try:
+        text = workspace.read_text(escape)
+    except SandboxError:
+        return
+    assert "TOP SECRET" not in text
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="backslash is a separator here")
+@pytest.mark.parametrize("escape", WINDOWS_STYLE_TRAVERSALS)
+def test_a_windows_style_traversal_is_outside_the_workspace(
+    workspace: Workspace, escape: str
+) -> None:
+    with pytest.raises(SandboxError, match="outside the workspace"):
         workspace.resolve(escape)
 
 
