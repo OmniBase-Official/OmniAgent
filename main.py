@@ -20,6 +20,7 @@ from agent import (
     AgentConfig,
     AgentError,
     ReActAgent,
+    model_is_installed,
 )
 from sandbox import SandboxError, Workspace, set_workspace
 from tools import TOOLS
@@ -139,7 +140,7 @@ def preflight(agent: ReActAgent) -> bool:
     print(Style.dim(f"    endpoint : {agent.config.base_url}"))
     print(Style.dim(f"    model    : {agent.config.model}"))
 
-    if available and agent.config.model not in available:
+    if available and not model_is_installed(agent.config.model, available):
         print(
             Style.red(
                 f"[!] Model '{agent.config.model}' is not installed on this Ollama server."

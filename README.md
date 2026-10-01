@@ -21,6 +21,9 @@ keeps the loop in plain sight so you can read it, break it, and change it:
 | [`sandbox.py`](sandbox.py) | The filesystem boundary the file tools work inside, and its threat model. |
 | [`observability.py`](observability.py) | Structured JSON-lines logging: session/turn/step context, credential redaction, truncation. |
 | [`export_dataset.py`](export_dataset.py) | Replays run logs into a chat-format SFT dataset. |
+| [`validate_dataset.py`](validate_dataset.py) | Refuses a malformed dataset, or one containing a credential, before training. |
+| [`notebooks/`](notebooks) | The Colab LoRA fine-tune, merge and GGUF export. |
+| [`scripts/`](scripts) | CPU smoke test for the training pipeline, and the notebook generator. |
 | [`tests/`](tests) | pytest suite — tools, parser, logger, the loop and the exporter, all without a model. |
 
 ---
@@ -243,6 +246,13 @@ To work on OmniAgent itself, install the lint/type/test toolchain too:
 pip install -e ".[dev]"
 ```
 
+The fine-tuning pipeline has its own, much heavier, extras — only needed to
+run `scripts/smoke_train.py` locally, not to run the agent:
+
+```bash
+pip install -e ".[training]"
+```
+
 ---
 
 ## Usage
@@ -451,6 +461,90 @@ event's fields changes the dataset.
 
 ---
 
+## Fine-tuning on your own runs
+
+The loop fights small models drifting out of the Thought/Action/Observation
+format. A model trained on that exact format drifts less, and the dataset for it
+is already being collected every time you pass `--log-file`.
+
+```
+run the agent  ->  JSONL log  ->  export_dataset.py  ->  validate_dataset.py
+                                                              |
+                        Colab LoRA  <---------------------- dataset.jsonl
+                             |
+                        merge -> GGUF -> ollama create -> python main.py --model omniagent
+```
+
+### Validate before you train
+
+```bash
+python validate_dataset.py data/dataset.jsonl
+```
+
+```
+examples   : 12
+messages   : min 5, max 7, mean 6.0
+tools      : calculate: 6, read_file: 3, get_current_time: 3
+verdict    : OK
+```
+
+It refuses malformed conversations, and it refuses a dataset containing
+anything shaped like a credential — an OpenAI key, an AWS key, a GitHub or
+Slack token, a private key block, a bearer token, an `API_KEY=` assignment. A
+model trained on a leaked key will reproduce it, so this is an error rather
+than a warning. Too few examples, duplicates and a dataset with no tool use are
+warnings: your call.
+
+### The notebook
+
+[`notebooks/train_omniagent_lora.ipynb`](notebooks/train_omniagent_lora.ipynb)
+runs on a free Colab T4. It validates the dataset before loading a single
+weight, trains a LoRA adapter, merges it, converts to GGUF, writes a checksum
+manifest and a ready-to-use `Modelfile`.
+
+**Licensing matters here.** The default base model is `Qwen/Qwen2.5-1.5B-Instruct`,
+which is Apache-2.0. The 3B of the same family is released under a different,
+more restrictive licence. Read the model card of whatever you put in
+`BASE_MODEL` before you train, not after.
+
+Then, on the machine running Ollama:
+
+```bash
+ollama create omniagent -f Modelfile
+```
+
+```bash
+python main.py --model omniagent --ask "What is 23% of 1800?"
+```
+
+### What is actually verified
+
+The notebook wants a GPU, so it cannot run in this repo's test suite. Instead:
+
+- [`scripts/smoke_train.py`](scripts/smoke_train.py) runs **the same steps** on a
+  CPU with a 135M model — validate, load, LoRA-train, merge, generate — in about
+  a minute. An API change in transformers/trl/peft fails there rather than
+  twenty minutes into a Colab session.
+- [`tests/test_notebook.py`](tests/test_notebook.py) checks the notebook is valid
+  nbformat, that every code cell parses, that it ships no saved outputs, that the
+  version pins and argument names match what the smoke test exercised, and that
+  the `Modelfile` cell really produces the file `ollama create` accepts.
+
+The whole chain has been run once end to end on this machine with the 135M
+model: twelve logged runs became a dataset, the dataset trained an adapter, the
+merged model converted to a 269 MB GGUF, `ollama create` loaded it, and
+`python main.py --model omniagent-smoke --ask "What is 6 * 7?"` answered
+`6 * 7 = 42.`
+
+What that does **not** show is quality. A 135M model trained on twelve examples
+is a plumbing test, not a useful agent.
+
+```bash
+python scripts/smoke_train.py
+```
+
+---
+
 ## Tests
 
 Everything is covered by a pytest suite that needs no model running. A scripted
@@ -488,7 +582,7 @@ ruff check . && mypy && pytest
 
 ## Requirements
 
-- Python 3.10+ (developed on 3.12)
+- Python 3.12+
 - Ollama, running locally
 - `openai` and `pydantic` — see [`pyproject.toml`](pyproject.toml)
   (`requirements.txt` is kept as a mirror for `pip install -r`)

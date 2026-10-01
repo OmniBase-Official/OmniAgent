@@ -27,7 +27,7 @@ import logging
 import sys
 import uuid
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Final
@@ -178,7 +178,7 @@ class JsonLinesFormatter(logging.Formatter):
     """Render a record as a single-line JSON object."""
 
     def format(self, record: logging.LogRecord) -> str:
-        created = datetime.fromtimestamp(record.created, tz=timezone.utc)
+        created = datetime.fromtimestamp(record.created, tz=UTC)
         payload: dict[str, Any] = {
             "ts": created.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "level": record.levelname,

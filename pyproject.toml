@@ -7,7 +7,7 @@ name = "omniagent"
 version = "0.1.0"
 description = "A local-only ReAct agent running on Ollama, with no agent framework."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [
     "openai>=1.40.0,<3.0.0",
@@ -20,17 +20,30 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.8",
 ]
+# Only needed to run scripts/smoke_train.py; the agent itself needs none of it.
+# Pinned to the versions the smoke test was proved against.
+training = [
+    "torch>=2.4",
+    "transformers==5.17.0",
+    "trl==1.13.0",
+    "peft==0.21.0",
+    "datasets==5.0.1",
+    "accelerate",
+    "sentencepiece",
+    "protobuf",
+    "gguf",
+]
 
 [tool.setuptools]
 # Flat layout: the agent is a handful of top-level modules, not a package.
-py-modules = ["agent", "main", "tools", "observability", "export_dataset", "sandbox"]
+py-modules = ["agent", "main", "tools", "observability", "export_dataset", "sandbox", "validate_dataset"]
 
 # --------------------------------------------------------------------------- #
 # mypy - strict, no exceptions. Untyped code does not get merged.
 # --------------------------------------------------------------------------- #
 [tool.mypy]
-python_version = "3.10"
-files = ["agent.py", "main.py", "tools.py", "observability.py", "export_dataset.py", "sandbox.py", "tests"]
+python_version = "3.12"
+files = ["agent.py", "main.py", "tools.py", "observability.py", "export_dataset.py", "sandbox.py", "validate_dataset.py", "tests"]
 strict = true
 warn_unreachable = true
 warn_no_return = true
@@ -45,11 +58,16 @@ pretty = true
 module = "tests.*"
 disallow_any_decorated = false
 
+[[tool.mypy.overrides]]
+# The training stack is optional and only used by notebooks and scripts.
+module = ["torch.*", "transformers.*", "trl.*", "peft.*", "datasets.*", "accelerate.*"]
+ignore_missing_imports = true
+
 # --------------------------------------------------------------------------- #
 # ruff
 # --------------------------------------------------------------------------- #
 [tool.ruff]
-target-version = "py310"
+target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
@@ -97,6 +115,13 @@ ignore = [
 "main.py" = ["T20"]
 # The exporter is a CLI too.
 "export_dataset.py" = ["T20"]
+"validate_dataset.py" = ["T20"]
+# Dev scripts print, and smoke_train imports the training stack late on
+# purpose so a dataset problem is reported before torch loads.
+"scripts/*" = ["T20", "PLC0415", "E402"]
+# Notebook cells print, group imports on one line and shell out. Real checks
+# (F, E501, syntax) still apply, and tests/test_notebook.py covers the rest.
+"notebooks/*.ipynb" = ["T20", "E401", "E402", "I001", "S603", "S607", "ANN", "PTH123", "UP017"]
 # Tests assert, touch private helpers, and hard-code sample values on purpose.
 "tests/*" = ["S101", "SLF001", "PLR2004", "ANN201", "ARG001"]
 
@@ -104,7 +129,7 @@ ignore = [
 ban-relative-imports = "all"
 
 [tool.ruff.lint.isort]
-known-first-party = ["agent", "export_dataset", "main", "observability", "sandbox", "tools", "tests"]
+known-first-party = ["agent", "export_dataset", "main", "observability", "sandbox", "tools", "validate_dataset", "tests"]
 
 # --------------------------------------------------------------------------- #
 # pytest

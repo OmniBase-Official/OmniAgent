@@ -19,7 +19,7 @@ import logging
 import re
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from openai import APIConnectionError, APIStatusError, OpenAI
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
@@ -188,6 +188,22 @@ class AgentError(RuntimeError):
     """Raised when the loop cannot continue (e.g. the model is unreachable)."""
 
 
+def model_is_installed(requested: str, available: Iterable[str]) -> bool:
+    """Whether a model tag names one of the server's models.
+
+    Ollama stores an untagged model as ``name:latest`` but accepts ``name``,
+    so a plain string comparison refuses a model that is in fact installed --
+    which is exactly what happens to a model you just built yourself.
+    """
+    wanted = requested.strip()
+    if not wanted:
+        return False
+    candidates = {wanted, f"{wanted}:latest"}
+    if wanted.endswith(":latest"):
+        candidates.add(wanted.removesuffix(":latest"))
+    return any(name in candidates for name in available)
+
+
 def _parse(text: str) -> Step:
     """Turn one raw model reply into a structured :class:`Step`."""
     step = Step(raw=text)
@@ -334,7 +350,7 @@ class ReActAgent:
             logger=_log,
             base_url=self.config.base_url,
             model=self.config.model,
-            model_installed=self.config.model in available,
+            model_installed=model_is_installed(self.config.model, available),
             available=available,
         )
         return available

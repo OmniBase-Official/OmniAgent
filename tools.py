@@ -18,8 +18,8 @@ import math
 import operator
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Generic, TypeVar
+from datetime import UTC, datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -178,7 +178,7 @@ def calculate(expression: str) -> str:
 def get_current_time() -> str:
     """Return the current local date and time, plus the UTC equivalent."""
     now = datetime.now().astimezone()
-    utc = now.astimezone(timezone.utc)
+    utc = now.astimezone(UTC)
     return (
         f"Local time: {now.strftime('%Y-%m-%d %H:%M:%S')} "
         f"({now.strftime('%A')}, UTC{now.strftime('%z')}) | "
@@ -219,15 +219,12 @@ class NoArgs(ToolArgs):
 # registry
 # --------------------------------------------------------------------------- #
 
-ArgsT = TypeVar("ArgsT", bound=ToolArgs)
-
-
 def _type_name(annotation: object) -> str:
     return str(getattr(annotation, "__name__", annotation))
 
 
 @dataclass(frozen=True)
-class Tool(Generic[ArgsT]):
+class Tool[ArgsT: ToolArgs]:
     """A single callable exposed to the agent.
 
     Arguments are described by a pydantic model rather than parsed by each tool,
@@ -363,7 +360,7 @@ def _format_validation_error(tool: Tool[Any], error: ValidationError) -> str:
     )
 
 
-def parse_tool_args(tool: Tool[ArgsT], raw_input: str) -> ArgsT:
+def parse_tool_args[ArgsT: ToolArgs](tool: Tool[ArgsT], raw_input: str) -> ArgsT:
     """Turn a raw ``Action Input`` line into a validated arguments model.
 
     Three shapes are accepted, because small models reach for all of them:
