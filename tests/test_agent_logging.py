@@ -200,6 +200,32 @@ def test_an_unknown_tool_is_logged_by_the_registry(log_file: Path) -> None:
     assert "calculate" in unknown["available"]
 
 
+def test_the_agent_recovers_from_bad_tool_arguments(log_file: Path) -> None:
+    """The validation error has to be good enough to fix the next attempt.
+
+    Step 1 invents a field name; the Observation names the real one, and the
+    model's next attempt succeeds.
+    """
+    fake = FakeOpenAI(
+        replies=[
+            'Thought: maths\nAction: calculate\nAction Input: {"formula": "2 + 2"}',
+            "Thought: retry\nAction: calculate\nAction Input: 2 + 2",
+            "Thought: done\nFinal Answer: It is 4.",
+        ]
+    )
+    agent = build(fake)
+
+    assert agent.run("What is 2 + 2?") == "It is 4."
+
+    invalid = only(log_file, "tool.invalid_args")
+    assert invalid["tool"] == "calculate"
+    assert "expression" in invalid["reason"], "the error must name the field that was wanted"
+
+    results = [r for r in records(log_file) if r["event"] == "agent.tool.result"]
+    assert [r["ok"] for r in results] == [False, True]
+    assert results[1]["observation"] == "2 + 2 = 4"
+
+
 def test_a_format_violation_is_logged_with_the_offending_reply(log_file: Path) -> None:
     fake = FakeOpenAI(
         replies=["Sure! The answer is probably 4.", "Thought: done\nFinal Answer: It is 4."]

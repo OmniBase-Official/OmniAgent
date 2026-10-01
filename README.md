@@ -17,7 +17,7 @@ keeps the loop in plain sight so you can read it, break it, and change it:
 |---|---|
 | [`main.py`](main.py) | CLI entry point: argument parsing, preflight checks, REPL. |
 | [`agent.py`](agent.py) | The ReAct engine: system prompt, completion calls, output parsing, tool dispatch, memory. |
-| [`tools.py`](tools.py) | Tool implementations and the registry the prompt is generated from. |
+| [`tools.py`](tools.py) | Tool implementations, their pydantic argument schemas, and the registry the prompt is generated from. |
 | [`observability.py`](observability.py) | Structured JSON-lines logging: session/turn/step context, credential redaction, truncation. |
 | [`tests/`](tests) | pytest suite for the tools, the parser and the logger — runs without a model. |
 
@@ -83,24 +83,60 @@ walked against an explicit allow-list, so `__import__('os').system(...)` and
 friends return an error instead of running. Exponents and factorials are capped
 so `9 ** 9 ** 9` cannot exhaust memory.
 
-Tools never raise: failures come back as `Error: ...` strings, which the agent
-reads as an Observation and can recover from.
+### Typed arguments
+
+A tool declares its arguments as a pydantic model and receives a validated
+instance. One declaration drives three things: validation, the signature printed
+into the system prompt, and the error message the model reads when it gets the
+call wrong.
+
+The dispatcher accepts the three input shapes small models actually emit:
+
+| Action Input | Becomes |
+|---|---|
+| `2 + 2` | the bare value, for a tool with exactly one field |
+| `{"expression": "2 + 2"}` | a JSON object, for any tool |
+| `none` | nothing, for a tool with no fields |
+
+A bad call never reaches the tool. It comes back as an Observation specific
+enough to fix:
+
+```
+Action Input: {"formula": "2 + 2"}
+Observation: Error: invalid arguments for calculate(expression: str) --
+             formula: Extra inputs are not permitted. Action Input should be
+             the expression itself on one line, e.g. '(1250 * 0.07) + sqrt(144)'.
+```
+
+Tools never raise either: a crash is caught, logged with a traceback, and
+returned as `Error: ...`.
 
 ### Adding your own
 
-Add an entry to `TOOLS` in [`tools.py`](tools.py) — the system prompt is
-generated from that registry, so the model learns about the new tool
-automatically:
+Declare a schema and a handler, then register them. The system prompt is
+generated from the registry, so the model learns the new tool and its argument
+names automatically:
 
 ```python
+class ReverseTextArgs(ToolArgs):
+    text: str = Field(description="The text to reverse.")
+
+
+def _run_reverse_text(args: ReverseTextArgs) -> str:
+    return args.text[::-1]
+
+
 TOOLS["reverse_text"] = Tool(
     name="reverse_text",
-    signature="reverse_text(text: str)",
     description="Reverse a string. Use it when the user asks for text backwards.",
+    args_model=ReverseTextArgs,
+    run=_run_reverse_text,
     example="hello world",
-    run=lambda text: text[::-1],
 )
 ```
+
+`mypy` enforces the pairing: giving `run` a handler that does not accept
+`ReverseTextArgs` is a type error, not a runtime surprise.
 
 ---
 

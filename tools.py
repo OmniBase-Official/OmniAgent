@@ -1,9 +1,13 @@
 """Tool implementations exposed to the OmniAgent ReAct loop.
 
-Every tool receives a single string (the raw ``Action Input`` emitted by the
-model) and returns a string that is fed straight back as the ``Observation``.
-Tools never raise: a failure is returned as an error string so the agent can
-read it, reason about it, and retry.
+Each tool declares its arguments as a pydantic model and receives a validated
+instance of it. The raw ``Action Input`` line the model emitted is turned into
+that model by :func:`parse_tool_args`, which accepts the shapes small models
+actually produce -- a bare value, a JSON object, or nothing.
+
+Dispatch never raises: bad arguments and crashing tools both come back as an
+``Error: ...`` string, which the agent reads as an Observation and can recover
+from.
 """
 
 from __future__ import annotations
@@ -15,6 +19,9 @@ import operator
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any, Generic, TypeVar
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import observability as obs
 
@@ -161,12 +168,13 @@ def calculate(expression: str) -> str:
     return f"{expression} = {result}"
 
 
+
 # --------------------------------------------------------------------------- #
 # get_current_time
 # --------------------------------------------------------------------------- #
 
 
-def get_current_time(_unused: str = "") -> str:
+def get_current_time() -> str:
     """Return the current local date and time, plus the UTC equivalent."""
     now = datetime.now().astimezone()
     utc = now.astimezone(timezone.utc)
@@ -178,63 +186,200 @@ def get_current_time(_unused: str = "") -> str:
 
 
 # --------------------------------------------------------------------------- #
-# registry
+# argument schemas
 # --------------------------------------------------------------------------- #
 
 
+class ToolArgs(BaseModel):
+    """Base class for a tool's arguments.
+
+    ``extra="forbid"`` matters here: when a model invents a field name we want a
+    validation error it can read and correct, not a silently ignored value.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class CalculateArgs(ToolArgs):
+    expression: str = Field(
+        min_length=1,
+        max_length=_MAX_EXPRESSION_LEN,
+        description=(
+            "The arithmetic expression to evaluate, e.g. '(1250 * 0.07) + sqrt(144)'."
+        ),
+    )
+
+
+class NoArgs(ToolArgs):
+    """For tools that take nothing at all."""
+
+
+# --------------------------------------------------------------------------- #
+# registry
+# --------------------------------------------------------------------------- #
+
+ArgsT = TypeVar("ArgsT", bound=ToolArgs)
+
+
+def _type_name(annotation: object) -> str:
+    return str(getattr(annotation, "__name__", annotation))
+
+
 @dataclass(frozen=True)
-class Tool:
-    """A single callable exposed to the agent."""
+class Tool(Generic[ArgsT]):
+    """A single callable exposed to the agent.
+
+    Arguments are described by a pydantic model rather than parsed by each tool,
+    so validation, the error message a model sees, and the signature printed
+    into the system prompt all come from one declaration.
+    """
 
     name: str
-    signature: str
     description: str
+    args_model: type[ArgsT]
+    run: Callable[[ArgsT], str]
     example: str
-    run: Callable[[str], str]
+
+    @property
+    def signature(self) -> str:
+        """``name(field: type, ...)``, derived from the schema."""
+        params = ", ".join(
+            f"{field_name}: {_type_name(field.annotation)}"
+            for field_name, field in self.args_model.model_fields.items()
+        )
+        return f"{self.name}({params})"
 
 
-TOOLS: dict[str, Tool] = {
+def _run_calculate(args: CalculateArgs) -> str:
+    return calculate(args.expression)
+
+
+def _run_get_current_time(_args: NoArgs) -> str:
+    return get_current_time()
+
+
+TOOLS: dict[str, Tool[Any]] = {
     "calculate": Tool(
         name="calculate",
-        signature="calculate(expression: str)",
         description=(
             "Evaluate a mathematical expression. Use it for ANY arithmetic instead "
             "of doing the maths yourself. Supports + - * / // % ** ( ), the "
             "constants pi/e/tau and functions such as sqrt, log, log10, exp, sin, "
             "cos, tan, floor, ceil, round, abs, min, max, factorial."
         ),
+        args_model=CalculateArgs,
+        run=_run_calculate,
         example="(1250 * 0.07) + sqrt(144)",
-        run=calculate,
     ),
     "get_current_time": Tool(
         name="get_current_time",
-        signature="get_current_time()",
         description=(
             "Return the current local date and time (and the UTC equivalent). "
             "Takes no arguments. Use it whenever the user asks about 'now', "
             "'today', the date, the day of the week, or the current time."
         ),
+        args_model=NoArgs,
+        run=_run_get_current_time,
         example="none",
-        run=get_current_time,
     ),
 }
 
 
+class ToolArgumentError(ValueError):
+    """Raised when an Action Input cannot be turned into a tool's arguments."""
+
+
+# --------------------------------------------------------------------------- #
+# prompt rendering
+# --------------------------------------------------------------------------- #
+
+
+def _describe_fields(tool: Tool[Any]) -> str:
+    lines = []
+    for field_name, field in tool.args_model.model_fields.items():
+        required = "required" if field.is_required() else "optional"
+        lines.append(
+            f"    {field_name} ({_type_name(field.annotation)}, {required}): "
+            f"{field.description or ''}".rstrip()
+        )
+    return "\n".join(lines)
+
+
 def describe_tools() -> str:
-    """Render the tool catalogue for injection into the system prompt."""
+    """Render the tool catalogue for injection into the system prompt.
+
+    Generated from the schemas, so the prompt cannot drift away from the code.
+    """
     blocks = []
     for tool in TOOLS.values():
-        blocks.append(
-            f"- {tool.signature}\n"
-            f"  {tool.description}\n"
-            f"  Example -> Action: {tool.name}\n"
-            f"             Action Input: {tool.example}"
-        )
+        block = f"- {tool.signature}\n  {tool.description}"
+        fields = _describe_fields(tool)
+        if fields:
+            block += f"\n  Arguments:\n{fields}"
+        block += f"\n  Example -> Action: {tool.name}\n             Action Input: {tool.example}"
+        blocks.append(block)
     return "\n".join(blocks)
 
 
 def tool_names() -> str:
     return ", ".join(TOOLS)
+
+
+# --------------------------------------------------------------------------- #
+# argument parsing + dispatch
+# --------------------------------------------------------------------------- #
+
+
+def _input_hint(tool: Tool[Any]) -> str:
+    """How this tool's Action Input should look, in one phrase."""
+    fields = tool.args_model.model_fields
+    if not fields:
+        return "'none', since this tool takes no arguments."
+    if len(fields) == 1:
+        only_field = next(iter(fields))
+        return f"the {only_field} itself on one line, e.g. '{tool.example}'."
+    names = ", ".join(f'"{name}": ...' for name in fields)
+    return "a JSON object, e.g. {" + names + "}."
+
+
+def _format_validation_error(tool: Tool[Any], error: ValidationError) -> str:
+    """Turn a pydantic error into something a 7B model can act on."""
+    problems = [
+        f"{'.'.join(str(part) for part in item['loc']) or 'input'}: {item['msg']}"
+        for item in error.errors()
+    ]
+    return (
+        f"invalid arguments for {tool.signature} -- "
+        + "; ".join(problems)
+        + f". Action Input should be {_input_hint(tool)}"
+    )
+
+
+def parse_tool_args(tool: Tool[ArgsT], raw_input: str) -> ArgsT:
+    """Turn a raw ``Action Input`` line into a validated arguments model.
+
+    Three shapes are accepted, because small models reach for all of them:
+
+    * a JSON object -- ``{"expression": "2 + 2"}``
+    * the bare value, for a tool with exactly one field -- ``2 + 2``
+    * nothing at all, for a tool with no fields
+    """
+    value = raw_input.strip()
+    fields = tool.args_model.model_fields
+
+    try:
+        if value.startswith("{"):
+            return tool.args_model.model_validate_json(value)
+        if not fields:
+            return tool.args_model()
+        if len(fields) == 1:
+            return tool.args_model.model_validate({next(iter(fields)): value})
+    except ValidationError as exc:
+        raise ToolArgumentError(_format_validation_error(tool, exc)) from exc
+
+    raise ToolArgumentError(
+        f"invalid arguments for {tool.signature} -- Action Input should be {_input_hint(tool)}"
+    )
 
 
 def run_tool(name: str, tool_input: str) -> str:
@@ -249,8 +394,22 @@ def run_tool(name: str, tool_input: str) -> str:
             available=list(TOOLS),
         )
         return f"Error: unknown tool {name!r}. Available tools are: {tool_names()}."
+
     try:
-        return tool.run(tool_input)
+        args = parse_tool_args(tool, tool_input)
+    except ToolArgumentError as exc:
+        obs.event(
+            "tool.invalid_args",
+            logger=_log,
+            level=logging.WARNING,
+            tool=tool.name,
+            tool_input=tool_input,
+            reason=str(exc),
+        )
+        return f"Error: {exc}"
+
+    try:
+        return tool.run(args)
     except Exception as exc:  # noqa: BLE001 - a tool must never crash the loop
         obs.event(
             "tool.crashed",

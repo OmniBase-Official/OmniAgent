@@ -4,7 +4,16 @@ from __future__ import annotations
 
 import pytest
 
-from tools import TOOLS, calculate, describe_tools, get_current_time, run_tool, tool_names
+from tools import (
+    TOOLS,
+    CalculateArgs,
+    Tool,
+    calculate,
+    describe_tools,
+    get_current_time,
+    run_tool,
+    tool_names,
+)
 
 
 @pytest.mark.parametrize(
@@ -76,8 +85,10 @@ def test_get_current_time_shape() -> None:
     assert "UTC:" in result
 
 
-def test_get_current_time_ignores_its_argument() -> None:
-    assert get_current_time("none").startswith("Local time:")
+@pytest.mark.parametrize("junk", ["", "none", "(none)", "today please"])
+def test_a_no_arg_tool_ignores_whatever_the_model_sent(junk: str) -> None:
+    """get_current_time() takes nothing, so the Action Input is discarded."""
+    assert run_tool("get_current_time", junk).startswith("Local time:")
 
 
 def test_run_tool_dispatch() -> None:
@@ -89,16 +100,16 @@ def test_run_tool_dispatch() -> None:
 def test_run_tool_never_raises() -> None:
     """A tool that explodes must come back as an Observation, not an exception."""
 
-    def boom(_: str) -> str:
+    def boom(_args: CalculateArgs) -> str:
         raise RuntimeError("kaboom")
 
     original = TOOLS["calculate"]
-    TOOLS["calculate"] = original.__class__(
+    TOOLS["calculate"] = Tool(
         name="calculate",
-        signature=original.signature,
         description=original.description,
-        example=original.example,
+        args_model=CalculateArgs,
         run=boom,
+        example=original.example,
     )
     try:
         result = run_tool("calculate", "1 + 1")
