@@ -19,7 +19,7 @@ keeps the loop in plain sight so you can read it, break it, and change it:
 | [`agent.py`](agent.py) | The ReAct engine: system prompt, completion calls, output parsing, tool dispatch, memory. |
 | [`tools.py`](tools.py) | Tool implementations, their pydantic argument schemas, and the registry the prompt is generated from. |
 | [`observability.py`](observability.py) | Structured JSON-lines logging: session/turn/step context, credential redaction, truncation. |
-| [`tests/`](tests) | pytest suite for the tools, the parser and the logger — runs without a model. |
+| [`tests/`](tests) | pytest suite — tools, parser, logger and the loop itself, all without a model. |
 
 ---
 
@@ -308,8 +308,11 @@ or `console=True` to stream JSON to stderr.
 
 ## Tests
 
-The tools, the parser and the logging core are covered by a pytest suite that
-needs no model running:
+Everything is covered by a pytest suite that needs no model running. A scripted
+fake client in [`tests/fakes.py`](tests/fakes.py) stands in for Ollama, so the
+loop's behaviour — the messages it sends, what it remembers between turns, how
+it handles a model that breaks format, where the step budget bites — is tested
+deterministically:
 
 ```bash
 pytest
