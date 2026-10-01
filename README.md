@@ -19,6 +19,7 @@ keeps the loop in plain sight so you can read it, break it, and change it:
 | [`agent.py`](agent.py) | The ReAct engine: system prompt, completion calls, output parsing, tool dispatch, memory. |
 | [`tools.py`](tools.py) | Tool implementations, their pydantic argument schemas, and the registry the prompt is generated from. |
 | [`sandbox.py`](sandbox.py) | The filesystem boundary the file tools work inside, and its threat model. |
+| [`config.py`](config.py) | One settings model, and the documented precedence that fills it. |
 | [`observability.py`](observability.py) | Structured JSON-lines logging: session/turn/step context, credential redaction, truncation. |
 | [`export_dataset.py`](export_dataset.py) | Replays run logs into a chat-format SFT dataset. |
 | [`validate_dataset.py`](validate_dataset.py) | Refuses a malformed dataset, or one containing a credential, before training. |
@@ -288,11 +289,79 @@ python main.py --model qwen2.5-coder:7b --quiet
 | `--log-file` | — | Append structured JSON-lines logs here (env: `OMNIAGENT_LOG_FILE`). |
 | `--log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` (env: `OMNIAGENT_LOG_LEVEL`). |
 | `--log-console` | off | Also stream the JSON logs to stderr. |
-| `--workspace` | cwd | Directory the file tools may read inside (env: `OMNIAGENT_WORKSPACE`). |
+| `--workspace` | cwd | Directory the file tools may read inside. |
+| `--max-retries` | `2` | Retries after a transient model-server failure. |
+| `--timeout` | `180` | Per-request timeout in seconds. |
+| `--config` | `./omniagent.toml` | Config file to read. |
+| `--profile` | — | Named `[profile.NAME]` section to apply. |
+| `--print-config` | — | Show every resolved setting and its source, then exit. |
+
+Every setting in the table has a matching `OMNIAGENT_<NAME>` environment
+variable; see [Settings](#settings) for the precedence.
 
 ### REPL commands
 
 `/help` · `/tools` · `/reset` · `/quit`
+
+---
+
+## Settings
+
+Every setting has one home and one precedence, and the agent will tell you
+which layer each value came from:
+
+```
+command line  >  environment  >  .env  >  [profile.NAME]  >  [defaults]  >  built-in
+```
+
+`omniagent.toml` in the working directory is picked up automatically, or point
+at one with `--config`:
+
+```toml
+[defaults]
+model = "qwen2.5-coder:7b"
+log_level = "INFO"
+
+[profile.demo]
+max_steps = 12
+log_file = "data/demo.jsonl"
+temperature = 0.0
+
+[profile.collect]
+log_file = "data/collect.jsonl"
+log_level = "DEBUG"
+verbose = false
+```
+
+```bash
+python main.py --profile demo --ask "What is 23% of 1800?"
+```
+
+Stuck on why a setting is what it is? Ask:
+
+```bash
+python main.py --profile demo --print-config
+```
+
+```
+model                 qwen2.5-coder:7b                    file:defaults
+base_url              http://localhost:11434/v1           built-in
+api_key               ***redacted***                      built-in
+temperature           0.0                                 profile:demo
+max_steps             12                                  profile:demo
+log_file              data/demo.jsonl                     profile:demo
+```
+
+Every setting also has an environment variable, `OMNIAGENT_` plus its name in
+upper case — `OMNIAGENT_MODEL`, `OMNIAGENT_MAX_STEPS`, `OMNIAGENT_LOG_FILE`. A
+`.env` file beside the config supplies the same names; the real environment
+wins over it. That parser is deliberately boring: `KEY=value`, `#` comments,
+optional quotes. No substitution, no expansion, nothing executed.
+
+A typo is an error, not a silent default — `modle = "..."` is refused with a
+list of the settings that do exist, and so is an unknown `--profile`, an
+out-of-range value (naming the layer that supplied it) and an invalid log
+level. `api_key` is never printed back.
 
 ---
 

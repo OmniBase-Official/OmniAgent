@@ -17,15 +17,13 @@ import observability as obs
 from agent import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
-    AgentConfig,
     AgentError,
     ReActAgent,
     model_is_installed,
 )
+from config import DEFAULT_CONFIG_NAME, LOG_LEVELS, ConfigError, render, resolve
 from sandbox import SandboxError, Workspace, set_workspace
 from tools import TOOLS
-
-LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 
 BANNER = r"""
   ___                  _    _                 _
@@ -79,54 +77,86 @@ class Style:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse the command line.
+
+    Every setting defaults to None so that an unused flag does not outrank the
+    config file; config.resolve() applies the real defaults.
+    """
     parser = argparse.ArgumentParser(
         prog="omniagent",
         description="A local-only ReAct agent running on Ollama.",
     )
-    parser.add_argument(
-        "--model",
-        default=os.environ.get("OMNIAGENT_MODEL", DEFAULT_MODEL),
-        help=f"Ollama model tag (default: {DEFAULT_MODEL}).",
-    )
-    parser.add_argument(
-        "--base-url",
-        default=os.environ.get("OMNIAGENT_BASE_URL", DEFAULT_BASE_URL),
-        help=f"OpenAI-compatible endpoint (default: {DEFAULT_BASE_URL}).",
-    )
-    parser.add_argument(
-        "--max-steps", type=int, default=8, help="Max ReAct iterations (default: 8)."
-    )
-    parser.add_argument(
-        "--temperature", type=float, default=0.1, help="Sampling temperature (default: 0.1)."
-    )
-    parser.add_argument(
-        "--quiet", action="store_true", help="Hide the Thought/Action/Observation trace."
-    )
     parser.add_argument("--ask", metavar="QUESTION", help="Answer one question and exit.")
     parser.add_argument(
-        "--log-file",
-        type=Path,
-        default=os.environ.get("OMNIAGENT_LOG_FILE"),
-        help="Append structured JSON-lines logs to this file.",
+        "--config", type=Path, help=f"Config file to read (default: ./{DEFAULT_CONFIG_NAME})."
     )
+    parser.add_argument("--profile", help="Named [profile.NAME] section to apply.")
     parser.add_argument(
-        "--log-level",
-        choices=LOG_LEVELS,
-        default=os.environ.get("OMNIAGENT_LOG_LEVEL", "INFO"),
-        help="Minimum level for the structured log (default: INFO).",
+        "--print-config",
+        action="store_true",
+        help="Show every resolved setting and where it came from, then exit.",
     )
-    parser.add_argument(
-        "--workspace",
-        type=Path,
-        default=os.environ.get("OMNIAGENT_WORKSPACE"),
-        help="Directory the file tools may read inside (default: the current directory).",
+
+    settings = parser.add_argument_group("settings (override the config file)")
+    settings.add_argument("--model", help=f"Ollama model tag (default: {DEFAULT_MODEL}).")
+    settings.add_argument(
+        "--base-url", help=f"OpenAI-compatible endpoint (default: {DEFAULT_BASE_URL})."
     )
-    parser.add_argument(
+    settings.add_argument("--max-steps", type=int, help="Max ReAct iterations (default: 8).")
+    settings.add_argument(
+        "--temperature", type=float, help="Sampling temperature (default: 0.1)."
+    )
+    settings.add_argument(
+        "--max-retries", type=int, help="Retries after a transient failure (default: 2)."
+    )
+    settings.add_argument(
+        "--timeout", type=float, help="Per-request timeout in seconds (default: 180)."
+    )
+    settings.add_argument(
+        "--workspace", type=Path, help="Directory the file tools may read inside."
+    )
+    settings.add_argument(
+        "--log-file", type=Path, help="Append structured JSON-lines logs to this file."
+    )
+    settings.add_argument(
+        "--log-level", choices=LOG_LEVELS, help="Minimum level for the log (default: INFO)."
+    )
+    settings.add_argument(
         "--log-console",
         action="store_true",
+        default=None,
         help="Also stream the JSON logs to stderr (stdout keeps the readable trace).",
     )
+    settings.add_argument(
+        "--quiet",
+        action="store_true",
+        default=None,
+        help="Hide the Thought/Action/Observation trace.",
+    )
     return parser.parse_args(argv)
+
+
+def cli_settings(args: argparse.Namespace) -> dict[str, object]:
+    """The settings the user actually passed, as config.resolve() wants them."""
+    supplied: dict[str, object] = {
+        name: getattr(args, name)
+        for name in (
+            "model",
+            "base_url",
+            "max_steps",
+            "temperature",
+            "max_retries",
+            "timeout",
+            "workspace",
+            "log_file",
+            "log_level",
+            "log_console",
+        )
+        if getattr(args, name) is not None
+    }
+    if args.quiet is not None:
+        supplied["verbose"] = not args.quiet
+    return supplied
 
 
 def preflight(agent: ReActAgent) -> bool:
@@ -209,19 +239,30 @@ def main(argv: list[str] | None = None) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
+    try:
+        settings, sources = resolve(
+            cli_settings(args), config_path=args.config, profile=args.profile
+        )
+    except ConfigError as exc:
+        print(Style.red(f"[!] {exc}"))
+        return 2
+
+    if args.print_config:
+        print(render(settings, sources))
+        return 0
+
     # Structured logging must be live before the agent is built, so that even
     # construction and preflight end up in the log.
-    log_file = Path(args.log_file) if args.log_file else None
     session_id = obs.configure(
-        level=args.log_level,
-        log_file=log_file,
-        console=args.log_console,
+        level=settings.log_level,
+        log_file=settings.log_file,
+        console=settings.log_console,
     )
 
-    log_resolved = log_file.resolve() if log_file is not None else None
+    log_resolved = settings.log_file.resolve() if settings.log_file is not None else None
     try:
         workspace = Workspace.at(
-            args.workspace or Path.cwd(),
+            settings.workspace,
             # The agent must not read its own log back: that would replay
             # earlier conversations into the context and into the dataset.
             denied_paths=frozenset({log_resolved} if log_resolved else ()),
@@ -231,21 +272,18 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     set_workspace(workspace)
 
-    config = AgentConfig(
-        model=args.model,
-        base_url=args.base_url,
-        max_steps=args.max_steps,
-        temperature=args.temperature,
-        verbose=not args.quiet,
+    agent = ReActAgent(
+        config=settings.agent_config(), printer=lambda text: print(Style.dim(text))
     )
-    agent = ReActAgent(config=config, printer=lambda text: print(Style.dim(text)))
 
     print(Style.cyan(BANNER))
+    if args.profile:
+        print(Style.dim(f"    profile  : {args.profile}"))
     print(Style.dim(f"    workspace: {workspace.root}"))
-    if log_file is not None or args.log_console:
+    if settings.log_file is not None or settings.log_console:
         print(Style.dim(f"    session  : {session_id}"))
-        if log_file is not None:
-            print(Style.dim(f"    log      : {log_file}"))
+        if settings.log_file is not None:
+            print(Style.dim(f"    log      : {settings.log_file}"))
     if not preflight(agent):
         return 1
 

@@ -26,3 +26,6 @@ Thumbs.db
 # Structured run logs
 *.jsonl
 data/
+
+# Local settings (profiles live in omniagent.toml, which IS committed)
+omniagent.local.toml

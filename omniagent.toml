@@ -1,0 +1,18 @@
+# OmniAgent settings. Command line > environment > .env > profile > defaults.
+
+[defaults]
+model = "qwen2.5-coder:7b"
+log_level = "INFO"
+max_steps = 8
+
+[profile.demo]
+# What the Saturday run uses: more room to think, and everything logged.
+max_steps = 12
+log_file = "data/demo.jsonl"
+temperature = 0.0
+
+[profile.collect]
+# Build up training data: log everything, quiet console.
+log_file = "data/collect.jsonl"
+log_level = "DEBUG"
+verbose = false
