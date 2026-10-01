@@ -23,14 +23,14 @@ dev = [
 
 [tool.setuptools]
 # Flat layout: the agent is a handful of top-level modules, not a package.
-py-modules = ["agent", "main", "tools", "observability"]
+py-modules = ["agent", "main", "tools", "observability", "export_dataset"]
 
 # --------------------------------------------------------------------------- #
 # mypy - strict, no exceptions. Untyped code does not get merged.
 # --------------------------------------------------------------------------- #
 [tool.mypy]
 python_version = "3.10"
-files = ["agent.py", "main.py", "tools.py", "observability.py", "tests"]
+files = ["agent.py", "main.py", "tools.py", "observability.py", "export_dataset.py", "tests"]
 strict = true
 warn_unreachable = true
 warn_no_return = true
@@ -95,6 +95,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # The CLI is the one place allowed to write to stdout.
 "main.py" = ["T20"]
+# The exporter is a CLI too.
+"export_dataset.py" = ["T20"]
 # Tests assert, touch private helpers, and hard-code sample values on purpose.
 "tests/*" = ["S101", "SLF001", "PLR2004", "ANN201", "ARG001"]
 
@@ -102,7 +104,7 @@ ignore = [
 ban-relative-imports = "all"
 
 [tool.ruff.lint.isort]
-known-first-party = ["agent", "main", "observability", "tools", "tests"]
+known-first-party = ["agent", "export_dataset", "main", "observability", "tools", "tests"]
 
 # --------------------------------------------------------------------------- #
 # pytest

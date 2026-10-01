@@ -14,6 +14,7 @@ The loop is deliberately small and readable:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import time
@@ -277,10 +278,19 @@ class ReActAgent:
         obs.event(
             "agent.created",
             logger=_log,
-            level=logging.DEBUG,
+            # INFO, not DEBUG: this record carries the system prompt the dataset
+            # exporter replays, so a log written at the default level has to
+            # contain it or none of the run is usable for training.
+            level=logging.INFO,
             # api_key is redacted by the formatter, which this proves.
             config=self.config.model_dump(),
             tools=list(TOOLS),
+            # The exporter replays this verbatim as the system turn, and the
+            # digest tells runs made with different prompts apart.
+            system_prompt=self.system_prompt,
+            system_prompt_sha256=hashlib.sha256(
+                self.system_prompt.encode("utf-8")
+            ).hexdigest(),
         )
 
     # -- public API -------------------------------------------------------- #

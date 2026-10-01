@@ -19,7 +19,8 @@ keeps the loop in plain sight so you can read it, break it, and change it:
 | [`agent.py`](agent.py) | The ReAct engine: system prompt, completion calls, output parsing, tool dispatch, memory. |
 | [`tools.py`](tools.py) | Tool implementations, their pydantic argument schemas, and the registry the prompt is generated from. |
 | [`observability.py`](observability.py) | Structured JSON-lines logging: session/turn/step context, credential redaction, truncation. |
-| [`tests/`](tests) | pytest suite — tools, parser, logger and the loop itself, all without a model. |
+| [`export_dataset.py`](export_dataset.py) | Replays run logs into a chat-format SFT dataset. |
+| [`tests/`](tests) | pytest suite — tools, parser, logger, the loop and the exporter, all without a model. |
 
 ---
 
@@ -339,6 +340,64 @@ truncated, so a log file stays safe to paste into a bug report.
 
 Logs never go to stdout: that belongs to the human-readable trace. Use a file,
 or `console=True` to stream JSON to stderr.
+
+---
+
+## Training data from your own runs
+
+The log already records the exact conversation the model saw: the system
+prompt, the question, each raw reply and each Observation. That is a supervised
+fine-tuning dataset, so there is no separate collection step — just run the
+agent with `--log-file`, then replay:
+
+```bash
+python export_dataset.py "data/*.jsonl" -o data/dataset.jsonl --stats
+```
+
+```
+turns seen : 3
+exported   : 3
+step counts: 2 steps: 2, 3 steps: 1
+tools      : calculate: 2, get_current_time: 2
+```
+
+Each line of the output is one turn in the format TRL and transformers consume:
+
+```json
+{"messages": [
+  {"role": "system",    "content": "You are OmniAgent..."},
+  {"role": "user",      "content": "What is 15% of 2400 plus sqrt(169)?"},
+  {"role": "assistant", "content": "Thought: ...
+Action: calculate
+Action Input: (2400 * 0.15) + sqrt(169)"},
+  {"role": "user",      "content": "Observation: (2400 * 0.15) + sqrt(169) = 373"},
+  {"role": "assistant", "content": "Thought: I have the final result.
+Final Answer: ..."}
+]}
+```
+
+### What is deliberately left out
+
+Training on a turn where the model broke format teaches it to break format, so
+the exporter is strict by default:
+
+| Dropped | Why |
+|---|---|
+| `agent.format.violation`, `agent.loop.repeated_action`, `agent.budget.exhausted` | The turn contains a message the log does not record verbatim, so it cannot be replayed faithfully. Never exported. |
+| Any truncated field | A shortened prompt or reply is corrupt training data. |
+| Turns with no Final Answer | The conversation never reached one. |
+| Turns where a tool returned an error | Pass `--include-tool-errors` to keep them. |
+| Identical conversations | De-duplicated by digest. |
+
+Every example is validated before it is written: it must start with a non-empty
+system prompt, alternate user/assistant, end on an assistant turn, and contain
+no empty message.
+
+Multi-turn sessions are reconstructed with their history, exactly as the agent
+sent it — a dropped turn still counts as history for the turns after it.
+
+Because of this, the log schema *is* the training data format. Changing an
+event's fields changes the dataset.
 
 ---
 

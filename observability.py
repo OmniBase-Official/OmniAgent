@@ -37,6 +37,22 @@ LOGGER_NAME: Final[str] = "omniagent"
 #: Fields longer than this are truncated in the log output.
 MAX_FIELD_LENGTH: Final[int] = 2_000
 
+#: Fields the dataset exporter reads back verbatim. A truncated prompt or reply
+#: would become corrupt training data, so these get a far larger budget -- still
+#: bounded, so a runaway tool output cannot write an unbounded line.
+MAX_TRAINING_FIELD_LENGTH: Final[int] = 32_000
+
+TRAINING_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "system_prompt",
+        "question",
+        "answer",
+        "reply",
+        "observation",
+        "tool_input",
+    }
+)
+
 #: Substrings that mark a field as a credential, matched case-insensitively.
 _SENSITIVE_HINTS: Final[tuple[str, ...]] = (
     "api_key",
@@ -49,6 +65,10 @@ _SENSITIVE_HINTS: Final[tuple[str, ...]] = (
 )
 
 _REDACTED: Final[str] = "***redacted***"
+
+#: Appended to any value that had to be shortened. The dataset exporter looks
+#: for it and refuses to turn a truncated record into a training example.
+TRUNCATION_MARKER: Final[str] = "...(truncated"
 
 #: Names that contain a sensitive hint but are plainly not credentials. The
 #: policy is default-deny -- over-redacting a counter is cheap, leaking a key is
@@ -121,21 +141,22 @@ def _sanitise(key: str, value: Any) -> Any:
     """Mask credentials, shorten long strings, and make a value JSON-safe."""
     if _is_sensitive(key):
         return _REDACTED
-    return _coerce(value)
+    limit = MAX_TRAINING_FIELD_LENGTH if key in TRAINING_FIELDS else MAX_FIELD_LENGTH
+    return _coerce(value, limit)
 
 
-def _coerce(value: Any) -> Any:
+def _coerce(value: Any, limit: int = MAX_FIELD_LENGTH) -> Any:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
-        if len(value) > MAX_FIELD_LENGTH:
-            return f"{value[:MAX_FIELD_LENGTH]}...(truncated, {len(value)} chars)"
+        if len(value) > limit:
+            return f"{value[:limit]}{TRUNCATION_MARKER}, {len(value)} chars)"
         return value
     if isinstance(value, Mapping):
         return {str(k): _sanitise(str(k), v) for k, v in value.items()}
     if isinstance(value, (list, tuple, set)):
-        return [_coerce(item) for item in value]
-    return _coerce(repr(value))
+        return [_coerce(item, limit) for item in value]
+    return _coerce(repr(value), limit)
 
 
 # --------------------------------------------------------------------------- #
