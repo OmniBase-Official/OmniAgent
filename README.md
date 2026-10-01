@@ -18,6 +18,7 @@ keeps the loop in plain sight so you can read it, break it, and change it:
 | [`main.py`](main.py) | CLI entry point: argument parsing, preflight checks, REPL. |
 | [`agent.py`](agent.py) | The ReAct engine: system prompt, completion calls, output parsing, tool dispatch, memory. |
 | [`tools.py`](tools.py) | Tool implementations, their pydantic argument schemas, and the registry the prompt is generated from. |
+| [`sandbox.py`](sandbox.py) | The filesystem boundary the file tools work inside, and its threat model. |
 | [`observability.py`](observability.py) | Structured JSON-lines logging: session/turn/step context, credential redaction, truncation. |
 | [`export_dataset.py`](export_dataset.py) | Replays run logs into a chat-format SFT dataset. |
 | [`tests/`](tests) | pytest suite — tools, parser, logger, the loop and the exporter, all without a model. |
@@ -78,6 +79,9 @@ the context window stays clean across a long session.
 |---|---|
 | `calculate(expression: str)` | Evaluates arithmetic: `+ - * / // % **`, parentheses, `pi`/`e`/`tau`, and `sqrt`, `log`, `log10`, `exp`, `sin`, `cos`, `tan`, `floor`, `ceil`, `round`, `abs`, `min`, `max`, `factorial`. |
 | `get_current_time()` | Current local date/time plus the UTC equivalent and the day of the week. |
+| `read_file(path: str)` | Returns a workspace file's text, numbered by line. |
+| `list_directory(path: str)` | Lists a workspace directory, folders first, with file sizes. |
+| `search_text(query: str, path: str)` | Finds a literal substring under a path and reports `file:line` matches. |
 
 `calculate` does **not** use `eval()`. The expression is parsed into an AST and
 walked against an explicit allow-list, so `__import__('os').system(...)` and
@@ -138,6 +142,51 @@ TOOLS["reverse_text"] = Tool(
 
 `mypy` enforces the pairing: giving `run` a handler that does not accept
 `ReverseTextArgs` is a type error, not a runtime surprise.
+
+---
+
+## The filesystem boundary
+
+`read_file`, `list_directory` and `search_text` work inside one **workspace**
+directory — the current directory by default, or `--workspace PATH`. They are
+read-only by construction: nothing in [`sandbox.py`](sandbox.py) writes, renames
+or deletes.
+
+This matters more than it looks. Every path a tool receives was chosen by a
+language model, and everything a tool returns becomes an Observation — which
+goes into the context window, into the log, and from there into the training
+dataset. A path the agent should not reach is not just a read it should not
+perform; it is a leak that gets written down and then trained on.
+
+| Threat | Mitigation |
+|---|---|
+| `../../../etc/passwd`, `..\..\Windows\System32` | The path is resolved, then required to sit under the workspace root. |
+| Absolute paths outside the root | Same check — an absolute path is allowed only if it lands inside the workspace. |
+| Symlinks and junctions pointing out | `Path.resolve()` follows them *before* the containment check, so the target is tested, not the link. |
+| Secrets inside the workspace | Dot-files and dot-directories (`.env`, `.git`, `.ssh`) are refused outright, as are credential suffixes (`.pem`, `.key`, `.p12`, …) and names (`id_rsa`, `credentials`). |
+| The agent reading its own log back | The active `--log-file` is denied, so earlier conversations cannot re-enter the context and the dataset. |
+| Huge files exhausting memory | Size is checked before the read (100 KB), and the returned text is capped (16 000 chars). |
+| Binary files flooding the context | A NUL byte in the first 8 KB rejects the file. |
+| Devices — `CON`, `NUL`, `COM1`, `\.\PhysicalDrive0` | Only regular files pass. |
+| UNC and network paths, NUL bytes in a path | Rejected before resolution. |
+| ReDoS via a model-supplied pattern | There is no regex. `search_text` is literal substring matching, so a hostile pattern has nothing to backtrack over. |
+
+Asked directly to exfiltrate, a live model gets nowhere:
+
+```
+Action: read_file
+Action Input: .env
+Observation: Error: hidden files and directories (anything starting with '.') are not readable
+
+Action: read_file
+Action Input: ../../Windows/System32/drivers/etc/hosts
+Observation: Error: path is outside the workspace (D:\code-project\OmniAgent);
+             only files under it can be read
+```
+
+Line endings are normalised on read, so the same file produces the same
+Observation on Windows and on Linux rather than baking the collection platform
+into the dataset.
 
 ---
 
@@ -229,6 +278,7 @@ python main.py --model qwen2.5-coder:7b --quiet
 | `--log-file` | — | Append structured JSON-lines logs here (env: `OMNIAGENT_LOG_FILE`). |
 | `--log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` (env: `OMNIAGENT_LOG_LEVEL`). |
 | `--log-console` | off | Also stream the JSON logs to stderr. |
+| `--workspace` | cwd | Directory the file tools may read inside (env: `OMNIAGENT_WORKSPACE`). |
 
 ### REPL commands
 

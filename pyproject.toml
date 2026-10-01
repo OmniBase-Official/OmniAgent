@@ -23,14 +23,14 @@ dev = [
 
 [tool.setuptools]
 # Flat layout: the agent is a handful of top-level modules, not a package.
-py-modules = ["agent", "main", "tools", "observability", "export_dataset"]
+py-modules = ["agent", "main", "tools", "observability", "export_dataset", "sandbox"]
 
 # --------------------------------------------------------------------------- #
 # mypy - strict, no exceptions. Untyped code does not get merged.
 # --------------------------------------------------------------------------- #
 [tool.mypy]
 python_version = "3.10"
-files = ["agent.py", "main.py", "tools.py", "observability.py", "export_dataset.py", "tests"]
+files = ["agent.py", "main.py", "tools.py", "observability.py", "export_dataset.py", "sandbox.py", "tests"]
 strict = true
 warn_unreachable = true
 warn_no_return = true
@@ -104,7 +104,7 @@ ignore = [
 ban-relative-imports = "all"
 
 [tool.ruff.lint.isort]
-known-first-party = ["agent", "export_dataset", "main", "observability", "tools", "tests"]
+known-first-party = ["agent", "export_dataset", "main", "observability", "sandbox", "tools", "tests"]
 
 # --------------------------------------------------------------------------- #
 # pytest

@@ -21,6 +21,7 @@ from agent import (
     AgentError,
     ReActAgent,
 )
+from sandbox import SandboxError, Workspace, set_workspace
 from tools import TOOLS
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
@@ -112,6 +113,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=LOG_LEVELS,
         default=os.environ.get("OMNIAGENT_LOG_LEVEL", "INFO"),
         help="Minimum level for the structured log (default: INFO).",
+    )
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=os.environ.get("OMNIAGENT_WORKSPACE"),
+        help="Directory the file tools may read inside (default: the current directory).",
     )
     parser.add_argument(
         "--log-console",
@@ -210,6 +217,19 @@ def main(argv: list[str] | None = None) -> int:
         console=args.log_console,
     )
 
+    log_resolved = log_file.resolve() if log_file is not None else None
+    try:
+        workspace = Workspace.at(
+            args.workspace or Path.cwd(),
+            # The agent must not read its own log back: that would replay
+            # earlier conversations into the context and into the dataset.
+            denied_paths=frozenset({log_resolved} if log_resolved else ()),
+        )
+    except SandboxError as exc:
+        print(Style.red(f"[!] {exc}"))
+        return 1
+    set_workspace(workspace)
+
     config = AgentConfig(
         model=args.model,
         base_url=args.base_url,
@@ -220,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     agent = ReActAgent(config=config, printer=lambda text: print(Style.dim(text)))
 
     print(Style.cyan(BANNER))
+    print(Style.dim(f"    workspace: {workspace.root}"))
     if log_file is not None or args.log_console:
         print(Style.dim(f"    session  : {session_id}"))
         if log_file is not None:

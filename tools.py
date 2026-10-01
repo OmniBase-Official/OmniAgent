@@ -24,6 +24,7 @@ from typing import Any, Generic, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import observability as obs
+from sandbox import _BINARY_SNIFF_BYTES, SandboxError, get_workspace
 
 _log = obs.get_logger("tools")
 
@@ -289,6 +290,13 @@ class ToolArgumentError(ValueError):
     """Raised when an Action Input cannot be turned into a tool's arguments."""
 
 
+#: What a model writes when it means "this tool takes nothing". Canonical here
+#: rather than in the agent, so run_tool() is correct when called on its own.
+NO_ARG_INPUTS = frozenset(
+    {"", "none", "null", "n/a", "na", "-", "nothing", "()", "no input"}
+)
+
+
 # --------------------------------------------------------------------------- #
 # prompt rendering
 # --------------------------------------------------------------------------- #
@@ -366,11 +374,16 @@ def parse_tool_args(tool: Tool[ArgsT], raw_input: str) -> ArgsT:
     """
     value = raw_input.strip()
     fields = tool.args_model.model_fields
+    if value.lower() in NO_ARG_INPUTS:
+        value = ""
 
     try:
         if value.startswith("{"):
             return tool.args_model.model_validate_json(value)
         if not fields:
+            return tool.args_model()
+        # No input and nothing required: the model meant "use the defaults".
+        if not value and not any(field.is_required() for field in fields.values()):
             return tool.args_model()
         if len(fields) == 1:
             return tool.args_model.model_validate({next(iter(fields)): value})
@@ -420,3 +433,190 @@ def run_tool(name: str, tool_input: str) -> str:
             exc_info=True,
         )
         return f"Error: tool {name!r} raised {type(exc).__name__}: {exc}"
+
+
+# --------------------------------------------------------------------------- #
+# file tools
+# --------------------------------------------------------------------------- #
+# Every path these take is chosen by the model, and everything they return ends
+# up in the log and then in the training dataset. The containment rules live in
+# sandbox.py; these functions only shape the output.
+
+#: Most matches search_text will report before it stops looking.
+MAX_SEARCH_MATCHES = 50
+
+#: Most files search_text will open in one call.
+MAX_SEARCH_FILES = 400
+
+
+def read_file(path: str) -> str:
+    """Return a file's contents, numbered by line, from inside the workspace."""
+    workspace = get_workspace()
+    try:
+        text = workspace.read_text(path)
+    except SandboxError as exc:
+        return f"Error: {exc}"
+    except OSError as exc:
+        return f"Error: could not read {path!r}: {exc.strerror or exc}"
+
+    shown = workspace.display(workspace.resolve(path))
+    if not text.strip():
+        return f"{shown} is empty."
+    numbered = "\n".join(
+        f"{number:>5}  {line}" for number, line in enumerate(text.splitlines(), start=1)
+    )
+    return f"{shown}:\n{numbered}"
+
+
+def list_directory(path: str = ".") -> str:
+    """Return the visible entries of a directory inside the workspace."""
+    workspace = get_workspace()
+    try:
+        entries = workspace.list_dir(path)
+        shown = workspace.display(workspace.resolve(path or "."))
+    except SandboxError as exc:
+        return f"Error: {exc}"
+    except OSError as exc:
+        return f"Error: could not list {path!r}: {exc.strerror or exc}"
+
+    if not entries:
+        return f"{shown} is empty."
+    return f"{shown}:\n" + "\n".join(f"  {entry}" for entry in entries)
+
+
+def search_text(  # noqa: PLR0912 - a guard per thing that can go wrong in a walk
+    query: str, path: str = "."
+) -> str:
+    """Find a literal substring in the files under a path.
+
+    Literal, not regex, on purpose: a model-supplied regex is a denial-of-
+    service waiting to happen, and Python's engine has no timeout.
+    """
+    workspace = get_workspace()
+    needle = query.strip()
+    if not needle:
+        return "Error: no search text given."
+
+    try:
+        start = workspace.resolve(path or ".")
+    except SandboxError as exc:
+        return f"Error: {exc}"
+
+    candidates = [start] if start.is_file() else sorted(start.rglob("*"))
+    matches: list[str] = []
+    scanned = 0
+    lowered = needle.lower()
+
+    for candidate in candidates:
+        if len(matches) >= MAX_SEARCH_MATCHES or scanned >= MAX_SEARCH_FILES:
+            break
+        if not candidate.is_file():
+            continue
+        try:
+            resolved = workspace.resolve(workspace.display(candidate))
+        except SandboxError:
+            continue  # hidden, denied, or escaping: skip quietly
+        if resolved.stat().st_size > workspace.max_file_bytes:
+            continue
+
+        scanned += 1
+        try:
+            blob = resolved.read_bytes()
+        except OSError:
+            continue
+        if b"\0" in blob[:_BINARY_SNIFF_BYTES]:
+            continue
+
+        shown = workspace.display(resolved)
+        for number, line in enumerate(
+            blob.decode("utf-8", errors="replace").splitlines(), start=1
+        ):
+            if lowered in line.lower():
+                matches.append(f"{shown}:{number}: {line.strip()[:200]}")
+                if len(matches) >= MAX_SEARCH_MATCHES:
+                    break
+
+    if not matches:
+        return f"No match for {needle!r} in {workspace.display(start)} ({scanned} files searched)."
+    header = f"{len(matches)} match{'es' if len(matches) != 1 else ''} for {needle!r}"
+    if len(matches) >= MAX_SEARCH_MATCHES:
+        header += " (stopped at the limit)"
+    return f"{header}:\n" + "\n".join(matches)
+
+
+class ReadFileArgs(ToolArgs):
+    path: str = Field(
+        min_length=1,
+        max_length=1_000,
+        description="Path relative to the workspace root, e.g. 'README.md' or 'src/app.py'.",
+    )
+
+
+class ListDirectoryArgs(ToolArgs):
+    path: str = Field(
+        default=".",
+        max_length=1_000,
+        description="Directory relative to the workspace root. Defaults to the root itself.",
+    )
+
+
+class SearchTextArgs(ToolArgs):
+    query: str = Field(
+        min_length=1,
+        max_length=200,
+        description="Literal text to look for. Not a regular expression.",
+    )
+    path: str = Field(
+        default=".",
+        max_length=1_000,
+        description="Directory or file to search under. Defaults to the workspace root.",
+    )
+
+
+def _run_read_file(args: ReadFileArgs) -> str:
+    return read_file(args.path)
+
+
+def _run_list_directory(args: ListDirectoryArgs) -> str:
+    return list_directory(args.path)
+
+
+def _run_search_text(args: SearchTextArgs) -> str:
+    return search_text(args.query, args.path)
+
+
+TOOLS["read_file"] = Tool(
+    name="read_file",
+    description=(
+        "Read a text file from the workspace and return it with line numbers. "
+        "Use it when the user asks what is in a file. Paths are relative to the "
+        "workspace root; files outside it, hidden files and credentials cannot "
+        "be read."
+    ),
+    args_model=ReadFileArgs,
+    run=_run_read_file,
+    example="README.md",
+)
+
+TOOLS["list_directory"] = Tool(
+    name="list_directory",
+    description=(
+        "List the files and folders in a workspace directory. Use it to find "
+        "out what exists before reading a file. Defaults to the workspace root."
+    ),
+    args_model=ListDirectoryArgs,
+    run=_run_list_directory,
+    example=".",
+)
+
+TOOLS["search_text"] = Tool(
+    name="search_text",
+    description=(
+        "Find a literal piece of text in the files under a path, returning "
+        "file:line matches. Use it to locate where something is mentioned. "
+        "This is a plain substring search, NOT a regular expression."
+    ),
+    args_model=SearchTextArgs,
+    run=_run_search_text,
+    example='{"query": "def main", "path": "."}',
+)

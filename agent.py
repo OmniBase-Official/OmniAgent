@@ -26,7 +26,7 @@ from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 from pydantic import BaseModel, Field
 
 import observability as obs
-from tools import TOOLS, describe_tools, run_tool, tool_names
+from tools import NO_ARG_INPUTS, TOOLS, describe_tools, run_tool, tool_names
 
 _log = obs.get_logger("agent")
 
@@ -105,7 +105,6 @@ _ACTION_INPUT_RE = re.compile(
 # "calculate(2 + 2)" written on the Action line instead of split across two lines.
 _INLINE_CALL_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*$", re.DOTALL)
 
-_NO_ARG_INPUTS = {"", "none", "null", "n/a", "na", "-", "nothing", "()", "no input"}
 _BRACKET_PAIRS = {"()", "<>", "[]"}
 
 #: Shortest string that can still be a quoted or bracketed wrapper.
@@ -231,13 +230,13 @@ def _clean_action_input(raw: str) -> str:
     value = value.strip("`").strip()
     if _is_wrapped(value) and value[0] in "\"'":
         value = value[1:-1].strip()
-    if value.lower() in _NO_ARG_INPUTS:
+    if value.lower() in NO_ARG_INPUTS:
         return ""
     # Small models like to wrap the placeholder: "(none)", "<none>", "[none]".
     if (
         _is_wrapped(value)
         and value[0] + value[-1] in _BRACKET_PAIRS
-        and value[1:-1].strip().lower() in _NO_ARG_INPUTS
+        and value[1:-1].strip().lower() in NO_ARG_INPUTS
     ):
         return ""
     return value
