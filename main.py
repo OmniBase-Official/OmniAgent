@@ -8,9 +8,12 @@ request goes to the Ollama server on localhost.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
+from pathlib import Path
 
+import observability as obs
 from agent import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
@@ -19,6 +22,8 @@ from agent import (
     ReActAgent,
 )
 from tools import TOOLS
+
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 
 BANNER = r"""
   ___                  _    _                 _
@@ -96,6 +101,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--quiet", action="store_true", help="Hide the Thought/Action/Observation trace."
     )
     parser.add_argument("--ask", metavar="QUESTION", help="Answer one question and exit.")
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=os.environ.get("OMNIAGENT_LOG_FILE"),
+        help="Append structured JSON-lines logs to this file.",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=LOG_LEVELS,
+        default=os.environ.get("OMNIAGENT_LOG_LEVEL", "INFO"),
+        help="Minimum level for the structured log (default: INFO).",
+    )
+    parser.add_argument(
+        "--log-console",
+        action="store_true",
+        help="Also stream the JSON logs to stderr (stdout keeps the readable trace).",
+    )
     return parser.parse_args(argv)
 
 
@@ -126,6 +148,7 @@ def answer(agent: ReActAgent, question: str) -> int:
     try:
         result = agent.run(question)
     except AgentError as exc:
+        obs.event("cli.aborted", level=logging.ERROR, reason=str(exc), exc_info=True)
         print(Style.red(f"\n[!] {exc}"))
         return 1
     print(Style.green("\nOmniAgent: ") + result + "\n")
@@ -172,6 +195,15 @@ def main(argv: list[str] | None = None) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
+    # Structured logging must be live before the agent is built, so that even
+    # construction and preflight end up in the log.
+    log_file = Path(args.log_file) if args.log_file else None
+    session_id = obs.configure(
+        level=args.log_level,
+        log_file=log_file,
+        console=args.log_console,
+    )
+
     config = AgentConfig(
         model=args.model,
         base_url=args.base_url,
@@ -182,6 +214,10 @@ def main(argv: list[str] | None = None) -> int:
     agent = ReActAgent(config=config, printer=lambda text: print(Style.dim(text)))
 
     print(Style.cyan(BANNER))
+    if log_file is not None or args.log_console:
+        print(Style.dim(f"    session  : {session_id}"))
+        if log_file is not None:
+            print(Style.dim(f"    log      : {log_file}"))
     if not preflight(agent):
         return 1
 

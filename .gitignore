@@ -22,3 +22,7 @@ env/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Structured run logs
+*.jsonl
+data/

@@ -101,6 +101,9 @@ ignore = [
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
 
+[tool.ruff.lint.isort]
+known-first-party = ["agent", "main", "observability", "tools", "tests"]
+
 # --------------------------------------------------------------------------- #
 # pytest
 # --------------------------------------------------------------------------- #

@@ -9,11 +9,16 @@ read it, reason about it, and retry.
 from __future__ import annotations
 
 import ast
+import logging
 import math
 import operator
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+
+import observability as obs
+
+_log = obs.get_logger("tools")
 
 # --------------------------------------------------------------------------- #
 # calculate
@@ -236,8 +241,23 @@ def run_tool(name: str, tool_input: str) -> str:
     """Dispatch to a tool by name, returning its Observation text."""
     tool = TOOLS.get(name.strip())
     if tool is None:
+        obs.event(
+            "tool.unknown",
+            logger=_log,
+            level=logging.WARNING,
+            requested=name,
+            available=list(TOOLS),
+        )
         return f"Error: unknown tool {name!r}. Available tools are: {tool_names()}."
     try:
         return tool.run(tool_input)
     except Exception as exc:  # noqa: BLE001 - a tool must never crash the loop
+        obs.event(
+            "tool.crashed",
+            logger=_log,
+            level=logging.ERROR,
+            tool=tool.name,
+            tool_input=tool_input,
+            exc_info=True,
+        )
         return f"Error: tool {name!r} raised {type(exc).__name__}: {exc}"

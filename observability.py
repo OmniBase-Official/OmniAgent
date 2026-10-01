@@ -50,6 +50,22 @@ _SENSITIVE_HINTS: Final[tuple[str, ...]] = (
 
 _REDACTED: Final[str] = "***redacted***"
 
+#: Names that contain a sensitive hint but are plainly not credentials. The
+#: policy is default-deny -- over-redacting a counter is cheap, leaking a key is
+#: not -- so anything new has to be listed here explicitly.
+_SAFE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "tokens",
+        "token_count",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "reasoning_tokens",
+        "max_tokens",
+    }
+)
+
 #: Attributes that :class:`logging.LogRecord` always defines. Anything else a
 #: caller attaches via ``extra=`` is treated as a structured field.
 _RESERVED_ATTRS: Final[frozenset[str]] = frozenset(
@@ -96,6 +112,8 @@ _configured = False
 
 def _is_sensitive(key: str) -> bool:
     lowered = key.lower()
+    if lowered in _SAFE_FIELDS:
+        return False
     return any(hint in lowered for hint in _SENSITIVE_HINTS)
 
 

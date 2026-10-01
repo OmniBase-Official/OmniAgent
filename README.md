@@ -189,6 +189,9 @@ python main.py --model qwen2.5-coder:7b --quiet
 | `--temperature` | `0.1` | Sampling temperature. Low values keep the format stable. |
 | `--quiet` | off | Hide the Thought/Action/Observation trace. |
 | `--ask` | — | Answer one question and exit. |
+| `--log-file` | — | Append structured JSON-lines logs here (env: `OMNIAGENT_LOG_FILE`). |
+| `--log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` (env: `OMNIAGENT_LOG_LEVEL`). |
+| `--log-console` | off | Also stream the JSON logs to stderr. |
 
 ### REPL commands
 
@@ -228,12 +231,33 @@ OmniAgent: 15% of 2400 plus the square root of 169 is 373, and today is Tuesday,
 
 ## Logging
 
-The console trace is for you; the log stream is for machines. Pass a log file
-and every step becomes one JSON object per line:
+The console trace is for you; the log stream is for machines:
+
+```bash
+python main.py --log-file run.jsonl --ask "What is 18% of 1500?"
+```
+
+Every step of the loop becomes one JSON object per line:
 
 ```json
-{"ts":"2026-10-01T10:07:48.512Z","level":"INFO","logger":"omniagent","event":"agent.tool.call","message":"agent.tool.call","session_id":"a3f91c2b7e04","turn":1,"step":2,"tool":"calculate"}
+{"ts":"2026-10-01T10:16:49.357Z","level":"INFO","logger":"omniagent.agent","event":"agent.llm.response","message":"agent.llm.response","model":"qwen2.5-coder:7b","elapsed_ms":14097.35,"finish_reason":"stop","prompt_tokens":791,"completion_tokens":61,"session_id":"37202807c137","turn":1,"step":1}
 ```
+
+One answered question produces this sequence, so a log alone explains what the
+agent did and how long each part took:
+
+| Event | Carries |
+|---|---|
+| `agent.connection.ok` | endpoint, whether the requested model is installed |
+| `agent.turn.start` | question, step budget, history size |
+| `agent.llm.request` / `.response` | model, latency, finish reason, token counts, the raw reply |
+| `agent.tool.call` / `.result` | tool, input, observation, `ok`, latency |
+| `agent.step.final_answer` | the thought and the answer |
+| `agent.turn.end` | answer, steps used, total latency |
+
+Things going wrong get their own events, at `WARNING` or `ERROR` with a
+traceback attached: `agent.format.violation`, `agent.budget.exhausted`,
+`tool.unknown`, `tool.crashed`, `agent.llm.unreachable`, `agent.llm.error`.
 
 Context is ambient — `session_id`, `turn` and `step` attach themselves through
 `observability.bind()` rather than being threaded through every call site.

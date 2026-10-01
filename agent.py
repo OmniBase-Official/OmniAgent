@@ -14,14 +14,19 @@ The loop is deliberately small and readable:
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 from collections.abc import Callable
 
 from openai import APIConnectionError, APIStatusError, OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, Field
 
-from tools import describe_tools, run_tool, tool_names
+import observability as obs
+from tools import TOOLS, describe_tools, run_tool, tool_names
+
+_log = obs.get_logger("agent")
 
 DEFAULT_BASE_URL = "http://localhost:11434/v1"
 DEFAULT_API_KEY = "local-ollama"  # Ollama ignores it; the client demands one.
@@ -222,10 +227,17 @@ class ReActAgent:
         self,
         config: AgentConfig | None = None,
         printer: Callable[[str], None] = print,
+        client: OpenAI | None = None,
     ) -> None:
+        """Build an agent.
+
+        :param client: an already-built OpenAI client. Tests inject a fake one;
+            leaving it out builds a client pointed at the configured local
+            endpoint.
+        """
         self.config = config or AgentConfig()
         self._print = printer
-        self.client = OpenAI(
+        self.client = client or OpenAI(
             base_url=self.config.base_url,
             api_key=self.config.api_key,
             timeout=self.config.timeout,
@@ -238,64 +250,169 @@ class ReActAgent:
         # scratchpad from an earlier turn never pollutes the next one.
         self.history: list[ChatCompletionMessageParam] = []
         self.last_trace: list[Step] = []
+        self._turn = 0
+
+        obs.event(
+            "agent.created",
+            logger=_log,
+            level=logging.DEBUG,
+            # api_key is redacted by the formatter, which this proves.
+            config=self.config.model_dump(),
+            tools=list(TOOLS),
+        )
 
     # -- public API -------------------------------------------------------- #
 
     def reset(self) -> None:
         """Forget the conversation history."""
+        obs.event("agent.reset", logger=_log, level=logging.DEBUG, turns=self._turn)
         self.history.clear()
         self.last_trace.clear()
 
     def check_connection(self) -> list[str]:
         """Return the model tags the local server offers, or raise AgentError."""
         try:
-            return [m.id for m in self.client.models.list().data]
+            available = [m.id for m in self.client.models.list().data]
         except APIConnectionError as exc:
+            obs.event(
+                "agent.connection.unreachable",
+                logger=_log,
+                level=logging.ERROR,
+                base_url=self.config.base_url,
+                exc_info=True,
+            )
             raise AgentError(
                 f"Cannot reach a local model server at {self.config.base_url}. "
                 "Is Ollama running? Start it with 'ollama serve'."
             ) from exc
         except APIStatusError as exc:
+            obs.event(
+                "agent.connection.error",
+                logger=_log,
+                level=logging.ERROR,
+                base_url=self.config.base_url,
+                status_code=exc.status_code,
+                exc_info=True,
+            )
             raise AgentError(
                 f"Model server returned HTTP {exc.status_code}: {exc.message}"
             ) from exc
 
+        obs.event(
+            "agent.connection.ok",
+            logger=_log,
+            base_url=self.config.base_url,
+            model=self.config.model,
+            model_installed=self.config.model in available,
+            available=available,
+        )
+        return available
+
     def run(self, question: str) -> str:
         """Answer one question, running the ReAct loop until it settles."""
+        self._turn += 1
+        with obs.bind(turn=self._turn):
+            return self._run_turn(question)
+
+    def _run_turn(self, question: str) -> str:
         scratchpad: list[ChatCompletionMessageParam] = [_user(question)]
         self.last_trace = []
+        started = time.perf_counter()
+        obs.event(
+            "agent.turn.start",
+            logger=_log,
+            question=question,
+            max_steps=self.config.max_steps,
+            history_messages=len(self.history),
+        )
 
         for iteration in range(1, self.config.max_steps + 1):
-            reply = self._complete(scratchpad)
-            step = _parse(reply)
-            self.last_trace.append(step)
-            self._trace(iteration, step)
+            with obs.bind(step=iteration):
+                reply = self._complete(scratchpad)
+                step = _parse(reply)
+                self.last_trace.append(step)
+                self._trace(iteration, step)
 
-            scratchpad.append(_assistant(reply))
+                scratchpad.append(_assistant(reply))
 
-            if step.final_answer is not None:
-                return self._remember(question, step.final_answer)
+                if step.final_answer is not None:
+                    obs.event(
+                        "agent.step.final_answer",
+                        logger=_log,
+                        thought=step.thought,
+                        answer=step.final_answer,
+                    )
+                    return self._finish(question, step.final_answer, started, iteration)
 
-            if step.action is None:
-                # The model broke format. Tell it exactly what is missing.
-                nudge = (
-                    "Your last reply did not follow the required format. Reply with "
-                    "either:\n"
-                    "Thought: ...\nAction: <tool name>\nAction Input: <input>\n"
-                    "or:\nThought: ...\nFinal Answer: <answer>"
-                )
-                scratchpad.append(_user(nudge))
-                step.observation = "(format correction sent)"
-                continue
+                if step.action is None:
+                    # The model broke format. Tell it exactly what is missing.
+                    obs.event(
+                        "agent.format.violation",
+                        logger=_log,
+                        level=logging.WARNING,
+                        reply=reply,
+                    )
+                    nudge = (
+                        "Your last reply did not follow the required format. Reply with "
+                        "either:\n"
+                        "Thought: ...\nAction: <tool name>\nAction Input: <input>\n"
+                        "or:\nThought: ...\nFinal Answer: <answer>"
+                    )
+                    scratchpad.append(_user(nudge))
+                    step.observation = "(format correction sent)"
+                    continue
 
-            observation = run_tool(step.action, step.action_input or "")
-            step.observation = observation
-            self._trace_observation(observation)
-            scratchpad.append(_user(f"Observation: {observation}"))
+                observation = self._invoke_tool(step)
+                scratchpad.append(_user(f"Observation: {observation}"))
 
         # Out of steps: ask for the best answer it can give from what it has.
+        obs.event(
+            "agent.budget.exhausted",
+            logger=_log,
+            level=logging.WARNING,
+            max_steps=self.config.max_steps,
+        )
         fallback = self._force_final_answer(scratchpad)
-        return self._remember(question, fallback)
+        return self._finish(question, fallback, started, self.config.max_steps)
+
+    def _invoke_tool(self, step: Step) -> str:
+        """Run the tool a step asked for, logging the call and its result."""
+        tool_name = step.action or ""
+        obs.event(
+            "agent.tool.call",
+            logger=_log,
+            tool=tool_name,
+            tool_input=step.action_input or "",
+            thought=step.thought,
+        )
+
+        started = time.perf_counter()
+        observation = run_tool(tool_name, step.action_input or "")
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+
+        step.observation = observation
+        failed = observation.startswith("Error:")
+        obs.event(
+            "agent.tool.result",
+            logger=_log,
+            level=logging.WARNING if failed else logging.INFO,
+            tool=tool_name,
+            ok=not failed,
+            observation=observation,
+            elapsed_ms=elapsed_ms,
+        )
+        self._trace_observation(observation)
+        return observation
+
+    def _finish(self, question: str, answer: str, started: float, steps: int) -> str:
+        obs.event(
+            "agent.turn.end",
+            logger=_log,
+            answer=answer,
+            steps_used=steps,
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+        )
+        return self._remember(question, answer)
 
     # -- internals --------------------------------------------------------- #
 
@@ -305,25 +422,64 @@ class ReActAgent:
         return [_system(self.system_prompt), *self.history, *scratchpad]
 
     def _complete(self, scratchpad: list[ChatCompletionMessageParam], stop: bool = True) -> str:
+        messages = self._messages(scratchpad)
+        obs.event(
+            "agent.llm.request",
+            logger=_log,
+            model=self.config.model,
+            temperature=self.config.temperature,
+            message_count=len(messages),
+            stop_enabled=stop,
+        )
+
+        started = time.perf_counter()
         try:
             response = self.client.chat.completions.create(
                 model=self.config.model,
-                messages=self._messages(scratchpad),
+                messages=messages,
                 temperature=self.config.temperature,
                 stop=["\nObservation:", "Observation:"] if stop else None,
             )
         except APIConnectionError as exc:
+            obs.event(
+                "agent.llm.unreachable",
+                logger=_log,
+                level=logging.ERROR,
+                base_url=self.config.base_url,
+                exc_info=True,
+            )
             raise AgentError(
                 f"Lost the connection to {self.config.base_url}. Is Ollama still running?"
             ) from exc
         except APIStatusError as exc:
+            obs.event(
+                "agent.llm.error",
+                logger=_log,
+                level=logging.ERROR,
+                status_code=exc.status_code,
+                model=self.config.model,
+                exc_info=True,
+            )
             hint = ""
             if exc.status_code == _HTTP_NOT_FOUND:
                 hint = f" Pull the model first: 'ollama pull {self.config.model}'."
             raise AgentError(f"Model server error (HTTP {exc.status_code}).{hint}") from exc
 
-        content = response.choices[0].message.content or ""
-        return content.strip()
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+        content = (response.choices[0].message.content or "").strip()
+        usage = response.usage
+        obs.event(
+            "agent.llm.response",
+            logger=_log,
+            model=self.config.model,
+            elapsed_ms=elapsed_ms,
+            reply_chars=len(content),
+            finish_reason=response.choices[0].finish_reason,
+            prompt_tokens=usage.prompt_tokens if usage else None,
+            completion_tokens=usage.completion_tokens if usage else None,
+            reply=content,
+        )
+        return content
 
     def _force_final_answer(self, scratchpad: list[ChatCompletionMessageParam]) -> str:
         scratchpad.append(

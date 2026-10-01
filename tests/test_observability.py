@@ -132,6 +132,23 @@ def test_credentials_are_redacted(tmp_path: Path, field: str) -> None:
     assert "sk-super-secret-value" not in json.dumps(record)
 
 
+@pytest.mark.parametrize(
+    "field", ["prompt_tokens", "completion_tokens", "total_tokens", "max_tokens", "tokens"]
+)
+def test_token_counters_are_not_mistaken_for_credentials(tmp_path: Path, field: str) -> None:
+    """Regression: the 'token' hint matched prompt_tokens and redacted the counts.
+
+    The policy stays default-deny; these names are on an explicit allow-list.
+    """
+    log_file = tmp_path / "log.jsonl"
+    obs.configure(log_file=log_file)
+
+    counters: dict[str, Any] = {field: 1234}
+    obs.event("agent.llm.response", **counters)
+
+    assert read_lines(log_file)[0][field] == 1234
+
+
 def test_nested_credentials_are_redacted(tmp_path: Path) -> None:
     log_file = tmp_path / "log.jsonl"
     obs.configure(log_file=log_file)
