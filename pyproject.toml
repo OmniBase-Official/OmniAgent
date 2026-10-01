@@ -43,7 +43,21 @@ py-modules = ["agent", "main", "tools", "observability", "export_dataset", "sand
 # --------------------------------------------------------------------------- #
 [tool.mypy]
 python_version = "3.12"
-files = ["agent.py", "main.py", "tools.py", "observability.py", "export_dataset.py", "sandbox.py", "validate_dataset.py", "config.py", "tests"]
+# scripts/smoke_train.py is deliberately absent: it imports the optional
+# training stack, which CI does not install.
+files = [
+    "agent.py",
+    "main.py",
+    "tools.py",
+    "observability.py",
+    "export_dataset.py",
+    "sandbox.py",
+    "validate_dataset.py",
+    "config.py",
+    "scripts/collect_dataset.py",
+    "tests",
+]
+mypy_path = "scripts"
 strict = true
 warn_unreachable = true
 warn_no_return = true

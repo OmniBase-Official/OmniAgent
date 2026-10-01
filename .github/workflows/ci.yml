@@ -1,0 +1,46 @@
+name: CI
+
+# The three gates that have to be green before anything is committed locally,
+# enforced on every push. The training extras are deliberately not installed:
+# torch is gigabytes, and nothing in the test suite needs it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: ruff / mypy / pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Type-check
+        run: mypy
+
+      - name: Test
+        run: pytest

@@ -24,7 +24,7 @@ keeps the loop in plain sight so you can read it, break it, and change it:
 | [`export_dataset.py`](export_dataset.py) | Replays run logs into a chat-format SFT dataset. |
 | [`validate_dataset.py`](validate_dataset.py) | Refuses a malformed dataset, or one containing a credential, before training. |
 | [`notebooks/`](notebooks) | The Colab LoRA fine-tune, merge and GGUF export. |
-| [`scripts/`](scripts) | CPU smoke test for the training pipeline, and the notebook generator. |
+| [`scripts/`](scripts) | Dataset collection, the CPU training smoke test, and the notebook generator. |
 | [`tests/`](tests) | pytest suite — tools, parser, logger, the loop and the exporter, all without a model. |
 
 ---
@@ -536,6 +536,22 @@ The loop fights small models drifting out of the Thought/Action/Observation
 format. A model trained on that exact format drifts less, and the dataset for it
 is already being collected every time you pass `--log-file`.
 
+### Collecting enough of it
+
+Four runs is not a training set. [`scripts/collect_dataset.py`](scripts/collect_dataset.py)
+walks a bank of ~46 sessions covering every tool — arithmetic, dates, file
+reading, searching, and multi-turn conversations that carry history — against a
+real local model:
+
+```bash
+python scripts/collect_dataset.py --model qwen2.5-coder:7b
+```
+
+`--resume` skips questions the log already has an answer for, so an interrupted
+run tops itself up rather than starting over. `--dry-run` lists what it would
+ask; `--questions FILE` supplies your own bank, one session per line (a plain
+question, or a JSON array for a conversation).
+
 ```
 run the agent  ->  JSONL log  ->  export_dataset.py  ->  validate_dataset.py
                                                               |
@@ -637,6 +653,18 @@ ruff check . && mypy && pytest
 
 ---
 
+## CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the same three gates
+on every push and pull request: `ruff check .`, `mypy`, `pytest`, on Python 3.12.
+
+The training extras are deliberately not installed there — torch is gigabytes
+and no test needs it. That difference is itself a thing to get wrong, so the
+workflow was rehearsed locally in a throwaway virtualenv holding only
+`pip install -e ".[dev]"`, where all three gates pass.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -646,6 +674,7 @@ ruff check . && mypy && pytest
 | The agent answers maths without calling `calculate` | Lower `--temperature`, or use a larger instruction-tuned model. |
 | Replies keep breaking the format | The model is too small or is a reasoning model. Try `qwen2.5:7b` or `llama3.1:8b`. |
 | It stops after 8 steps | Raise `--max-steps`. |
+| A setting is not what you expected | `python main.py --print-config` names the layer each value came from. |
 
 ---
 

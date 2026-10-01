@@ -29,3 +29,6 @@ data/
 
 # Local settings (profiles live in omniagent.toml, which IS committed)
 omniagent.local.toml
+
+# Throwaway venv used to rehearse CI locally
+.ci-venv/
