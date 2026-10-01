@@ -23,7 +23,7 @@ keeps the loop in plain sight so you can read it, break it, and change it:
 | [`observability.py`](observability.py) | Structured JSON-lines logging: session/turn/step context, credential redaction, truncation. |
 | [`export_dataset.py`](export_dataset.py) | Replays run logs into a chat-format SFT dataset. |
 | [`validate_dataset.py`](validate_dataset.py) | Refuses a malformed dataset, or one containing a credential, before training. |
-| [`notebooks/`](notebooks) | The Colab LoRA fine-tune, merge and GGUF export. |
+| [`notebooks/`](notebooks) | The local LoRA fine-tune, merge, GGUF export and Ollama registration. |
 | [`scripts/`](scripts) | Dataset collection, the CPU training smoke test, and the notebook generator. |
 | [`tests/`](tests) | pytest suite — tools, parser, logger, the loop and the exporter, all without a model. |
 
@@ -555,10 +555,17 @@ question, or a JSON array for a conversation).
 ```
 run the agent  ->  JSONL log  ->  export_dataset.py  ->  validate_dataset.py
                                                               |
-                        Colab LoRA  <---------------------- dataset.jsonl
+                     LoRA (this machine)  <---------------- dataset.jsonl
                              |
-                        merge -> GGUF -> ollama create -> python main.py --model omniagent
+                     merge -> GGUF -> ollama create -> python main.py --model omniagent
 ```
+
+Every arrow stays on one machine. That is not convenience, it is the same rule
+the rest of the project follows: the dataset holds your questions, your system
+prompt, and the contents of any file the agent read with `read_file` or
+`search_text`. Uploading it to a hosted notebook would be the one step that
+breaks the rule — and it buys nothing, because Ollama is already here, so there
+is no GGUF to download back either.
 
 ### Validate before you train
 
@@ -567,9 +574,10 @@ python validate_dataset.py data/dataset.jsonl
 ```
 
 ```
-examples   : 12
-messages   : min 5, max 7, mean 6.0
-tools      : calculate: 6, read_file: 3, get_current_time: 3
+examples   : 47
+messages   : min 5, max 9, mean 5.5
+characters : 237,199
+tools      : calculate: 33, get_current_time: 8, list_directory: 6, read_file: 5, search_text: 3
 verdict    : OK
 ```
 
@@ -583,50 +591,76 @@ warnings: your call.
 ### The notebook
 
 [`notebooks/train_omniagent_lora.ipynb`](notebooks/train_omniagent_lora.ipynb)
-runs on a free Colab T4. It validates the dataset before loading a single
-weight, trains a LoRA adapter, merges it, converts to GGUF, writes a checksum
-manifest and a ready-to-use `Modelfile`.
+runs locally — open it in VS Code, pick this project's `.venv` as the kernel, and
+run the cells. It validates the dataset before loading a single weight, trains a
+LoRA adapter, merges it, converts to GGUF, writes a checksum manifest, registers
+the model with Ollama, and finishes by running `main.py` against it.
+
+```bash
+pip install -e ".[training]"
+```
+
+**It picks its strategy from your hardware.** With CUDA it loads the base model
+in 4-bit (QLoRA), which fits a 4 GB card; without CUDA it falls back to fp32 on
+the CPU, which is only sensible for a tiny model. Merging happens on the CPU in
+fp16, because a 4-bit model cannot be merged into and a small card has no room
+for a full-precision copy anyway. Set `FOUR_BIT = False` if you have VRAM to
+spare and want bf16 LoRA instead.
 
 **Licensing matters here.** The default base model is `Qwen/Qwen2.5-1.5B-Instruct`,
 which is Apache-2.0. The 3B of the same family is released under a different,
 more restrictive licence. Read the model card of whatever you put in
 `BASE_MODEL` before you train, not after.
 
-Then, on the machine running Ollama:
-
-```bash
-ollama create omniagent -f Modelfile
-```
-
-```bash
-python main.py --model omniagent --ask "What is 23% of 1800?"
-```
-
 ### What is actually verified
 
-The notebook wants a GPU, so it cannot run in this repo's test suite. Instead:
+Running the notebook needs a GPU, a 3 GB download and a quarter of an hour, so
+the test suite checks what it can in milliseconds and the rest was checked by
+running it:
 
-- [`scripts/smoke_train.py`](scripts/smoke_train.py) runs **the same steps** on a
-  CPU with a 135M model — validate, load, LoRA-train, merge, generate — in about
-  a minute. An API change in transformers/trl/peft fails there rather than
-  twenty minutes into a Colab session.
-- [`tests/test_notebook.py`](tests/test_notebook.py) checks the notebook is valid
-  nbformat, that every code cell parses, that it ships no saved outputs, that the
-  version pins and argument names match what the smoke test exercised, and that
-  the `Modelfile` cell really produces the file `ollama create` accepts.
-
-The whole chain has been run once end to end on this machine with the 135M
-model: twelve logged runs became a dataset, the dataset trained an adapter, the
-merged model converted to a 269 MB GGUF, `ollama create` loaded it, and
-`python main.py --model omniagent-smoke --ask "What is 6 * 7?"` answered
-`6 * 7 = 42.`
-
-What that does **not** show is quality. A 135M model trained on twelve examples
-is a plumbing test, not a useful agent.
+- [`tests/test_notebook.py`](tests/test_notebook.py) asserts it is valid
+  nbformat, that every code cell parses, that it ships no saved outputs, that it
+  still chooses its loading strategy from the hardware, that nothing uploads the
+  dataset anywhere, and that the `Modelfile` cell really produces the file
+  `ollama create` accepts.
+- [`scripts/smoke_train.py`](scripts/smoke_train.py) runs the same steps on a CPU
+  with a 135M model in about a minute, so an API change in transformers/trl/peft
+  fails there rather than fifteen minutes into a real run.
 
 ```bash
 python scripts/smoke_train.py
 ```
+
+### What a real run produced
+
+On an RTX 3050 Laptop (4 GB), 15.8 minutes end to end: 47 examples from real
+runs, 3 epochs of QLoRA, final loss 1.0036, a 3.1 GB GGUF, registered as
+`omniagent`.
+
+Measured against stock `qwen2.5-coder:7b` on eight questions absent from the
+collection bank — checked programmatically, so this is held out rather than a
+re-run of the training data:
+
+| | correct | used a tool | total time |
+|---|---|---|---|
+| `omniagent` (1.5B, fine-tuned) | 5/5 checkable | 7/8 | **55s** |
+| `qwen2.5-coder:7b` (stock) | 5/5 checkable | 8/8 | 212s |
+
+Same accuracy, roughly four times faster. Two bugs came out of that run which no
+unit test would have found:
+
+- **HTTP 400 on the first question needing a file read.** Ollama defaults to a
+  4096-token context whatever the model supports, and this system prompt is
+  ~900 tokens before any tool output. The generated `Modelfile` now sets
+  `num_ctx`.
+- **"How many lines does config.py have?" → "10,306".** That is the file's size
+  in bytes, which `list_directory` had shown the model one step earlier; it
+  conflated the units. `read_file` now states `278 lines, 10,306 bytes` in its
+  header, both labelled. A fact the tool already holds should not be left to the
+  model to infer.
+
+If a fine-tune comes out worse than the stock model, say so and keep the stock
+one. A fine-tune nobody measured is not an improvement.
 
 ---
 
