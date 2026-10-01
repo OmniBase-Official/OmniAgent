@@ -48,7 +48,6 @@ def workspace(tmp_path: Path, outside: Path) -> Workspace:
     "escape",
     [
         "../outside/secret.txt",
-        "..\\outside\\secret.txt",
         "src/../../outside/secret.txt",
         "./../../outside/secret.txt",
         "../../../../../../../../etc/passwd",
@@ -59,6 +58,50 @@ def workspace(tmp_path: Path, outside: Path) -> Workspace:
 def test_relative_traversal_is_refused(workspace: Workspace, escape: str) -> None:
     with pytest.raises(SandboxError, match="outside the workspace"):
         workspace.resolve(escape)
+
+
+@pytest.mark.parametrize(
+    "escape",
+    [
+        "..\\outside\\secret.txt",
+        "src\\..\\..\\outside\\secret.txt",
+        "..\\..\\Windows\\System32\\drivers\\etc\\hosts",
+    ],
+)
+def test_windows_style_traversal_is_refused(workspace: Workspace, escape: str) -> None:
+    """Refused everywhere, though not for the same reason everywhere.
+
+    On Windows a backslash separates path components, so this is a traversal
+    and the containment check rejects it. On POSIX a backslash is an ordinary
+    character, so the whole thing is one filename beginning with '.' and the
+    hidden-file rule rejects it instead. What matters is that neither platform
+    hands back the file, which is what this asserts -- CI on Linux caught an
+    earlier version of this test asserting the Windows wording.
+    """
+    with pytest.raises(SandboxError):
+        workspace.resolve(escape)
+
+
+def test_no_escape_attempt_ever_returns_the_secret(
+    workspace: Workspace, outside: Path
+) -> None:
+    """The property that has to hold on every platform, whatever the message."""
+    assert outside.read_text(encoding="utf-8") == "TOP SECRET"
+
+    for attempt in (
+        "../outside/secret.txt",
+        "..\\outside\\secret.txt",
+        "src/../../outside/secret.txt",
+        "src\\..\\..\\outside\\secret.txt",
+        str(outside),
+        "/etc/passwd",
+        "\\\\server\\share\\secret.txt",
+    ):
+        try:
+            text = workspace.read_text(attempt)
+        except SandboxError:
+            continue
+        pytest.fail(f"{attempt!r} was readable and returned {text!r}")
 
 
 def test_an_absolute_path_outside_the_workspace_is_refused(
