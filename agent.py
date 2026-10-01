@@ -17,10 +17,11 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections import Counter
 from collections.abc import Callable
 
 from openai import APIConnectionError, APIStatusError, OpenAI
-from openai.types.chat import ChatCompletionMessageParam
+from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 from pydantic import BaseModel, Field
 
 import observability as obs
@@ -112,6 +113,10 @@ _MIN_WRAPPED_LENGTH = 2
 #: Ollama answers an unknown model tag with a 404.
 _HTTP_NOT_FOUND = 404
 
+#: Status codes worth trying again: the server is busy or briefly unwell, not
+#: wrong. A 404 for a missing model tag will never fix itself, so it is absent.
+_RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+
 
 def _is_wrapped(value: str) -> bool:
     """True when the value is long enough to carry a matching pair of delimiters."""
@@ -149,6 +154,23 @@ class AgentConfig(BaseModel):
     max_steps: int = Field(default=8, ge=1, le=50, description="Max ReAct iterations per question.")
     timeout: float = Field(default=180.0, gt=0, description="Per-request timeout in seconds.")
     verbose: bool = Field(default=True, description="Stream the reasoning trace to the console.")
+    max_retries: int = Field(
+        default=2,
+        ge=0,
+        le=10,
+        description="Extra attempts after a transient model-server failure.",
+    )
+    retry_backoff: float = Field(
+        default=1.0,
+        ge=0.0,
+        description="Seconds before the first retry; doubled for each attempt after it.",
+    )
+    max_repeated_actions: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="How often the same failing Action may repeat before the agent intervenes.",
+    )
 
 
 class Step(BaseModel):
@@ -241,7 +263,7 @@ class ReActAgent:
             base_url=self.config.base_url,
             api_key=self.config.api_key,
             timeout=self.config.timeout,
-            max_retries=1,
+            max_retries=0,
         )
         self.system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             tools=describe_tools(), tool_names=tool_names()
@@ -317,6 +339,7 @@ class ReActAgent:
     def _run_turn(self, question: str) -> str:
         scratchpad: list[ChatCompletionMessageParam] = [_user(question)]
         self.last_trace = []
+        attempts: Counter[tuple[str, str]] = Counter()
         started = time.perf_counter()
         obs.event(
             "agent.turn.start",
@@ -365,6 +388,10 @@ class ReActAgent:
                 observation = self._invoke_tool(step)
                 scratchpad.append(_user(f"Observation: {observation}"))
 
+                intervention = self._check_for_a_rut(step, observation, attempts)
+                if intervention is not None:
+                    scratchpad.append(_user(intervention))
+
         # Out of steps: ask for the best answer it can give from what it has.
         obs.event(
             "agent.budget.exhausted",
@@ -374,6 +401,39 @@ class ReActAgent:
         )
         fallback = self._force_final_answer(scratchpad)
         return self._finish(question, fallback, started, self.config.max_steps)
+
+    def _check_for_a_rut(
+        self, step: Step, observation: str, attempts: Counter[tuple[str, str]]
+    ) -> str | None:
+        """Notice the model retrying an identical failing Action, and say so.
+
+        Small models will happily send the same broken Action Input until the
+        step budget runs out. Repeating the Observation does not help them --
+        telling them it is a repeat does.
+        """
+        if not observation.startswith("Error:"):
+            return None
+
+        signature = (step.action or "", step.action_input or "")
+        attempts[signature] += 1
+        count = attempts[signature]
+        if count < self.config.max_repeated_actions:
+            return None
+
+        obs.event(
+            "agent.loop.repeated_action",
+            logger=_log,
+            level=logging.WARNING,
+            tool=signature[0],
+            tool_input=signature[1],
+            attempts=count,
+        )
+        return (
+            f"You have now tried {signature[0]} with exactly that input {count} times "
+            "and it failed the same way each time. Do not send it again. Either fix "
+            "the input based on the error, use a different tool, or give your "
+            "Final Answer explaining what you could not do."
+        )
 
     def _invoke_tool(self, step: Step) -> str:
         """Run the tool a step asked for, logging the call and its result."""
@@ -433,38 +493,7 @@ class ReActAgent:
         )
 
         started = time.perf_counter()
-        try:
-            response = self.client.chat.completions.create(
-                model=self.config.model,
-                messages=messages,
-                temperature=self.config.temperature,
-                stop=["\nObservation:", "Observation:"] if stop else None,
-            )
-        except APIConnectionError as exc:
-            obs.event(
-                "agent.llm.unreachable",
-                logger=_log,
-                level=logging.ERROR,
-                base_url=self.config.base_url,
-                exc_info=True,
-            )
-            raise AgentError(
-                f"Lost the connection to {self.config.base_url}. Is Ollama still running?"
-            ) from exc
-        except APIStatusError as exc:
-            obs.event(
-                "agent.llm.error",
-                logger=_log,
-                level=logging.ERROR,
-                status_code=exc.status_code,
-                model=self.config.model,
-                exc_info=True,
-            )
-            hint = ""
-            if exc.status_code == _HTTP_NOT_FOUND:
-                hint = f" Pull the model first: 'ollama pull {self.config.model}'."
-            raise AgentError(f"Model server error (HTTP {exc.status_code}).{hint}") from exc
-
+        response = self._create_with_retries(messages, stop=stop)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
         content = (response.choices[0].message.content or "").strip()
         usage = response.usage
@@ -480,6 +509,90 @@ class ReActAgent:
             reply=content,
         )
         return content
+
+    def _create_with_retries(
+        self, messages: list[ChatCompletionMessageParam], *, stop: bool
+    ) -> ChatCompletion:
+        """Call the model, retrying the failures that are worth retrying.
+
+        A busy or still-loading Ollama is the normal case here -- the first
+        request after an idle period routinely times out while the model is
+        paged in. A 404 for a missing model tag is not retried, because no
+        amount of waiting will create it.
+        """
+        attempts = self.config.max_retries + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return self.client.chat.completions.create(
+                    model=self.config.model,
+                    messages=messages,
+                    temperature=self.config.temperature,
+                    stop=["\nObservation:", "Observation:"] if stop else None,
+                )
+            except APIConnectionError as exc:
+                self._handle_attempt_failure(exc, attempt, attempts, retryable=True)
+            except APIStatusError as exc:
+                self._handle_attempt_failure(
+                    exc, attempt, attempts, retryable=exc.status_code in _RETRYABLE_STATUS
+                )
+
+        raise AssertionError("unreachable: the retry loop either returns or raises")
+
+    def _handle_attempt_failure(
+        self,
+        exc: APIConnectionError | APIStatusError,
+        attempt: int,
+        attempts: int,
+        *,
+        retryable: bool,
+    ) -> None:
+        """Log an attempt, then either sleep for the next one or give up."""
+        status_code = exc.status_code if isinstance(exc, APIStatusError) else None
+
+        if retryable and attempt < attempts:
+            delay = self.config.retry_backoff * (2 ** (attempt - 1))
+            obs.event(
+                "agent.llm.retry",
+                logger=_log,
+                level=logging.WARNING,
+                attempt=attempt,
+                of=attempts,
+                delay_seconds=round(delay, 3),
+                status_code=status_code,
+                reason=type(exc).__name__,
+            )
+            if delay:
+                time.sleep(delay)
+            return
+
+        if isinstance(exc, APIConnectionError):
+            obs.event(
+                "agent.llm.unreachable",
+                logger=_log,
+                level=logging.ERROR,
+                base_url=self.config.base_url,
+                attempts=attempt,
+                exc_info=True,
+            )
+            raise AgentError(
+                f"Lost the connection to {self.config.base_url} after {attempt} "
+                f"attempt{'s' if attempt > 1 else ''}. Is Ollama still running?"
+            ) from exc
+
+        obs.event(
+            "agent.llm.error",
+            logger=_log,
+            level=logging.ERROR,
+            status_code=status_code,
+            model=self.config.model,
+            attempts=attempt,
+            retryable=retryable,
+            exc_info=True,
+        )
+        hint = ""
+        if status_code == _HTTP_NOT_FOUND:
+            hint = f" Pull the model first: 'ollama pull {self.config.model}'."
+        raise AgentError(f"Model server error (HTTP {status_code}).{hint}") from exc
 
     def _force_final_answer(self, scratchpad: list[ChatCompletionMessageParam]) -> str:
         scratchpad.append(

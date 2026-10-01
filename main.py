@@ -147,6 +147,12 @@ def preflight(agent: ReActAgent) -> bool:
 def answer(agent: ReActAgent, question: str) -> int:
     try:
         result = agent.run(question)
+    except KeyboardInterrupt:
+        # A local 7B model can think for a long time; Ctrl-C during a step
+        # should drop back to the prompt, not print a traceback.
+        obs.event("cli.interrupted", level=logging.WARNING, question=question)
+        print(Style.dim("\n(cancelled)"))
+        return 130
     except AgentError as exc:
         obs.event("cli.aborted", level=logging.ERROR, reason=str(exc), exc_info=True)
         print(Style.red(f"\n[!] {exc}"))

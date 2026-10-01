@@ -265,6 +265,42 @@ OmniAgent: 15% of 2400 plus the square root of 169 is 373, and today is Tuesday,
 
 ---
 
+## When things go wrong
+
+A local model fails in two characteristic ways, and both are handled rather
+than left to the user.
+
+**The server is briefly unwell.** The first request after an idle period
+routinely times out while Ollama pages the model in. Connection errors,
+timeouts and the busy status codes (408, 409, 425, 429, 500, 502, 503, 504) are
+retried with exponential backoff; each attempt is logged as `agent.llm.retry`
+with its delay. A 404 for a model tag that was never pulled is *not* retried,
+because waiting cannot create it. The OpenAI client's own retry is switched off
+so the attempt count means what it says.
+
+```
+WARNING agent.llm.retry  attempt=1/3 delay=1.0s status=503
+WARNING agent.llm.retry  attempt=2/3 delay=2.0s status=503
+INFO    agent.llm.response
+```
+
+**The model gets stuck.** A small model will resend an Action that cannot work
+until the step budget runs out. When the same tool and input fail identically
+`max_repeated_actions` times, the agent logs `agent.loop.repeated_action` and
+tells the model so directly -- stop sending it, fix the input, use another
+tool, or answer -- instead of handing back the same Observation again.
+
+`Ctrl-C` during a step returns to the prompt rather than printing a traceback.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `max_retries` | `2` | Extra attempts after a transient failure. |
+| `retry_backoff` | `1.0` | Seconds before the first retry, doubled thereafter. |
+| `max_repeated_actions` | `2` | Identical failing Actions tolerated before intervening. |
+| `timeout` | `180.0` | Per-request timeout in seconds. |
+
+---
+
 ## Logging
 
 The console trace is for you; the log stream is for machines:

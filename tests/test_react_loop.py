@@ -21,6 +21,9 @@ CALL = "Thought: maths\nAction: calculate\nAction Input: {expression}"
 
 
 def build(fake: FakeOpenAI, **overrides: Any) -> ReActAgent:
+    # retry_backoff=0: the retry policy is tested by counting attempts, never by
+    # making the suite wait for them.
+    overrides.setdefault("retry_backoff", 0.0)
     config = AgentConfig(verbose=False, **overrides)
     return ReActAgent(config=config, client=fake.as_client(), printer=lambda _: None)
 
