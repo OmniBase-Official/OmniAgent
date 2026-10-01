@@ -32,3 +32,6 @@ omniagent.local.toml
 
 # Throwaway venv used to rehearse CI locally
 .ci-venv/
+
+# Trained models, adapters, GGUF and the llama.cpp checkout
+models/

@@ -45,9 +45,36 @@ def workspace(tmp_path: Path) -> Iterator[Workspace]:
 def test_read_file_numbers_the_lines(workspace: Workspace) -> None:
     result = read_file("README.md")
 
-    assert result.startswith("README.md:")
+    assert result.startswith("README.md (2 lines,")
     assert "    1  # OmniAgent" in result
     assert "    2  A local agent." in result
+
+
+def test_read_file_states_the_line_count(workspace: Workspace) -> None:
+    """Regression from a live run of the fine-tuned model.
+
+    Asked how many lines a 278-line file had, it answered 10,306 -- the file's
+    size in bytes, which list_directory had shown it a step earlier. Both
+    numbers are now labelled in the header, so neither has to be inferred.
+    """
+    (workspace.root / "counted.txt").write_text("a\nb\nc\n", encoding="utf-8")
+
+    header = read_file("counted.txt").splitlines()[0]
+
+    assert header.startswith("counted.txt (3 lines, ")
+    assert "bytes)" in header
+
+
+def test_read_file_says_when_it_truncated(workspace: Workspace) -> None:
+    """A capped read must not claim a line count it cannot know."""
+    # Over the 16,000-character read cap, under the 100 KB file-size limit, so
+    # it is truncated rather than refused outright.
+    (workspace.root / "long.txt").write_text("line\n" * 5_000, encoding="utf-8")
+
+    header = read_file("long.txt").splitlines()[0]
+
+    assert "showing the first" in header
+    assert "lines)" in header
 
 
 def test_read_file_reaches_a_nested_path(workspace: Workspace) -> None:
@@ -199,7 +226,7 @@ def test_search_text_stops_at_the_match_limit(workspace: Workspace) -> None:
 
 
 def test_the_tools_are_reachable_by_name(workspace: Workspace) -> None:
-    assert run_tool("read_file", "README.md").startswith("README.md:")
+    assert run_tool("read_file", "README.md").startswith("README.md (")
     assert run_tool("list_directory", "none").startswith(".:")
     assert "src/app.py" in run_tool("search_text", '{"query": "def main"}')
 

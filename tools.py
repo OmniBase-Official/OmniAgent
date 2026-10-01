@@ -24,9 +24,12 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import observability as obs
-from sandbox import _BINARY_SNIFF_BYTES, SandboxError, get_workspace
+from sandbox import _BINARY_SNIFF_BYTES, TRUNCATION_NOTE, SandboxError, get_workspace
 
 _log = obs.get_logger("tools")
+
+#: The stable part of the sandbox's truncation note, used to spot a capped read.
+_TRUNCATION_PREFIX = TRUNCATION_NOTE.split("{", 1)[0].rstrip()
 
 # --------------------------------------------------------------------------- #
 # calculate
@@ -456,13 +459,24 @@ def read_file(path: str) -> str:
     except OSError as exc:
         return f"Error: could not read {path!r}: {exc.strerror or exc}"
 
-    shown = workspace.display(workspace.resolve(path))
+    resolved = workspace.resolve(path)
+    shown = workspace.display(resolved)
     if not text.strip():
         return f"{shown} is empty."
-    numbered = "\n".join(
-        f"{number:>5}  {line}" for number, line in enumerate(text.splitlines(), start=1)
-    )
-    return f"{shown}:\n{numbered}"
+
+    lines = text.splitlines()
+    numbered = "\n".join(f"{number:>5}  {line}" for number, line in enumerate(lines, start=1))
+    size = resolved.stat().st_size
+
+    # State the line count rather than leaving the model to work it out. Asked
+    # how many lines a 278-line file had, a 1.5B model read the whole thing and
+    # answered 10,306 -- the number was in the output and it still guessed.
+    # Facts the tool already knows should not be left to the model.
+    if _TRUNCATION_PREFIX in text:
+        header = f"{shown} ({size:,} bytes, showing the first {len(lines) - 1:,} lines)"
+    else:
+        header = f"{shown} ({len(lines):,} lines, {size:,} bytes)"
+    return f"{header}:\n{numbered}"
 
 
 def list_directory(path: str = ".") -> str:

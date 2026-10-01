@@ -1,18 +1,20 @@
 """Structural checks on the training notebook.
 
-The notebook cannot be executed here -- it wants a GPU and a real base model --
-so these check what can be checked without running it: that it is valid
-nbformat, that every code cell is syntactically valid Python, that the library
-pins and API names match the ones `scripts/smoke_train.py` actually exercised,
-and that the Modelfile cell produces the file `ollama create` accepts.
+Running it needs a GPU, a 3 GB model download and twenty minutes, so the suite
+checks what can be checked in milliseconds: that it is valid nbformat, that
+every code cell is syntactically valid Python, that it still picks its loading
+strategy from the hardware rather than assuming one, that it never uploads the
+dataset anywhere, and that the Modelfile cell produces the file `ollama create`
+accepts.
+
+The notebook itself has been executed end to end on this project's own GPU; see
+the README for what that run produced.
 """
 
 from __future__ import annotations
 
 import ast
 import json
-import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,11 @@ NOTEBOOK = Path(__file__).resolve().parent.parent / "notebooks" / "train_omniage
 def notebook() -> dict[str, Any]:
     data: dict[str, Any] = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
     return data
+
+
+def joined(notebook: dict[str, Any], kind: str = "code") -> str:
+    """Every cell of one kind, concatenated."""
+    return chr(10).join(sources(notebook, kind))
 
 
 def sources(notebook: dict[str, Any], kind: str = "code") -> list[str]:
@@ -57,18 +64,46 @@ def test_the_notebook_ships_no_outputs(notebook: dict[str, Any]) -> None:
             assert cell["execution_count"] is None
 
 
-@pytest.mark.parametrize(
-    "pin",
-    ["transformers==5.17.0", "trl==1.13.0", "peft==0.21.0", "datasets==5.0.1"],
-)
-def test_the_library_versions_are_pinned(notebook: dict[str, Any], pin: str) -> None:
-    """These exact versions are the ones the CPU smoke test ran against."""
-    assert any(pin in source for source in sources(notebook))
+def test_the_strategy_is_chosen_from_the_hardware(notebook: dict[str, Any]) -> None:
+    """4 GB of VRAM needs 4-bit; a CPU needs fp32. Neither can be assumed."""
+    code = joined(notebook)
+
+    assert "torch.cuda.is_available()" in code
+    assert "BitsAndBytesConfig" in code
+    assert "load_in_4bit=True" in code
+    assert "prepare_model_for_kbit_training" in code
 
 
-def test_sentencepiece_is_installed_for_the_gguf_step(notebook: dict[str, Any]) -> None:
-    """Discovered the hard way: convert_hf_to_gguf.py needs it for some tokenizers."""
-    assert any("sentencepiece" in source for source in sources(notebook))
+def test_the_merge_happens_off_the_gpu(notebook: dict[str, Any]) -> None:
+    """A 4-bit model cannot be merged into, and the card has no room anyway."""
+    merge_cell = next(s for s in sources(notebook) if "merge_and_unload" in s)
+
+    assert "PeftModel.from_pretrained" in merge_cell
+    assert 'device_map="cpu"' in merge_cell
+    assert "empty_cache" in merge_cell
+
+
+def test_nothing_is_uploaded(notebook: dict[str, Any]) -> None:
+    """The dataset holds the user's files. It stays on the machine that made it."""
+    everything = joined(notebook) + joined(notebook, "markdown")
+
+    for leak in ("google.colab", "files.download", "files.upload", "drive.mount"):
+        assert leak not in everything, f"{leak} would move the dataset off this machine"
+
+
+def test_the_notebook_registers_the_model_with_ollama(notebook: dict[str, Any]) -> None:
+    """Local training means no download step: ollama create is a cell."""
+    code = joined(notebook)
+
+    assert '"ollama", "create"' in code
+
+
+def test_the_notebook_finishes_by_running_the_agent(notebook: dict[str, Any]) -> None:
+    """Did the pipeline finish is not the question. "Does the agent work" is."""
+    code = joined(notebook)
+
+    assert '"main.py"' in code
+    assert '"--model"' in code
 
 
 @pytest.mark.parametrize("name", ["max_length", "processing_class", "peft_config"])
@@ -116,19 +151,33 @@ def test_the_base_model_and_its_licence_are_called_out(notebook: dict[str, Any])
     assert "licence" in prose.lower() or "license" in prose.lower()
 
 
-def test_the_modelfile_cell_writes_what_ollama_accepts(notebook: dict[str, Any]) -> None:
+class _RecordingSubprocess:
+    """Stands in for subprocess so the cell does not really build a model."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(self, args: list[str], **kwargs: Any) -> None:
+        self.calls.append((list(args), kwargs))
+
+
+def test_the_modelfile_cell_writes_what_ollama_accepts(
+    notebook: dict[str, Any], tmp_path: Path
+) -> None:
     """The f-string has to survive Go template braces; execute it and look."""
     cell = next(s for s in sources(notebook) if "modelfile" in s)
+    recorder = _RecordingSubprocess()
+    namespace: dict[str, Any] = {
+        "gguf_path": tmp_path / "model-f16.gguf",
+        "OUTPUT_DIR": tmp_path,
+        "OLLAMA_NAME": "omniagent",
+        "NUM_CTX": 16384,
+        "Path": Path,
+        "subprocess": recorder,
+    }
 
-    cwd = Path.cwd()
-    with tempfile.TemporaryDirectory() as scratch:
-        os.chdir(scratch)
-        try:
-            namespace: dict[str, Any] = {"gguf_path": "model-f16.gguf", "Path": Path}
-            exec(cell, namespace)  # noqa: S102 - executing our own notebook cell is the test
-            written = Path("Modelfile").read_text(encoding="utf-8")
-        finally:
-            os.chdir(cwd)
+    exec(cell, namespace)  # noqa: S102 - executing our own notebook cell is the test
+    written = (tmp_path / "Modelfile").read_text(encoding="utf-8")
 
     assert written.startswith("FROM ./model-f16.gguf")
     assert "{{ if .System }}" in written
@@ -138,3 +187,28 @@ def test_the_modelfile_cell_writes_what_ollama_accepts(notebook: dict[str, Any])
     assert 'PARAMETER stop "Observation:"' in written
     # The f-string must not have leaked doubled braces into the template.
     assert "{{{{" not in written
+
+
+def test_the_modelfile_cell_registers_the_model(
+    notebook: dict[str, Any], tmp_path: Path
+) -> None:
+    """It must run ollama create beside the GGUF, or the relative FROM breaks."""
+    cell = next(s for s in sources(notebook) if "modelfile" in s)
+    recorder = _RecordingSubprocess()
+    exec(  # noqa: S102 - executing our own notebook cell is the test
+        cell,
+        {
+            "gguf_path": tmp_path / "model-f16.gguf",
+            "OUTPUT_DIR": tmp_path,
+            "OLLAMA_NAME": "omniagent",
+            "NUM_CTX": 16384,
+            "Path": Path,
+            "subprocess": recorder,
+        },
+    )
+
+    assert len(recorder.calls) == 1
+    args, kwargs = recorder.calls[0]
+    assert args == ["ollama", "create", "omniagent", "-f", "Modelfile"]
+    assert kwargs["cwd"] == tmp_path
+    assert kwargs["check"] is True
