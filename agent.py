@@ -20,6 +20,7 @@ import re
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable
+from typing import Any, cast
 
 from openai import APIConnectionError, APIStatusError, OpenAI
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
@@ -132,6 +133,25 @@ def _is_wrapped(value: str) -> bool:
 # call sites readable without scattering casts around.
 
 
+#: Stands in for a tool output that had to be dropped to fit the window.
+_ELIDED = "[earlier tool output omitted so that this request fits the context window]"
+
+#: Marks the newest message when even that had to be cut back.
+_CLIPPED = "\n[clipped to fit the context window]"
+
+#: Characters per token. Crude on purpose: the point is to stay clear of the
+#: limit, not to match the tokeniser, which we cannot run from here anyway.
+_CHARS_PER_TOKEN = 4
+
+#: Per-message overhead the chat format adds around the content.
+_MESSAGE_OVERHEAD_TOKENS = 4
+
+
+def _estimate_tokens(message: ChatCompletionMessageParam) -> int:
+    content = message.get("content") or ""
+    return len(str(content)) // _CHARS_PER_TOKEN + _MESSAGE_OVERHEAD_TOKENS
+
+
 def _system(content: str) -> ChatCompletionMessageParam:
     return {"role": "system", "content": content}
 
@@ -170,6 +190,19 @@ class AgentConfig(BaseModel):
         ge=1,
         le=10,
         description="How often the same failing Action may repeat before the agent intervenes.",
+    )
+    context_window: int = Field(
+        default=8192,
+        ge=1024,
+        description=(
+            "Tokens the model has been configured for. The OpenAI API cannot be asked, "
+            "so this is what the server was told -- for Ollama, the Modelfile's num_ctx."
+        ),
+    )
+    reply_reserve: int = Field(
+        default=512,
+        ge=64,
+        description="Tokens held back from the prompt so the reply has room.",
     )
 
 
@@ -504,7 +537,79 @@ class ReActAgent:
     def _messages(
         self, scratchpad: list[ChatCompletionMessageParam]
     ) -> list[ChatCompletionMessageParam]:
-        return [_system(self.system_prompt), *self.history, *scratchpad]
+        return self._fit(_system(self.system_prompt), self.history, scratchpad)
+
+    def _fit(
+        self,
+        system: ChatCompletionMessageParam,
+        history: list[ChatCompletionMessageParam],
+        scratchpad: list[ChatCompletionMessageParam],
+    ) -> list[ChatCompletionMessageParam]:
+        """Shrink the conversation so the server never has to.
+
+        When a request exceeds the context window, Ollama drops tokens from the
+        front -- which is where the system prompt lives. Asked how many lines a
+        file had, a 7B model on a 4096-token context replied "The current date
+        and time is Friday, 2 October 2026": the file read had filled the
+        window, and the format instructions and the question had both been cut
+        away with it.
+
+        So the trimming happens here, where the parts can be told apart. What
+        goes, in order: whole earlier turns, then the oldest tool output of this
+        turn, then -- only if nothing else is left -- the tail of the newest
+        message. The system prompt and the question are never dropped.
+        """
+        budget = self.config.context_window - self.config.reply_reserve
+        kept_history = list(history)
+        pad: list[dict[str, Any]] = [dict(message) for message in scratchpad]
+
+        def assembled() -> list[dict[str, Any]]:
+            return [dict(system), *(dict(m) for m in kept_history), *pad]
+
+        def total() -> int:
+            return sum(
+                _estimate_tokens(cast("ChatCompletionMessageParam", m)) for m in assembled()
+            )
+
+        original = total()
+        if original <= budget:
+            return [system, *kept_history, *scratchpad]
+
+        # 1. Earlier turns go first, oldest pair at a time: they are the least
+        #    relevant thing in the request.
+        while kept_history and total() > budget:
+            del kept_history[: min(2, len(kept_history))]
+
+        # 2. Then this turn's older tool output, keeping the question at index 0
+        #    and the newest message intact.
+        for index in range(1, max(1, len(pad) - 1)):
+            if total() <= budget:
+                break
+            if len(str(pad[index].get("content", ""))) > len(_ELIDED):
+                pad[index]["content"] = _ELIDED
+
+        # 3. Last resort: shorten the newest message. Better a clipped
+        #    observation than a request the server silently mangles.
+        if total() > budget and pad:
+            over = total() - budget
+            content = str(pad[-1].get("content", ""))
+            keep = max(0, len(content) - (over * _CHARS_PER_TOKEN) - len(_CLIPPED))
+            if keep < len(content):
+                pad[-1]["content"] = content[:keep] + _CLIPPED
+
+        final = total()
+        obs.event(
+            "agent.context.trimmed",
+            logger=_log,
+            level=logging.WARNING,
+            estimated_tokens_before=original,
+            estimated_tokens_after=final,
+            budget=budget,
+            context_window=self.config.context_window,
+            earlier_turns_dropped=len(history) - len(kept_history),
+            still_over=final > budget,
+        )
+        return cast("list[ChatCompletionMessageParam]", assembled())
 
     def _complete(self, scratchpad: list[ChatCompletionMessageParam], stop: bool = True) -> str:
         messages = self._messages(scratchpad)

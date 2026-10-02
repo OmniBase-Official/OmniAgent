@@ -130,16 +130,28 @@ _configured = False
 # --------------------------------------------------------------------------- #
 
 
-def _is_sensitive(key: str) -> bool:
+def _is_sensitive(key: str, value: Any) -> bool:
+    """Whether a field should be masked.
+
+    Name-matching alone needed a hand-maintained allow-list, and the list was
+    always one field behind: `prompt_tokens` was caught during M2, and
+    `estimated_tokens_before` slipped past the fix. The general rule is simpler
+    and does not need maintaining -- a field named "...tokens..." holding a
+    *number* is a count, because a credential is never an int. Singular
+    "token" (auth_token, access_token) is untouched by this, and so is any
+    string or list however it is named.
+    """
     lowered = key.lower()
     if lowered in _SAFE_FIELDS:
+        return False
+    if "tokens" in lowered and isinstance(value, (int, float)) and not isinstance(value, bool):
         return False
     return any(hint in lowered for hint in _SENSITIVE_HINTS)
 
 
 def _sanitise(key: str, value: Any) -> Any:
     """Mask credentials, shorten long strings, and make a value JSON-safe."""
-    if _is_sensitive(key):
+    if _is_sensitive(key, value):
         return _REDACTED
     limit = MAX_TRAINING_FIELD_LENGTH if key in TRAINING_FIELDS else MAX_FIELD_LENGTH
     return _coerce(value, limit)

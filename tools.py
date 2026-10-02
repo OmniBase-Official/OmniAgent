@@ -596,6 +596,60 @@ def _run_search_text(args: SearchTextArgs) -> str:
     return search_text(args.query, args.path)
 
 
+def file_info(path: str) -> str:
+    """Report a file's size and line count without returning its contents.
+
+    Exists because the alternative is worse. Asked how many lines a file had,
+    the agent used to read the whole thing, and on a small context window that
+    one observation pushed the system prompt out of the window -- after which a
+    7B model answered a completely different question. The number was never
+    worth the whole file.
+    """
+    workspace = get_workspace()
+    try:
+        facts = workspace.describe(path)
+    except SandboxError as exc:
+        return f"Error: {exc}"
+    except OSError as exc:
+        return f"Error: could not inspect {path!r}: {exc.strerror or exc}"
+
+    if facts.binary:
+        return f"{facts.path}: {facts.size_bytes:,} bytes, binary (not a text file)"
+    if facts.lines == 0:
+        return f"{facts.path}: 0 lines, {facts.size_bytes:,} bytes (empty)"
+    return (
+        f"{facts.path}: {facts.lines:,} lines, {facts.size_bytes:,} bytes\n"
+        f"  first line: {facts.first_line[:160]}\n"
+        f"  last line : {facts.last_line[:160]}"
+    )
+
+
+class FileInfoArgs(ToolArgs):
+    path: str = Field(
+        min_length=1,
+        max_length=1_000,
+        description="Path relative to the workspace root, e.g. 'README.md'.",
+    )
+
+
+def _run_file_info(args: FileInfoArgs) -> str:
+    return file_info(args.path)
+
+
+TOOLS["file_info"] = Tool(
+    name="file_info",
+    description=(
+        "Report how many lines and bytes a file has, plus its first and last "
+        "line, WITHOUT returning the file. Use this -- not read_file -- whenever "
+        "the question is about a file's size or length rather than its contents. "
+        "It is far cheaper and cannot overflow the context."
+    ),
+    args_model=FileInfoArgs,
+    run=_run_file_info,
+    example="README.md",
+)
+
+
 TOOLS["read_file"] = Tool(
     name="read_file",
     description=(

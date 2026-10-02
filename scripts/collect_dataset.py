@@ -131,6 +131,13 @@ SESSIONS: list[list[str]] = [
     ["How big is export_dataset.py in bytes?"],
     ["Are there any files ending in .toml here?"],
     ["Which Python file in the top level is the largest?"],
+    # -- file_info: metadata without dumping the file ----------------------- #
+    ["How big is agent.py, in lines and bytes?"],
+    ["What is the last line of config.py?"],
+    ["Is observability.py longer than sandbox.py?"],
+    ["How many lines are in each of main.py and tools.py?"],
+    ["What does the first line of export_dataset.py say?"],
+    ["Without reading it all, how long is README.md?"],
     # -- more than one tool ------------------------------------------------- #
     ["How many lines does config.py have, and what is that times 4?"],
     ["How many lines does validate_dataset.py have? What percent of 1000 is that?"],

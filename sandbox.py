@@ -67,6 +67,18 @@ DENIED_SUFFIXES = frozenset(
 DENIED_NAMES = frozenset({"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "credentials"})
 
 
+@dataclass(frozen=True)
+class FileFacts:
+    """What can be said about a file without quoting it."""
+
+    path: str
+    size_bytes: int
+    lines: int | None
+    first_line: str
+    last_line: str
+    binary: bool
+
+
 class SandboxError(ValueError):
     """Raised when a path is outside the workspace or otherwise refused."""
 
@@ -164,6 +176,44 @@ class Workspace:
                 limit=self.max_read_chars
             )
         return text
+
+    def describe(self, candidate: str) -> FileFacts:
+        """Measure a file without returning its contents.
+
+        A model asked how long a file is should not have to read the whole
+        thing: on a small context window that one observation can push the
+        system prompt out, and the answer is a number we already have. Lines
+        are counted by streaming, so this works on files too large to read.
+        """
+        path = self.resolve(candidate)
+        if path.is_dir():
+            raise SandboxError(f"{self.display(path)} is a directory; use list_directory")
+        if not path.is_file():
+            raise SandboxError(f"no such file: {self.display(path)}")
+
+        size = path.stat().st_size
+        lines = 0
+        first = last = ""
+        binary = False
+        with path.open("rb") as handle:
+            head = handle.read(_BINARY_SNIFF_BYTES)
+            binary = b"\0" in head
+            handle.seek(0)
+            if not binary:
+                for raw in handle:
+                    text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                    lines += 1
+                    if lines == 1:
+                        first = text
+                    last = text
+        return FileFacts(
+            path=self.display(path),
+            size_bytes=size,
+            lines=None if binary else lines,
+            first_line=first,
+            last_line=last,
+            binary=binary,
+        )
 
     def list_dir(self, candidate: str) -> list[str]:
         """Return the visible entries of a directory, directories first."""
