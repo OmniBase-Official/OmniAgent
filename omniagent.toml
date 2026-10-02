@@ -7,6 +7,10 @@ max_steps = 8
 
 [profile.demo]
 # What the Saturday run uses: more room to think, and everything logged.
+# The model is pinned here on purpose. Inheriting [defaults] put the demo on
+# the stock 7B, whose own default context is 4096 -- short enough to truncate
+# the system prompt from the front. The fine-tune's Modelfile pins 16384.
+model = "omniagent"
 max_steps = 12
 log_file = "data/demo.jsonl"
 temperature = 0.0
