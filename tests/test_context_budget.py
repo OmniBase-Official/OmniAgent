@@ -391,3 +391,33 @@ def test_a_single_unbroken_line_is_capped_too() -> None:
 def test_the_cap_is_configurable() -> None:
     body = "\n".join(f"line {number}" for number in range(1, 401))
     assert len(cap_observation(body, 500)) > len(cap_observation(body, 100))
+
+
+def test_the_console_trace_shows_what_the_model_was_given(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """The trace is for reading the model's reasoning, not the file's contents.
+
+    Rehearsing the demo, one read_file scrolled 257 numbered lines past the
+    screen while the model was shown only the first 35. A trace that disagrees
+    with the prompt is worse than a short one: the log keeps the whole
+    observation, so nothing is lost by printing what was actually sent.
+    """
+    body = "\n".join(f"line {number}" for number in range(1, 801))
+    (tmp_path / "work" / "big.py").write_text(body, encoding="utf-8")
+    printed: list[str] = []
+    fake = FakeOpenAI(
+        replies=["Thought: read it\nAction: read_file\nAction Input: big.py", FINAL]
+    )
+    agent = ReActAgent(
+        config=AgentConfig(verbose=True, retry_backoff=0.0),
+        client=fake.as_client(),
+        printer=printed.append,
+    )
+
+    agent.run("How many lines does big.py have?")
+
+    trace = "\n".join(printed)
+    assert "line 1\n" in trace, "the head of the file should still be shown"
+    assert "line 800" not in trace, "the whole file reached the console"
+    assert "the rest of this output was not shown" in trace

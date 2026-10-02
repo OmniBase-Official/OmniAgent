@@ -864,4 +864,9 @@ class ReActAgent:
 
     def _trace_observation(self, observation: str) -> None:
         if self.config.verbose:
-            self._print(f"  Observation  : {observation}")
+            # The same cap the prompt gets, from the same setting, so the trace
+            # cannot disagree with what the model was actually given. One
+            # read_file scrolled 257 numbered lines past a demo screen while
+            # the model saw the first 35; the log keeps the whole observation.
+            shown = cap_observation(observation, self.config.max_observation_tokens)
+            self._print(f"  Observation  : {shown}")
