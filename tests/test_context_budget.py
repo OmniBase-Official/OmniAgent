@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 
 import observability as obs
-from agent import AgentConfig, ReActAgent
+from agent import AgentConfig, ReActAgent, cap_observation
 from sandbox import SandboxError, Workspace, get_workspace, set_workspace
 from tests.fakes import FakeOpenAI
 from tools import describe_tools, file_info, run_tool
@@ -306,3 +306,71 @@ def test_the_prompt_tells_the_model_when_to_prefer_file_info() -> None:
 def test_describe_refuses_what_read_text_refuses(workspace: Workspace) -> None:
     with pytest.raises(SandboxError):
         workspace.describe("../outside/secret.txt")
+
+
+# --------------------------------------------------------------------------- #
+# one observation among many
+# --------------------------------------------------------------------------- #
+
+
+def test_one_tool_observation_cannot_dominate_the_prompt(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """The trimmer watches the total; this is about one message's share of it.
+
+    Asked for a line count, the fine-tune read the whole 257-line file instead
+    of asking for its metadata. That observation took 71% of a 5,091-token
+    prompt without coming anywhere near the 16,384-token window, so the budget
+    never objected -- and the model then continued the file's text instead of
+    the format: an empty reply, a Thought lifted from the file's own docstring,
+    and a call to get_current_time that nobody had asked for. The date reached
+    the final answer.
+    """
+    body = "\n".join(f"line {number}" for number in range(1, 801))
+    (tmp_path / "work" / "big.py").write_text(body, encoding="utf-8")
+    fake = FakeOpenAI(
+        replies=["Thought: read it\nAction: read_file\nAction Input: big.py", FINAL]
+    )
+
+    build(fake, context_window=16384).run("How many lines does big.py have?")
+
+    messages = [str(message["content"]) for message in sent(fake, 1)]
+    observations = [text for text in messages if text.startswith("Observation:")]
+    assert len(observations) == 1
+    share = len(observations[0]) / sum(len(text) for text in messages)
+    assert share < 0.5, f"one observation took {share:.0%} of the prompt"
+
+
+def test_a_short_observation_is_left_alone() -> None:
+    text = "tools.py: 689 lines, 23,949 bytes"
+    assert cap_observation(text, 600) == text
+
+
+def test_a_capped_observation_keeps_its_head() -> None:
+    """A tool's summary line is the first line, and is usually the answer."""
+    body = "\n".join(f"{number:>5}  line {number}" for number in range(1, 401))
+    capped = cap_observation(f"big.py (400 lines, 5,000 bytes):\n{body}", 60)
+
+    assert capped.startswith("big.py (400 lines, 5,000 bytes):")
+    assert "line 400" not in capped
+
+
+def test_a_capped_observation_says_what_was_dropped() -> None:
+    body = "\n".join(f"line {number}" for number in range(1, 101))
+    capped = cap_observation(body, 20)
+
+    assert "of 101 lines shown" in capped or "of 100 lines shown" in capped
+    assert capped.count("[observation capped") == 1
+
+
+def test_a_single_unbroken_line_is_capped_too() -> None:
+    """A minified file gives the line-based cut nothing to work with."""
+    capped = cap_observation("x" * 40_000, 50)
+
+    assert len(capped) < 1_000
+    assert "characters shown" in capped
+
+
+def test_the_cap_is_configurable() -> None:
+    body = "\n".join(f"line {number}" for number in range(1, 401))
+    assert len(cap_observation(body, 500)) > len(cap_observation(body, 100))

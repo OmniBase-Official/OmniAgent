@@ -325,3 +325,24 @@ def test_a_failed_turn_is_not_remembered() -> None:
         agent.run("What is 2 + 2?")
 
     assert agent.history == []
+
+
+def test_a_fabricated_fact_does_not_survive_a_format_violation() -> None:
+    """A rejected reply must not leave its content standing as a premise.
+
+    Asked for a line count, the fine-tune opened with "sandbox.py has 204
+    lines." -- no Final Answer prefix, and the number invented before a single
+    tool had run. Kept verbatim in the scratchpad it became the model's own
+    premise: it went on repeating 204 for the rest of the turn, even after
+    read_file had put the real 257 in front of it. The nudge already states the
+    format in full, so the fabricated content has no job left to do.
+    """
+    fake = FakeOpenAI(
+        replies=["sandbox.py has 204 lines.", FINAL.format(answer="257 lines.")]
+    )
+
+    assert build(fake).run("How many lines does sandbox.py have?") == "257 lines."
+
+    resent = contents(fake, 1)
+    assert not any("204" in text for text in resent), "the invented count came back"
+    assert any("discarded" in text for text in resent), "nothing says it was dropped"

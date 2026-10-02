@@ -167,6 +167,55 @@ def _estimate_tokens(message: ChatCompletionMessageParam) -> int:
     return len(str(content)) // _CHARS_PER_TOKEN + _MESSAGE_OVERHEAD_TOKENS
 
 
+#: Stands in for a reply the loop threw away for breaking format. Short on
+#: purpose: it has to carry no facts of its own.
+_DISCARDED_REPLY = "(this reply was discarded: it did not follow the required format)"
+
+#: Appended when one observation had to be shortened. Worded so it cannot be
+#: mistaken for part of the tool's own output.
+OBSERVATION_CAPPED_NOTE = "\n[observation capped: {shown} of {total} lines shown]"
+
+#: The same, for output with no line to break on.
+OBSERVATION_CLIPPED_NOTE = "\n[observation capped: {shown} of {total} characters shown]"
+
+
+def cap_observation(observation: str, max_tokens: int) -> str:
+    """Shorten one observation so it cannot crowd out the rest of the prompt.
+
+    The budget trimmer only acts once the whole prompt exceeds the window. An
+    observation can sit far below that and still dominate: asked for a line
+    count, the fine-tune read the whole 257-line file, and that one observation
+    took 71% of a 5,091-token prompt against a 16,384-token window. Nothing was
+    over budget, so nothing was trimmed -- and the model then continued the
+    file's text instead of the format. One empty reply, one Thought lifted
+    verbatim from the file's own docstring, and a call to get_current_time that
+    nobody had asked for, whose result reached the final answer.
+
+    The head is kept, because that is where a tool puts the summary line that
+    often answers the question on its own.
+    """
+    limit = max_tokens * _CHARS_PER_TOKEN
+    if len(observation) <= limit:
+        return observation
+
+    lines = observation.splitlines()
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > limit:
+            break
+        kept.append(line)
+        used += len(line) + 1
+
+    if not kept:
+        # One unbroken line: a minified file, or a long error. Cut it anyway,
+        # and say so in characters, since "1 of 1 lines" would be a lie.
+        head = observation[:limit]
+        return head + OBSERVATION_CLIPPED_NOTE.format(shown=len(head), total=len(observation))
+
+    return "\n".join(kept) + OBSERVATION_CAPPED_NOTE.format(shown=len(kept), total=len(lines))
+
+
 def _system(content: str) -> ChatCompletionMessageParam:
     return {"role": "system", "content": content}
 
@@ -218,6 +267,16 @@ class AgentConfig(BaseModel):
         default=512,
         ge=64,
         description="Tokens held back from the prompt so the reply has room.",
+    )
+    max_observation_tokens: int = Field(
+        default=600,
+        ge=64,
+        description=(
+            "Tokens any single tool observation may add to the prompt. Sized against "
+            "the baseline prompt rather than the window: system prompt plus question "
+            "measures about 1,400 tokens, so 600 keeps one observation a minority "
+            "voice. The window is not the binding constraint -- share of prompt is."
+        ),
     )
 
 
@@ -429,7 +488,19 @@ class ReActAgent:
                 self.last_trace.append(step)
                 self._trace(iteration, step)
 
-                scratchpad.append(_assistant(reply))
+                if step.final_answer is None and step.action is None:
+                    # A reply that broke format is not kept verbatim. Asked for
+                    # a line count, the model opened with "sandbox.py has 204
+                    # lines." -- no Final Answer prefix, and the number invented
+                    # before a single tool had run. Appended as-is it became the
+                    # model's own premise, and it repeated 204 for the rest of
+                    # the turn even after read_file put the real 257 in front of
+                    # it. The turn is kept so the exchange still alternates; the
+                    # content is not, because the nudge below states the format
+                    # in full and the fabrication has no job left to do.
+                    scratchpad.append(_assistant(_DISCARDED_REPLY))
+                else:
+                    scratchpad.append(_assistant(reply))
 
                 if step.final_answer is not None:
                     obs.event(
@@ -459,7 +530,10 @@ class ReActAgent:
                     continue
 
                 observation = self._invoke_tool(step)
-                scratchpad.append(_user(f"Observation: {observation}"))
+                # The rut check below still sees the whole thing; only what the
+                # model is asked to read again is capped.
+                shown = cap_observation(observation, self.config.max_observation_tokens)
+                scratchpad.append(_user(f"Observation: {shown}"))
 
                 intervention = self._check_for_a_rut(step, observation, attempts)
                 if intervention is not None:
