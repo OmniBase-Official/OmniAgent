@@ -24,7 +24,13 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import observability as obs
-from sandbox import _BINARY_SNIFF_BYTES, TRUNCATION_NOTE, SandboxError, get_workspace
+from sandbox import (
+    _BINARY_SNIFF_BYTES,
+    MAX_READ_CHARS,
+    TRUNCATION_NOTE,
+    SandboxError,
+    get_workspace,
+)
 
 _log = obs.get_logger("tools")
 
@@ -443,6 +449,18 @@ def run_tool(name: str, tool_input: str) -> str:
 # sandbox.py; these functions only shape the output.
 
 #: Most matches search_text will report before it stops looking.
+#: What read_file will hand back in full. Past this it refuses outright rather
+#: than returning the start of the file. An excerpt cannot be told apart from
+#: the whole, and three separate fabrications came out of capped reads on the
+#: 1.5B: a line count copied from the previous turn, "the word 'budget' is not
+#: used anywhere in the file" about a file that uses it, and a quotation that
+#: was not in the file at all. A refusal can only be read one way.
+#:
+#: Sized to the agent's per-observation budget, which this module cannot import
+#: because the agent imports this one. A test holds the two together instead:
+#: read_file must never return something cap_observation would trim.
+MAX_INTACT_READ_CHARS = 2_400
+
 MAX_SEARCH_MATCHES = 50
 
 #: Most files search_text will open in one call.
@@ -472,11 +490,20 @@ def read_file(path: str) -> str:
     # how many lines a 278-line file had, a 1.5B model read the whole thing and
     # answered 10,306 -- the number was in the output and it still guessed.
     # Facts the tool already knows should not be left to the model.
-    if _TRUNCATION_PREFIX in text:
-        header = f"{shown} ({size:,} bytes, showing the first {len(lines) - 1:,} lines)"
-    else:
-        header = f"{shown} ({len(lines):,} lines, {size:,} bytes)"
-    return f"{header}:\n{numbered}"
+    rendered = f"{shown} ({len(lines):,} lines, {size:,} bytes):\n{numbered}"
+    if len(rendered) <= MAX_INTACT_READ_CHARS:
+        return rendered
+
+    size_phrase = (
+        f"over {MAX_READ_CHARS:,} characters"
+        if _TRUNCATION_PREFIX in text
+        else f"{len(text):,} characters"
+    )
+    return (
+        f"Error: {shown} is {size_phrase}, too long to return in full. Reading the "
+        f"start of it would not tell you what the rest contains. Use file_info for its "
+        f"size, first line and last line, or search_text to find something inside it."
+    )
 
 
 def list_directory(path: str = ".") -> str:
@@ -655,10 +682,13 @@ TOOLS["file_info"] = Tool(
 TOOLS["read_file"] = Tool(
     name="read_file",
     description=(
-        "Read a text file from the workspace and return it with line numbers. "
-        "Use it when the user asks what is in a file. Paths are relative to the "
-        "workspace root; files outside it, hidden files and credentials cannot "
-        "be read."
+        "Read a short text file from the workspace and return it with line numbers. "
+        "Use it when the user asks what is in a file. A file too long to return in "
+        "full is refused outright rather than shortened, because the start of a file "
+        "cannot tell you what the rest of it contains: use file_info for a file's "
+        "size, first line and last line, and search_text to find something inside a "
+        "long one. Paths are relative to the workspace root; files outside it, hidden "
+        "files and credentials cannot be read."
     ),
     args_model=ReadFileArgs,
     run=_run_read_file,

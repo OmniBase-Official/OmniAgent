@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from agent import AgentConfig, cap_observation
 from sandbox import Workspace, get_workspace, set_workspace
 from tools import list_directory, read_file, run_tool, search_text
 
@@ -65,16 +66,20 @@ def test_read_file_states_the_line_count(workspace: Workspace) -> None:
     assert "bytes)" in header
 
 
-def test_read_file_says_when_it_truncated(workspace: Workspace) -> None:
-    """A capped read must not claim a line count it cannot know."""
-    # Over the 16,000-character read cap, under the 100 KB file-size limit, so
-    # it is truncated rather than refused outright.
+def test_read_file_refuses_rather_than_truncating(workspace: Workspace) -> None:
+    """read_file used to truncate here and say so in the header.
+
+    Saying so was not enough. Told only that output had been cut, the model
+    went on to answer from the part it could see as though that were the whole
+    file, so the truncating branch is gone: anything that will not fit comes
+    back as a refusal.
+    """
     (workspace.root / "long.txt").write_text("line\n" * 5_000, encoding="utf-8")
 
-    header = read_file("long.txt").splitlines()[0]
+    observation = read_file("long.txt")
 
-    assert "showing the first" in header
-    assert "lines)" in header
+    assert observation.startswith("Error:")
+    assert "too long to return in full" in observation
 
 
 def test_read_file_reaches_a_nested_path(workspace: Workspace) -> None:
@@ -254,3 +259,59 @@ def test_an_escape_attempt_never_raises_out_of_the_dispatcher(workspace: Workspa
         observation = run_tool("read_file", attempt)
         assert observation.startswith("Error:")
         assert "TOP SECRET" not in observation
+
+
+# --------------------------------------------------------------------------- #
+# a read the agent could not reason over is refused, not trimmed
+# --------------------------------------------------------------------------- #
+
+
+def test_a_file_too_long_to_return_intact_is_refused(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """A partial file is worse than no file, because it reads as evidence.
+
+    Three separate fabrications came out of capped reads on the 1.5B: a line
+    count copied from the previous turn, "the word 'budget' is not used
+    anywhere in the file" about a file that uses it, and a quotation that was
+    not in the file at all. An excerpt cannot be told apart from the whole, so
+    the model treats what it cannot see as absent. A refusal can only be read
+    one way.
+    """
+    long_file = tmp_path / "work" / "long.py"
+    long_file.write_text("\n".join(f"line {number}" for number in range(1, 801)), "utf-8")
+
+    observation = read_file("long.py")
+
+    assert observation.startswith("Error:")
+    assert "line 1" not in observation, "a refusal must not smuggle contents out"
+    assert "file_info" in observation
+    assert "search_text" in observation
+
+
+def test_a_refused_read_says_how_big_the_file_is(workspace: Workspace, tmp_path: Path) -> None:
+    """The refusal is the model's only chance to learn why, so it says."""
+    (tmp_path / "work" / "long.py").write_text("x" * 9_000 + "\n", encoding="utf-8")
+
+    observation = read_file("long.py")
+
+    assert "9,001 characters" in observation
+
+
+def test_read_file_never_returns_more_than_the_agent_will_keep(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """The invariant that ties the tool to the loop, instead of a copied number.
+
+    read_file must not hand back something cap_observation would then trim: a
+    trimmed read is the thing being removed, so the tool has to stop before
+    the loop has to.
+    """
+    budget = AgentConfig().max_observation_tokens
+    for size in (10, 100, 400, 800, 2_000):
+        path = tmp_path / "work" / f"f{size}.py"
+        path.write_text("\n".join(f"line {number}" for number in range(size)), "utf-8")
+        observation = read_file(path.name)
+        if observation.startswith("Error:"):
+            continue
+        assert cap_observation(observation, budget) == observation, f"{size} lines got capped"

@@ -326,13 +326,18 @@ def test_one_tool_observation_cannot_dominate_the_prompt(
     and a call to get_current_time that nobody had asked for. The date reached
     the final answer.
     """
-    body = "\n".join(f"line {number}" for number in range(1, 801))
+    body = "\n".join(
+        f"a line about the needle and the context budget, number {n}" for n in range(400)
+    )
     (tmp_path / "work" / "big.py").write_text(body, encoding="utf-8")
     fake = FakeOpenAI(
-        replies=["Thought: read it\nAction: read_file\nAction Input: big.py", FINAL]
+        replies=[
+            'Thought: find it\nAction: search_text\nAction Input: {"query": "needle"}',
+            FINAL,
+        ]
     )
 
-    build(fake, context_window=16384).run("How many lines does big.py have?")
+    build(fake, context_window=16384).run("Where is the needle in big.py?")
 
     messages = [str(message["content"]) for message in sent(fake, 1)]
     observations = [text for text in messages if text.startswith("Observation:")]
@@ -403,11 +408,18 @@ def test_the_console_trace_shows_what_the_model_was_given(
     with the prompt is worse than a short one: the log keeps the whole
     observation, so nothing is lost by printing what was actually sent.
     """
-    body = "\n".join(f"line {number}" for number in range(1, 801))
+    # search_text, not read_file: read_file refuses a file this size outright,
+    # so it can no longer produce an observation large enough to cap.
+    body = "\n".join(
+        f"a line about the needle and the context budget, number {n}" for n in range(400)
+    )
     (tmp_path / "work" / "big.py").write_text(body, encoding="utf-8")
     printed: list[str] = []
     fake = FakeOpenAI(
-        replies=["Thought: read it\nAction: read_file\nAction Input: big.py", FINAL]
+        replies=[
+            'Thought: find it\nAction: search_text\nAction Input: {"query": "needle"}',
+            FINAL,
+        ]
     )
     agent = ReActAgent(
         config=AgentConfig(verbose=True, retry_backoff=0.0),
@@ -415,11 +427,11 @@ def test_the_console_trace_shows_what_the_model_was_given(
         printer=printed.append,
     )
 
-    agent.run("How many lines does big.py have?")
+    agent.run("Where is the needle in big.py?")
 
     trace = "\n".join(printed)
-    assert "line 1\n" in trace, "the head of the file should still be shown"
-    assert "line 800" not in trace, "the whole file reached the console"
+    assert "needle" in trace, "the head of the output should still be shown"
+    assert "number 399" not in trace, "the whole search result reached the console"
     assert "the rest of this output was not shown" in trace
 
 
