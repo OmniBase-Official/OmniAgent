@@ -152,6 +152,48 @@ def test_credentials_are_detected(text: str, label: str) -> None:
     assert label in find_secrets(text)
 
 
+@pytest.mark.parametrize(
+    "code_line",
+    [
+        "api_key=self.api_key,",
+        "            api_key=self.config.api_key,",
+        'api_key=os.getenv("OPENAI_API_KEY"),',
+        "    api_key: str = Field(default=DEFAULT_API_KEY)",
+        "api_key=settings.api_key",
+    ],
+)
+def test_code_that_references_a_credential_is_not_a_finding(code_line: str) -> None:
+    """Found by the validator refusing a real dataset.
+
+    The agent had read agent.py and the line `api_key=self.api_key,` tripped the
+    assignment pattern. OmniAgent's file tools read source for a living, and
+    source is full of such lines; a validator that cries wolf on all of them
+    gets ignored, which is worse than one that is slightly narrower. A value
+    holding attribute access or a call is a reference, not a credential.
+    """
+    assert "assigned secret" not in find_secrets(code_line)
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "API_KEY=supersecretvalue",
+        "OMNIAGENT_API_KEY=sk-do-not-log-this",
+        "DB_PASSWORD=hunter2hunter2",
+        "MY_SECRET: abcdefghijkl",
+        'api_key = "sk-live-abcdefghijklmnop"',
+    ],
+)
+def test_a_literal_assignment_is_still_a_finding(assignment: str) -> None:
+    """The prefixed ones are the point.
+
+    The pattern used to start with \b, which does not match inside
+    OMNIAGENT_API_KEY or DB_PASSWORD because an underscore is a word character.
+    Every prefixed environment-variable name slipped through unnoticed.
+    """
+    assert "assigned secret" in find_secrets(assignment)
+
+
 def test_ordinary_text_is_not_flagged() -> None:
     for harmless in (
         "Thought: maths\nAction: calculate\nAction Input: 2 + 2",

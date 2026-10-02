@@ -43,7 +43,23 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("Google API key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
     ("private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("bearer token", re.compile(r"\bBearer\s+[A-Za-z0-9._-]{20,}")),
-    ("assigned secret", re.compile(r"(?i)\b(api[_-]?key|secret|password|passwd)\s*[=:]\s*\S{8,}")),
+    # The assigned value must look like a literal, not like code. OmniAgent's
+    # file tools read source, and source is full of lines like
+    # `api_key=self.api_key,` -- a reference to a credential, not one. A
+    # validator that cries wolf on every such line gets ignored, which is worse
+    # than one that is slightly narrower. So a value containing attribute
+    # access or a call is not a finding; `API_KEY=sk-abc123...` still is.
+    (
+        "assigned secret",
+        re.compile(
+            # No \b before the hint: it would not match inside OMNIAGENT_API_KEY
+            # or DB_PASSWORD, because an underscore is a word character, so every
+            # prefixed environment-variable name slipped through.
+            r"(?i)(api[_-]?key|secret|password|passwd)\s*[=:]\s*"
+            r"(?![^\s]*(?:\.[A-Za-z_]|\())"
+            r"['\"]?\S{8,}"
+        ),
+    ),
 )
 
 
