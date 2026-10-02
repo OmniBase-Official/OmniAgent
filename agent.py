@@ -76,6 +76,10 @@ or time. You have no other way of knowing it.
 again rather than giving up.
 9. If the question needs no tool at all, answer immediately with Thought + \
 Final Answer.
+10. A short follow-up question is still a question. "Now divide that by 3" or \
+"And README.md?" gets the same Thought/Action/Action Input treatment as anything \
+else -- never a bare sentence, and never arithmetic done in your head just \
+because the conversation has warmed up.
 
 WORKED EXAMPLE
 
@@ -90,6 +94,17 @@ Action Input: none
 Observation: Local time: 2026-01-05 09:12:44 (Monday, UTC+0700) | UTC: 2026-01-05 02:12:44
 Thought: I have both pieces of information.
 Final Answer: 15% of 240 is 36, and today is Monday, 5 January 2026.
+
+WORKED EXAMPLE -- A FOLLOW-UP
+
+Question: Now halve that percentage.
+Thought: That refers to the 36 from before, and halving it is arithmetic, so I \
+use the calculator.
+Action: calculate
+Action Input: 36 / 2
+Observation: 36 / 2 = 18
+Thought: I have the answer.
+Final Answer: Half of 36 is 18.
 """
 
 # Parsing patterns. DOTALL on the tail captures multi-line inputs/answers.

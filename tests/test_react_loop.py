@@ -54,6 +54,22 @@ def test_the_first_request_is_system_then_question() -> None:
     assert contents(fake, 0)[1] == "What is 2 + 2?"
 
 
+def test_the_system_prompt_covers_follow_up_questions() -> None:
+    """Regression: on "Now divide that by 3" the model used to answer in prose.
+
+    Fifteen turns of one collection run were lost this way - every follow-up in
+    every multi-turn session. The model knew the answer and simply said it,
+    arithmetic done in its head, no Thought and no Action.
+    """
+    fake = FakeOpenAI(replies=[FINAL.format(answer="4")])
+    build(fake).run("hi")
+
+    system = contents(fake, 0)[0]
+    assert "follow-up" in system
+    assert "Now divide that by 3" in system
+    assert "WORKED EXAMPLE -- A FOLLOW-UP" in system
+
+
 def test_the_system_prompt_lists_every_tool() -> None:
     fake = FakeOpenAI(replies=[FINAL.format(answer="4")])
     build(fake).run("hi")
