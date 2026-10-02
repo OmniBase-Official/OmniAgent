@@ -483,14 +483,24 @@ class ReActAgent:
         Small models will happily send the same broken Action Input until the
         step budget runs out. Repeating the Observation does not help them --
         telling them it is a repeat does.
+
+        A *succeeding* call repeated verbatim is a rut too, and used not to be
+        caught. Asked which of two files was longer, both fine-tuned models read
+        the same file nine times -- every read succeeded, so nothing intervened,
+        and the whole step budget went on re-reading text already in the
+        conversation. The threshold is higher for successes, because reading one
+        file twice while working through a comparison is reasonable; a third
+        identical call is not.
         """
-        if not observation.startswith("Error:"):
-            return None
+        failed = observation.startswith("Error:")
+        threshold = (
+            self.config.max_repeated_actions if failed else self.config.max_repeated_actions + 1
+        )
 
         signature = (step.action or "", step.action_input or "")
         attempts[signature] += 1
         count = attempts[signature]
-        if count < self.config.max_repeated_actions:
+        if count < threshold:
             return None
 
         obs.event(
@@ -500,12 +510,20 @@ class ReActAgent:
             tool=signature[0],
             tool_input=signature[1],
             attempts=count,
+            failing=failed,
         )
+        if failed:
+            return (
+                f"You have now tried {signature[0]} with exactly that input {count} times "
+                "and it failed the same way each time. Do not send it again. Either fix "
+                "the input based on the error, use a different tool, or give your "
+                "Final Answer explaining what you could not do."
+            )
         return (
-            f"You have now tried {signature[0]} with exactly that input {count} times "
-            "and it failed the same way each time. Do not send it again. Either fix "
-            "the input based on the error, use a different tool, or give your "
-            "Final Answer explaining what you could not do."
+            f"You have already called {signature[0]} with exactly that input {count} times "
+            "and it succeeded every time -- the result is already above, so calling it "
+            "again tells you nothing new. Use what you have: either a different tool, or "
+            "your Final Answer."
         )
 
     def _invoke_tool(self, step: Step) -> str:

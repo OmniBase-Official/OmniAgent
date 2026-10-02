@@ -639,10 +639,12 @@ def _run_file_info(args: FileInfoArgs) -> str:
 TOOLS["file_info"] = Tool(
     name="file_info",
     description=(
-        "Report how many lines and bytes a file has, plus its first and last "
-        "line, WITHOUT returning the file. Use this -- not read_file -- whenever "
-        "the question is about a file's size or length rather than its contents. "
-        "It is far cheaper and cannot overflow the context."
+        "Report how many lines and bytes a file has, plus its first line and its "
+        "LAST line, WITHOUT returning the file. Use this -- not read_file -- for "
+        "any question about how long or how big a file is, which of two files is "
+        "longer, or what its first or last line says. It is far cheaper than "
+        "read_file and cannot overflow the context. Only use read_file when you "
+        "need the text in the middle of the file."
     ),
     args_model=FileInfoArgs,
     run=_run_file_info,

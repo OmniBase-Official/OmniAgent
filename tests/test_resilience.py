@@ -230,13 +230,47 @@ def test_the_intervention_waits_for_a_genuine_repeat(log_file: Path) -> None:
     assert events_named(log_file, "agent.loop.repeated_action") == []
 
 
-def test_a_succeeding_action_is_never_a_rut(log_file: Path) -> None:
-    """Asking the same working question twice is allowed."""
+def test_the_same_succeeding_action_twice_is_allowed(log_file: Path) -> None:
+    """Re-reading one file while working through a comparison is reasonable."""
     good = "Thought: maths\nAction: calculate\nAction Input: 2 + 2"
-    fake = FakeOpenAI(replies=[good, good, good, FINAL.format(answer="4")])
+    fake = FakeOpenAI(replies=[good, good, FINAL.format(answer="4")])
     build(fake, max_repeated_actions=2).run("go")
 
     assert events_named(log_file, "agent.loop.repeated_action") == []
+
+
+def test_a_third_identical_succeeding_action_is_a_rut(log_file: Path) -> None:
+    """A succeeding call repeated verbatim is a rut too.
+
+    Asked which of two files was longer, both fine-tuned models read the same
+    file nine times. Every read succeeded, so the failure-only check never
+    fired, and the entire step budget went on re-reading text that was already
+    in the conversation.
+    """
+    good = "Thought: maths\nAction: calculate\nAction Input: 2 + 2"
+    fake = FakeOpenAI(replies=[good, good, good, FINAL.format(answer="4")])
+    agent = build(fake, max_repeated_actions=2)
+
+    assert agent.run("go") == "4"
+
+    rut = events_named(log_file, "agent.loop.repeated_action")
+    assert len(rut) == 1
+    assert rut[0]["failing"] is False
+    assert rut[0]["attempts"] == 3
+
+    sent = [str(m["content"]) for m in fake.calls[3]["messages"]]
+    assert any("succeeded every time" in message for message in sent)
+
+
+def test_a_failing_action_still_intervenes_one_attempt_sooner(log_file: Path) -> None:
+    """Failures get the tighter threshold: nothing is learned by repeating them."""
+    fake = FakeOpenAI(replies=[BAD_CALL, BAD_CALL, FINAL.format(answer="no")])
+    build(fake, max_repeated_actions=2).run("go")
+
+    rut = events_named(log_file, "agent.loop.repeated_action")
+    assert len(rut) == 1
+    assert rut[0]["failing"] is True
+    assert rut[0]["attempts"] == 2
 
 
 def test_the_rut_counter_resets_between_turns(log_file: Path) -> None:
