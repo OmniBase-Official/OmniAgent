@@ -355,12 +355,29 @@ def test_a_capped_observation_keeps_its_head() -> None:
     assert "line 400" not in capped
 
 
-def test_a_capped_observation_says_what_was_dropped() -> None:
+def test_a_capped_observation_says_it_was_capped() -> None:
     body = "\n".join(f"line {number}" for number in range(1, 101))
     capped = cap_observation(body, 20)
 
-    assert "of 101 lines shown" in capped or "of 100 lines shown" in capped
+    assert "the rest of this output was not shown" in capped
     assert capped.count("[observation capped") == 1
+
+
+def test_the_cap_note_carries_no_number_of_its_own() -> None:
+    """A counting question must not be answerable from the note.
+
+    Capped, read_file's output began "sandbox.py (257 lines, 10,988 bytes):"
+    and ended "[observation capped: 34 of 258 lines shown]". Asked how many
+    lines the file had, the model had 34, 257 and 258 in front of it and two of
+    those three were put there by this function -- at the tail, which is where
+    a small model attends hardest. The log keeps the full observation, so the
+    counts are not lost; they are only kept out of the prompt.
+    """
+    body = "\n".join(f"line {number}" for number in range(1, 401))
+    capped = cap_observation(f"big.py (400 lines, 5,000 bytes):\n{body}", 60)
+
+    note = capped[capped.index("[observation capped") :]
+    assert not any(character.isdigit() for character in note), note
 
 
 def test_a_single_unbroken_line_is_capped_too() -> None:
@@ -368,7 +385,7 @@ def test_a_single_unbroken_line_is_capped_too() -> None:
     capped = cap_observation("x" * 40_000, 50)
 
     assert len(capped) < 1_000
-    assert "characters shown" in capped
+    assert "the rest of this output was not shown" in capped
 
 
 def test_the_cap_is_configurable() -> None:

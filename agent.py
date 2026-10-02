@@ -172,11 +172,12 @@ def _estimate_tokens(message: ChatCompletionMessageParam) -> int:
 _DISCARDED_REPLY = "(this reply was discarded: it did not follow the required format)"
 
 #: Appended when one observation had to be shortened. Worded so it cannot be
-#: mistaken for part of the tool's own output.
-OBSERVATION_CAPPED_NOTE = "\n[observation capped: {shown} of {total} lines shown]"
-
-#: The same, for output with no line to break on.
-OBSERVATION_CLIPPED_NOTE = "\n[observation capped: {shown} of {total} characters shown]"
+#: mistaken for part of the tool's own output, and carrying no count of its
+#: own: capped, a file read ended "34 of 258 lines shown" while the answer to
+#: "how many lines does it have" sat 33 lines further up, so this note was
+#: handing the model two wrong candidates at the moment it had to pick a
+#: number. The full observation is in the log either way.
+OBSERVATION_CAPPED_NOTE = "\n[observation capped: the rest of this output was not shown]"
 
 
 def cap_observation(observation: str, max_tokens: int) -> str:
@@ -208,12 +209,10 @@ def cap_observation(observation: str, max_tokens: int) -> str:
         used += len(line) + 1
 
     if not kept:
-        # One unbroken line: a minified file, or a long error. Cut it anyway,
-        # and say so in characters, since "1 of 1 lines" would be a lie.
-        head = observation[:limit]
-        return head + OBSERVATION_CLIPPED_NOTE.format(shown=len(head), total=len(observation))
+        # One unbroken line: a minified file, or a long error. Cut it anyway.
+        return observation[:limit] + OBSERVATION_CAPPED_NOTE
 
-    return "\n".join(kept) + OBSERVATION_CAPPED_NOTE.format(shown=len(kept), total=len(lines))
+    return "\n".join(kept) + OBSERVATION_CAPPED_NOTE
 
 
 def _system(content: str) -> ChatCompletionMessageParam:
