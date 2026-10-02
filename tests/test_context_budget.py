@@ -421,3 +421,21 @@ def test_the_console_trace_shows_what_the_model_was_given(
     assert "line 1\n" in trace, "the head of the file should still be shown"
     assert "line 800" not in trace, "the whole file reached the console"
     assert "the rest of this output was not shown" in trace
+
+
+def test_the_cap_note_warns_against_reading_absence_into_it() -> None:
+    """Truncation has to carry its own consequence, or the model invents facts.
+
+    Asked where 'budget' appears in agent.py, the model read the file three
+    times, saw only the capped head each time, and answered "The word 'budget'
+    is not used anywhere in the file `agent.py`" -- which is false; it is on
+    the line that computes the context budget. A note that says only that
+    output was dropped leaves the model free to read absence into it, and this
+    one is the last thing it sees before answering.
+    """
+    body = "\n".join(f"line {number}" for number in range(1, 401))
+    capped = cap_observation(body, 60)
+
+    note = capped[capped.index("[observation capped") :]
+    assert "rules out" in note, note
+    assert not any(character.isdigit() for character in note), note

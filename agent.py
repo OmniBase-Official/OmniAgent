@@ -177,7 +177,17 @@ _DISCARDED_REPLY = "(this reply was discarded: it did not follow the required fo
 #: "how many lines does it have" sat 33 lines further up, so this note was
 #: handing the model two wrong candidates at the moment it had to pick a
 #: number. The full observation is in the log either way.
-OBSERVATION_CAPPED_NOTE = "\n[observation capped: the rest of this output was not shown]"
+#:
+#: It also has to say what cannot be concluded from it. Told only that output
+#: was dropped, the model read agent.py three times, saw the capped head each
+#: time, and answered that the word 'budget' is not used anywhere in the file
+#: -- it is on the line that computes the context budget. Truncation that does
+#: not carry its own consequence turns into a confident false negative.
+OBSERVATION_CAPPED_NOTE = (
+    "\n[observation capped: the rest of this output was not shown, so nothing here "
+    "rules out what the hidden part contains. To decide whether something appears "
+    "in a file, search the whole file instead of reading the start of it.]"
+)
 
 
 def cap_observation(observation: str, max_tokens: int) -> str:
