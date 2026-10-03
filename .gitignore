@@ -19,6 +19,7 @@ env/
 # Editors & OS
 .vscode/
 .idea/
+.kilo/
 *.swp
 .DS_Store
 Thumbs.db
