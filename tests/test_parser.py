@@ -93,3 +93,57 @@ def test_parse_empty_reply() -> None:
     assert step.action is None
     assert step.final_answer is None
     assert step.thought == ""
+
+
+# --------------------------------------------------------------------------- #
+# a Final Answer stops where the next block starts
+# --------------------------------------------------------------------------- #
+
+
+def test_a_final_answer_is_cut_before_a_block_the_model_tacked_on() -> None:
+    """Everything after "Final Answer:" used to become the answer.
+
+    Measured in a session where history had accumulated, the agent answered
+    question 5 with the raw text "Thought: I need to calculate 2480 * 15% and
+    then multiply that result by 3.\nAction: calculate" -- question 1's plan,
+    recycled, and handed to the user as prose. The reply was a Final Answer
+    marker followed immediately by a fresh block, and `(.*)` under DOTALL
+    swallowed all of it.
+    """
+    step = _parse("Thought: done\nFinal Answer: 4\nAction: calculate\nAction Input: 2+2")
+
+    assert step.final_answer == "4"
+
+
+def test_a_final_answer_keeps_its_own_later_lines() -> None:
+    """Only a new block ends it, not a newline: answers can be several lines."""
+    step = _parse("Final Answer: first line\nsecond line\n\nthird line")
+
+    assert step.final_answer == "first line\nsecond line\n\nthird line"
+
+
+def test_a_final_answer_is_cut_before_a_leaked_observation() -> None:
+    step = _parse("Final Answer: 122 lines.\nObservation: fakes.py: 122 lines")
+
+    assert step.final_answer == "122 lines."
+
+
+def test_a_final_answer_marker_followed_by_a_new_block_is_not_an_answer() -> None:
+    """There is no answer there, so the loop must not present one.
+
+    Falling through to the Action means the model's actual intent -- to keep
+    working -- is honoured, and a reply with no Action at all reaches the
+    format correction instead of showing the user protocol text.
+    """
+    step = _parse("Final Answer:\nThought: carry on\nAction: calculate\nAction Input: 2+2")
+
+    assert step.final_answer is None
+    assert step.action == "calculate"
+    assert step.action_input == "2+2"
+
+
+def test_a_final_answer_marker_with_nothing_usable_after_it_is_a_violation() -> None:
+    step = _parse("Final Answer:\nThought: I am still thinking.")
+
+    assert step.final_answer is None
+    assert step.action is None

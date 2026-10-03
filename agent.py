@@ -114,6 +114,17 @@ _THOUGHT_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _ACTION_RE = re.compile(r"Action\s*:\s*([^\n]+)", re.IGNORECASE)
+
+#: Lines that begin a new ReAct block, and therefore end a Final Answer. The
+#: capture for the answer is DOTALL, so without this it runs to the end of the
+#: reply: in a session where history had accumulated, the agent answered a
+#: question with the raw text "Thought: I need to calculate 2480 * 15% and then
+#: multiply that result by 3.\nAction: calculate" -- an earlier question's plan,
+#: recycled, and shown to the user as prose.
+_BLOCK_START_RE = re.compile(
+    r"^[^\S\n]*(?:Thought|Action|Action\s*Input|Observation|Final\s*Answer)\s*:",
+    re.IGNORECASE | re.MULTILINE,
+)
 _ACTION_INPUT_RE = re.compile(
     r"Action\s*Input\s*:\s*(.*?)(?=\n\s*(?:Thought|Action|Observation|Final\s*Answer)\s*:|\Z)",
     re.IGNORECASE | re.DOTALL,
@@ -330,8 +341,14 @@ def _parse(text: str) -> Step:
 
     final = _FINAL_ANSWER_RE.search(text)
     if final:
-        step.final_answer = final.group(1).strip()
-        return step
+        answer = _answer_only(final.group(1))
+        if answer:
+            step.final_answer = answer
+            return step
+        # A Final Answer marker followed straight by another block is not an
+        # answer, so nothing is presented as one. Falling through honours what
+        # the model was actually doing -- carrying on -- and a reply with no
+        # Action either reaches the loop's format correction instead.
 
     action = _ACTION_RE.search(text)
     if not action:
@@ -351,6 +368,16 @@ def _parse(text: str) -> Step:
     step.action = name
     step.action_input = _clean_action_input(raw_input)
     return step
+
+
+def _answer_only(captured: str) -> str:
+    """The answer, cut before any further block the model wrote after it.
+
+    A newline does not end an answer -- answers run to several lines -- but a
+    line opening with Thought, Action, Observation or another Final Answer does.
+    """
+    nxt = _BLOCK_START_RE.search(captured)
+    return (captured[: nxt.start()] if nxt else captured).strip()
 
 
 def _clean_action_input(raw: str) -> str:
