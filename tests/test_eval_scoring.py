@@ -196,6 +196,10 @@ ADMISSIONS = (
         "the available tools and resources."
     ),
     "There is no information available about the current weather in Bangkok.",
+    (
+        "The current weather in Bangkok is not known from the available "
+        "information."
+    ),
 )
 
 #: Also verbatim, and every one of these is the agent not declining: two answer

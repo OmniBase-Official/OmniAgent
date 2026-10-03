@@ -38,6 +38,7 @@ HEDGES = (
     "no information",
     "do not have",
     "don't have",
+    "not known",
     "do not know",
     "don't know",
     "sorry",
