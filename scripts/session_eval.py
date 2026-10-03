@@ -15,18 +15,33 @@ The questions, the model, the temperature and the order are identical in both
 passes. The only variable is whether the agent remembers the earlier
 questions, so any difference in the scores is what the conversation cost.
 
+One run is not a measurement. Two runs of identical code over identical
+questions at temperature 0 produced the same verdict on every question and
+different behaviour getting there: one answered the weather question in 3
+steps with a single search, the other took 9 steps and seven searches, and the
+accumulated total moved 31 to 37. Ollama at temperature 0 is not
+deterministic -- on a 4 GB card the batch split alone is enough, since floating
+point addition is not associative. So every run is appended to a JSONL file
+and `--report` reads them together: a question that passes three times out of
+three isolated and none out of three accumulated has drifted, while 2/3
+against 1/3 has not been shown to.
+
 Usage:
 
     .venv/Scripts/python.exe scripts/session_eval.py omniagent > data/session-<tag>.txt 2>&1
+    .venv/Scripts/python.exe scripts/session_eval.py --report
 """
 
 from __future__ import annotations
 
+import json
 import sys
 import time
-from dataclasses import dataclass
+from collections import defaultdict
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
@@ -65,12 +80,19 @@ if _leaked:
     raise SystemExit(f"not held out, these are in the training bank: {_leaked}")
 
 
+#: Every run appends to this, so runs can be read together rather than one at
+#: a time. Under data/, which is gitignored: these are measurements of a local
+#: model on one machine, not something to carry between checkouts.
+RUNS_PATH = PROJECT / "data" / "session-runs.jsonl"
+
+
 @dataclass
 class Outcome:
-    """One pass over the walk: the tally, and each question's verdict in order."""
+    """One pass over the walk: the tally, and each question's result in order."""
 
     score: Score
     verdicts: list[Verdict]
+    steps: list[int] = field(default_factory=list)
 
 
 def run_walk(
@@ -113,6 +135,7 @@ def run_walk(
         except AgentError as exc:
             outcome.score.errors.append(f"{question.text}: {exc}")
             outcome.verdicts.append(Verdict(marks=("CRASHED",)))
+            outcome.steps.append(0)
             print(f"  !! {position}. {question.text}\n     {exc}", flush=True)
             continue
         outcome.score.seconds += time.perf_counter() - started
@@ -126,6 +149,7 @@ def run_walk(
         verdict = judge(question, answer, tools_called)
         outcome.score.apply(verdict)
         outcome.verdicts.append(verdict)
+        outcome.steps.append(len(agent.last_trace))
 
         print(f"  {position}. {question.text}", flush=True)
         print(f"     {answer[:110]}", flush=True)
@@ -170,6 +194,104 @@ def drift(isolated: Outcome, shared: Outcome) -> list[tuple[int, Question, str]]
     return moved
 
 
+@dataclass(frozen=True)
+class Spread:
+    """One question in one arrangement, across however many runs there are."""
+
+    passed: int
+    runs: int
+    steps_low: int
+    steps_high: int
+
+    @property
+    def settled(self) -> bool:
+        """True when every run agreed. Anything else is not yet a result."""
+        return self.passed in (0, self.runs)
+
+
+def record(outcome: Outcome, model: str, arrangement: str, path: Path = RUNS_PATH) -> None:
+    """Append one pass, so that later runs can be read alongside it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "model": model,
+        "arrangement": arrangement,
+        "questions": [question.text for question in WALK],
+        "passed": [_passed(verdict) for verdict in outcome.verdicts],
+        "steps": outcome.steps,
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
+def read_runs(path: Path = RUNS_PATH) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    with path.open(encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
+
+
+def aggregate(runs: Iterable[Mapping[str, Any]]) -> dict[tuple[str, str], Spread]:
+    """Fold every recorded run into one spread per arrangement and question.
+
+    Keyed by the question's text rather than its position, so re-ordering the
+    walk does not silently pool two different questions into one figure.
+    """
+    passes: defaultdict[tuple[str, str], list[bool]] = defaultdict(list)
+    steps: defaultdict[tuple[str, str], list[int]] = defaultdict(list)
+    for run in runs:
+        for question, passed, step_count in zip(
+            run["questions"], run["passed"], run["steps"], strict=True
+        ):
+            key = (str(run["arrangement"]), str(question))
+            passes[key].append(bool(passed))
+            steps[key].append(int(step_count))
+    return {
+        key: Spread(
+            passed=sum(results),
+            runs=len(results),
+            steps_low=min(steps[key]),
+            steps_high=max(steps[key]),
+        )
+        for key, results in passes.items()
+    }
+
+
+def report(path: Path = RUNS_PATH) -> None:
+    """Print what the recorded runs do and do not establish."""
+    spreads = aggregate(read_runs(path))
+    if not spreads:
+        print(f"no runs recorded in {path}")
+        return
+
+    runs = max(spread.runs for spread in spreads.values())
+    print(f"\n{'=' * 78}\nacross {runs} recorded run(s)\n{'=' * 78}")
+    print(f"{'question':58} {'isolated':>10} {'accumulated':>12}")
+    for question in WALK:
+        before = spreads.get(("isolated", question.text))
+        after = spreads.get(("accumulated", question.text))
+        print(
+            f"{question.text[:58]:58} "
+            f"{_cell(before):>10} {_cell(after):>12}"
+            + ("   <- DRIFT" if _is_drift(before, after) else "")
+        )
+    print("\nA question is only drifting when both arrangements settled and they disagree.")
+    print("Steps in brackets are the range across runs; at temperature 0 they still move.")
+
+
+def _cell(spread: Spread | None) -> str:
+    if spread is None:
+        return "-"
+    return f"{spread.passed}/{spread.runs}[{spread.steps_low}-{spread.steps_high}]"
+
+
+def _is_drift(before: Spread | None, after: Spread | None) -> bool:
+    if before is None or after is None:
+        return False
+    if not (before.settled and after.settled):
+        return False
+    return (before.passed > 0) != (after.passed > 0)
+
+
 def main(model: str) -> None:
     obs.reset()
     obs.configure(level="ERROR")
@@ -177,9 +299,11 @@ def main(model: str) -> None:
 
     print(f"\n{'=' * 78}\n{model}: a fresh agent for every question\n{'=' * 78}", flush=True)
     isolated = run_walk(model, shared_history=False)
+    record(isolated, model, "isolated")
 
     print(f"\n{'=' * 78}\n{model}: one agent for the whole walk\n{'=' * 78}", flush=True)
     shared = run_walk(model, shared_history=True)
+    record(shared, model, "accumulated")
 
     print(f"\n{'=' * 78}\nSUMMARY\n{'=' * 78}")
     print(header("arrangement"))
@@ -192,13 +316,18 @@ def main(model: str) -> None:
         print(f"  {position}. {direction}: {question.text}")
     if not moved:
         print("  none -- the conversation cost nothing on this walk")
+    print("\nOne run settles nothing on its own. Read it with --report.")
+    report()
 
 
 if __name__ == "__main__":
     try:
-        (_model,) = sys.argv[1:]
+        (_arg,) = sys.argv[1:]
     except ValueError:
         raise SystemExit(
-            "usage: session_eval.py <model>   (one model per run: the 4 GB card)"
+            "usage: session_eval.py <model> | --report   (one model per run: the 4 GB card)"
         ) from None
-    main(_model)
+    if _arg == "--report":
+        report()
+    else:
+        main(_arg)

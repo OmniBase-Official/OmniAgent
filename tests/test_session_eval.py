@@ -10,13 +10,24 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from itertools import pairwise
 
 from eval_scoring import Score, Verdict
-from session_eval import WALK, Outcome, _passed, drift, run_walk
+from session_eval import (
+    WALK,
+    Outcome,
+    _is_drift,
+    _passed,
+    aggregate,
+    drift,
+    read_runs,
+    record,
+    run_walk,
+)
 
 from tests.fakes import FakeOpenAI
 
@@ -157,3 +168,118 @@ def test_passing_needs_every_axis_the_question_asked_for() -> None:
 def test_an_unanswered_honesty_question_does_not_pass() -> None:
     assert not _passed(Verdict(honest_expected=True, admitted=False))
     assert _passed(Verdict(honest_expected=True, admitted=True))
+
+
+# --------------------------------------------------------------------------- #
+# reading several runs together
+# --------------------------------------------------------------------------- #
+
+
+def _run(arrangement: str, passed: list[bool], steps: list[int]) -> dict[str, Any]:
+    return {
+        "model": "omniagent",
+        "arrangement": arrangement,
+        "questions": [question.text for question in WALK],
+        "passed": passed,
+        "steps": steps,
+    }
+
+
+ALL = [True] * len(WALK)
+NONE = [False] * len(WALK)
+EVEN = [2] * len(WALK)
+
+
+def test_a_recorded_run_can_be_read_back(tmp_path: Path) -> None:
+    path = tmp_path / "runs.jsonl"
+    outcome = run_walk("fake", shared_history=True, client=_fake().as_client())
+
+    record(outcome, "fake", "accumulated", path)
+
+    (row,) = read_runs(path)
+    assert row["arrangement"] == "accumulated"
+    assert row["questions"] == [question.text for question in WALK]
+    assert len(row["steps"]) == len(WALK)
+
+
+def test_reading_a_file_that_is_not_there_is_not_an_error(tmp_path: Path) -> None:
+    """A first run must not have to check whether it is the first."""
+    assert read_runs(tmp_path / "nothing.jsonl") == []
+
+
+def test_runs_are_pooled_by_question_text_not_by_position() -> None:
+    """Re-ordering the walk must not merge two different questions' figures."""
+    shifted = _run("isolated", ALL, EVEN)
+    shifted["questions"] = list(reversed(shifted["questions"]))
+
+    spreads = aggregate([_run("isolated", ALL, EVEN), shifted])
+
+    assert all(spread.runs == 2 for spread in spreads.values())
+    assert len(spreads) == len(WALK)
+
+
+def test_a_spread_counts_the_passes_and_the_step_range() -> None:
+    spreads = aggregate(
+        [
+            _run("isolated", ALL, [2] * len(WALK)),
+            _run("isolated", NONE, [9] * len(WALK)),
+        ]
+    )
+
+    spread = spreads[("isolated", WALK[0].text)]
+    assert (spread.passed, spread.runs) == (1, 2)
+    assert (spread.steps_low, spread.steps_high) == (2, 9)
+
+
+def test_a_spread_that_disagreed_with_itself_is_not_settled() -> None:
+    """Two runs, two answers: that is the measurement failing, not a result."""
+    spreads = aggregate([_run("isolated", ALL, EVEN), _run("isolated", NONE, EVEN)])
+
+    assert not spreads[("isolated", WALK[0].text)].settled
+
+
+def test_a_spread_is_settled_when_every_run_agreed() -> None:
+    spreads = aggregate([_run("isolated", ALL, EVEN)] * 3)
+
+    assert spreads[("isolated", WALK[0].text)].settled
+
+
+# --------------------------------------------------------------------------- #
+# what counts as drift once more than one run is in
+# --------------------------------------------------------------------------- #
+
+
+def test_drift_needs_both_arrangements_to_have_settled() -> None:
+    """3/3 against 0/3 is drift; 2/3 against 1/3 has not been shown to be."""
+    settled = aggregate(
+        [_run("isolated", ALL, EVEN)] * 3 + [_run("accumulated", NONE, EVEN)] * 3
+    )
+    # Two of three isolated runs passed and no accumulated run did. Without
+    # the settled requirement this reads as drift, because one side passed at
+    # least once and the other never did -- which is why the discriminating
+    # case has to be the asymmetric one. An earlier version of this test used
+    # 1/2 against 1/2, where both readings agree and the assertion was empty.
+    unsettled = aggregate(
+        [_run("isolated", ALL, EVEN)] * 2
+        + [_run("isolated", NONE, EVEN)]
+        + [_run("accumulated", NONE, EVEN)] * 3
+    )
+    question = WALK[0].text
+
+    assert _is_drift(settled[("isolated", question)], settled[("accumulated", question)])
+    assert not _is_drift(
+        unsettled[("isolated", question)], unsettled[("accumulated", question)]
+    )
+
+
+def test_an_arrangement_never_run_is_not_drift() -> None:
+    spreads = aggregate([_run("isolated", ALL, EVEN)])
+
+    assert not _is_drift(spreads[("isolated", WALK[0].text)], None)
+
+
+def test_two_settled_arrangements_that_agree_are_not_drift() -> None:
+    spreads = aggregate([_run("isolated", ALL, EVEN), _run("accumulated", ALL, EVEN)])
+    question = WALK[0].text
+
+    assert not _is_drift(spreads[("isolated", question)], spreads[("accumulated", question)])
