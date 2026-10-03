@@ -62,6 +62,12 @@ files = [
     "validate_dataset.py",
     "config.py",
     "scripts/collect_dataset.py",
+    # The evaluation scripts produce the numbers this project quotes, so they
+    # are checked like the agent is. They were outside this list until the
+    # scoring they share was pulled into scripts/eval_scoring.py.
+    "scripts/eval_scoring.py",
+    "scripts/holdout_eval.py",
+    "scripts/session_eval.py",
     "tests",
 ]
 mypy_path = "scripts"

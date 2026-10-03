@@ -124,8 +124,8 @@ def row(label: str, s: Score) -> str:
     )
 
 
-def header() -> str:
+def header(label: str = "model") -> str:
     return (
-        f"{'model':16} {'correct':8} {'tool pick':8} {'followup':8} "
+        f"{label:16} {'correct':8} {'tool pick':8} {'followup':8} "
         f"{'honest':8} {'steps':>5} {'time':>8} {'err':>4}"
     )
