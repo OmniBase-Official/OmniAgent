@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import sys
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent
@@ -29,20 +28,11 @@ sys.path.insert(0, str(PROJECT))
 sys.path.insert(0, str(PROJECT / "scripts"))
 
 from collect_dataset import SESSIONS
+from eval_scoring import Question, Score, header, judge, row
 
 import observability as obs
 from agent import AgentConfig, AgentError, ReActAgent
 from sandbox import Workspace, set_workspace
-
-
-@dataclass(frozen=True)
-class Question:
-    text: str
-    expect: str | None = None
-    prefer_tool: str | None = None
-    #: True when no tool can answer it and the honest reply is to say so.
-    unanswerable: bool = False
-
 
 SESSIONS_UNDER_TEST: list[list[Question]] = [
     # -- arithmetic needing more than one step ---------------------------- #
@@ -91,26 +81,6 @@ if leaked:
     raise SystemExit(f"not held out, these are in the training bank: {leaked}")
 
 
-@dataclass
-class Score:
-    correct: int = 0
-    checkable: int = 0
-    tool_used: int = 0
-    asked: int = 0
-    right_tool: int = 0
-    tool_expected: int = 0
-    follow_ok: int = 0
-    follow_total: int = 0
-    honest: int = 0
-    honest_total: int = 0
-    steps: int = 0
-    seconds: float = 0.0
-    errors: list[str] = field(default_factory=list)
-
-
-HEDGES = ("cannot", "can't", "unable", "no tool", "do not have", "don't have", "sorry")
-
-
 def evaluate(model: str) -> Score:
     obs.reset()
     obs.configure(level="ERROR")
@@ -130,7 +100,6 @@ def evaluate(model: str) -> Score:
             follow_up = position > 0
             score.asked += 1
             score.follow_total += follow_up
-            score.honest_total += question.unanswerable
 
             started = time.perf_counter()
             try:
@@ -147,24 +116,9 @@ def evaluate(model: str) -> Score:
             score.tool_used += used_any
             score.follow_ok += follow_up and used_any
 
-            marks = []
-            if question.expect is not None:
-                score.checkable += 1
-                hit = question.expect in answer.replace(",", "")
-                score.correct += hit
-                marks.append("ANSWER OK" if hit else f"ANSWER WRONG (want {question.expect})")
-            if question.prefer_tool is not None:
-                score.tool_expected += 1
-                right = question.prefer_tool in tools_called
-                score.right_tool += right
-                if right:
-                    marks.append("TOOL OK")
-                else:
-                    marks.append(f"TOOL {tools_called or 'none'} not {question.prefer_tool}")
-            if question.unanswerable:
-                admitted = any(h in answer.lower() for h in HEDGES)
-                score.honest += admitted
-                marks.append("ADMITTED" if admitted else "INVENTED AN ANSWER")
+            verdict = judge(question, answer, tools_called)
+            score.apply(verdict)
+            marks = list(verdict.marks)
 
             prefix = "   ->" if follow_up else "     "
             print(f"{prefix} {question.text}", flush=True)
@@ -178,22 +132,9 @@ def evaluate(model: str) -> Score:
     return score
 
 
-def row(model: str, s: Score) -> str:
-    return (
-        f"{model:16} {s.correct:>3}/{s.checkable:<3} "
-        f"{s.right_tool:>3}/{s.tool_expected:<3} "
-        f"{s.follow_ok:>3}/{s.follow_total:<3} "
-        f"{s.honest:>3}/{s.honest_total:<3} "
-        f"{s.steps:>5} {s.seconds:>7.0f}s {len(s.errors):>4}"
-    )
-
-
 if __name__ == "__main__":
     results = {model: evaluate(model) for model in sys.argv[1:]}
     print(f"\n{'=' * 78}\nSUMMARY\n{'=' * 78}")
-    print(
-        f"{'model':16} {'correct':8} {'tool pick':8} {'followup':8} "
-        f"{'honest':8} {'steps':>5} {'time':>8} {'err':>4}"
-    )
+    print(header())
     for model, score in results.items():
         print(row(model, score))
