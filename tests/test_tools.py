@@ -94,7 +94,7 @@ def test_a_no_arg_tool_ignores_whatever_the_model_sent(junk: str) -> None:
 def test_run_tool_dispatch() -> None:
     assert run_tool("calculate", "3 * 3").endswith("= 9")
     assert run_tool("  calculate  ", "3 * 3").endswith("= 9")
-    assert run_tool("does_not_exist", "").startswith("Error: unknown tool")
+    assert run_tool("does_not_exist", "").startswith("Error: there is no tool called")
 
 
 def test_run_tool_never_raises() -> None:
@@ -124,3 +124,28 @@ def test_registry_is_rendered_into_the_prompt() -> None:
     for name in TOOLS:
         assert name in rendered
         assert name in tool_names()
+
+
+def test_an_invented_tool_is_told_that_inventing_it_changed_nothing() -> None:
+    """Measured: naming a tool that does not exist, then answering anyway.
+
+    Across three recorded runs, asked for the weather in Bangkok with seven
+    earlier questions in history, the agent called a tool it had made up --
+    get_current_weather -- read the error, and answered "The current
+    temperature in Bangkok is 35 degrees Celsius with a relative humidity of
+    89%". With a fresh agent the same question is answered honestly in all
+    three runs, so the capability to admit it is there; what the error has to
+    carry is that a missing tool means missing information, not information to
+    supply from somewhere else.
+
+    This text reaches a prompt only once a tool has already been invented, so
+    unlike a change to a tool's description it cannot perturb a turn that
+    never goes wrong.
+    """
+    observation = run_tool("get_current_weather", "Bangkok")
+
+    assert observation.startswith("Error:")
+    assert "does not create the capability" in observation
+    assert "cannot find it out" in observation
+    # The list of real tools stays, because the next step may well be one.
+    assert "search_text" in observation

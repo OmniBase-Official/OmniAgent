@@ -412,7 +412,19 @@ def run_tool(name: str, tool_input: str) -> str:
             requested=name,
             available=list(TOOLS),
         )
-        return f"Error: unknown tool {name!r}. Available tools are: {tool_names()}."
+        # Saying only "unknown tool" was not enough. Asked for the weather in
+        # Bangkok with seven earlier questions in history, the agent invented
+        # get_current_weather, read that error, and reported 35 degrees and 89%
+        # humidity -- in all three recorded runs, while the same question with
+        # a fresh agent was answered honestly in all three. So the error states
+        # the consequence: a tool that does not exist means the information is
+        # not available, not that it should come from somewhere else.
+        return (
+            f"Error: there is no tool called {name!r}, and naming one does not create "
+            f"the capability. If nothing in this list can get the information, then you "
+            f"cannot find it out, and saying so is the answer -- do not supply the value "
+            f"yourself. Available tools are: {tool_names()}."
+        )
 
     try:
         args = parse_tool_args(tool, tool_input)
