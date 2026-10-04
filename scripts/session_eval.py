@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import time
 from collections import defaultdict
@@ -209,11 +210,32 @@ class Spread:
         return self.passed in (0, self.runs)
 
 
+def commit() -> str:
+    """The code a run came from, so runs of different code are not pooled.
+
+    Without it the file mixed three runs of yesterday's agent with one of
+    today's and reported a single figure over both, which is not a
+    measurement of either.
+    """
+    try:
+        done = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
+            ["git", "-C", str(PROJECT), "rev-parse", "--short", "HEAD"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return done.stdout.strip() or "unknown"
+
+
 def record(outcome: Outcome, model: str, arrangement: str, path: Path = RUNS_PATH) -> None:
     """Append one pass, so that later runs can be read alongside it."""
     path.parent.mkdir(parents=True, exist_ok=True)
     row = {
         "model": model,
+        "commit": commit(),
         "arrangement": arrangement,
         "questions": [question.text for question in WALK],
         "passed": [_passed(verdict) for verdict in outcome.verdicts],
@@ -257,14 +279,30 @@ def aggregate(runs: Iterable[Mapping[str, Any]]) -> dict[tuple[str, str], Spread
 
 
 def report(path: Path = RUNS_PATH) -> None:
-    """Print what the recorded runs do and do not establish."""
-    spreads = aggregate(read_runs(path))
-    if not spreads:
+    """Print what the recorded runs do and do not establish, per code version."""
+    runs = read_runs(path)
+    if not runs:
         print(f"no runs recorded in {path}")
         return
 
+    by_commit: defaultdict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for run in runs:
+        by_commit[str(run.get("commit", "unknown"))].append(run)
+
+    for version, group in by_commit.items():
+        _report_group(version, group)
+    if len(by_commit) > 1:
+        print(
+            f"\n{len(by_commit)} code versions are listed separately above. Numbers from "
+            "different versions are not comparable question by question, because any edit "
+            "that reaches a prompt reshuffles the whole set."
+        )
+
+
+def _report_group(version: str, group: list[Mapping[str, Any]]) -> None:
+    spreads = aggregate(group)
     runs = max(spread.runs for spread in spreads.values())
-    print(f"\n{'=' * 78}\nacross {runs} recorded run(s)\n{'=' * 78}")
+    print(f"\n{'=' * 78}\n{version}: across {runs} recorded run(s)\n{'=' * 78}")
     print(f"{'question':58} {'isolated':>10} {'accumulated':>12}")
     for question in WALK:
         before = spreads.get(("isolated", question.text))

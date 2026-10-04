@@ -8,9 +8,12 @@ same run and any difference between their scores would mean nothing.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -23,9 +26,11 @@ from session_eval import (
     _is_drift,
     _passed,
     aggregate,
+    commit,
     drift,
     read_runs,
     record,
+    report,
     run_walk,
 )
 
@@ -283,3 +288,64 @@ def test_two_settled_arrangements_that_agree_are_not_drift() -> None:
     question = WALK[0].text
 
     assert not _is_drift(spreads[("isolated", question)], spreads[("accumulated", question)])
+
+
+# --------------------------------------------------------------------------- #
+# runs of different code are not one measurement
+# --------------------------------------------------------------------------- #
+
+
+def test_a_recorded_run_names_the_code_it_came_from(tmp_path: Path) -> None:
+    path = tmp_path / "runs.jsonl"
+    outcome = run_walk("fake", shared_history=True, client=_fake().as_client())
+
+    record(outcome, "fake", "accumulated", path)
+
+    (row,) = read_runs(path)
+    assert row["commit"]
+
+
+def test_the_commit_is_a_short_hash_or_an_admission() -> None:
+    """Never a guess: if git cannot be asked, the row says so."""
+    version = commit()
+
+    assert version == "unknown" or (4 <= len(version) <= 40 and version.isalnum())
+
+
+def _runs_file(path: Path, *rows: dict[str, Any]) -> Path:
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + chr(10))
+    return path
+
+
+def test_the_report_separates_runs_by_code_version(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Pooling across versions reports a figure that is true of neither.
+
+    The runs file held three runs of yesterday's agent and one of today's, and
+    --report averaged them into one table before this.
+    """
+    old = _run("accumulated", ALL, EVEN)
+    old["commit"] = "aaaa111"
+    new_row = _run("accumulated", NONE, EVEN)
+    new_row["commit"] = "bbbb222"
+
+    report(_runs_file(tmp_path / "runs.jsonl", old, new_row))
+
+    printed = capsys.readouterr().out
+    assert "aaaa111" in printed
+    assert "bbbb222" in printed
+    assert "2 code versions" in printed
+
+
+def test_a_run_recorded_before_versions_were_tracked_is_called_unknown(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    row = _run("accumulated", ALL, EVEN)
+    row.pop("commit", None)
+
+    report(_runs_file(tmp_path / "runs.jsonl", row))
+
+    assert "unknown" in capsys.readouterr().out
