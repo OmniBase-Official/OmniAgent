@@ -885,9 +885,10 @@ class ReActAgent:
             _user(
                 f"You have used all {self.config.max_steps} available steps. "
                 f"The question you are answering is: {question}\n"
-                "Reply now with 'Thought:' followed by 'Final Answer:' only, "
-                "answering that question with what you already know. Do not "
-                "request another tool."
+                "Take the answer from the Observations above, which are what "
+                "the tools actually returned, rather than working it out "
+                "again. Reply now with 'Thought:' followed by 'Final Answer:' "
+                "only, and do not request another tool."
             )
         )
         reply = self._complete(scratchpad, stop=False)

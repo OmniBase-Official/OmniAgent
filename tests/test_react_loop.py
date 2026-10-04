@@ -275,7 +275,9 @@ def test_the_forced_prompt_tells_the_model_to_stop_asking_for_tools() -> None:
 
     last = contents(fake, -1)[-1]
     assert "used all 1 available steps" in last
-    assert "Do not request another tool" in last
+    # Case-insensitive: the clause moved into the middle of the sentence when
+    # the prompt was given the question and told to use the Observations.
+    assert "do not request another tool" in last.lower()
 
 
 def test_a_stubborn_model_still_yields_something_usable() -> None:
@@ -372,3 +374,23 @@ def test_the_forced_final_answer_restates_the_question() -> None:
     forced = str(fake.calls[-1]["messages"][-1]["content"])
     assert "out of steps" in forced.lower() or "all 2 available steps" in forced
     assert "What is 2 to the power of 11, minus 48?" in forced
+
+
+def test_the_forced_final_answer_points_at_the_observations() -> None:
+    """Out of steps, the model does the arithmetic again and gets it wrong.
+
+    With the question restated, the forced reply to "What is 2 to the power of
+    11, minus 48?" became "2 to the power of 11 is 2048, and when you subtract
+    48 from that, you get 1996" -- identically in all three runs. It is now
+    answering the right question, and 2048 minus 48 is 2000. The correct
+    figure was already in the scratchpad as "2 ** 11 - 48 = 2000", put there
+    by calculate at step 2, so there was nothing left to work out.
+    """
+    loop = CALL.format(expression="1 + 1")
+    fake = FakeOpenAI(replies=[loop, loop, FINAL.format(answer="2")])
+
+    build(fake, max_steps=2).run("What is 1 + 1?")
+
+    forced = str(fake.calls[-1]["messages"][-1]["content"])
+    assert "Observations above" in forced
+    assert "rather than working it out again" in forced
