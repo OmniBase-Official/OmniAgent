@@ -376,21 +376,27 @@ def test_the_forced_final_answer_restates_the_question() -> None:
     assert "What is 2 to the power of 11, minus 48?" in forced
 
 
-def test_the_forced_final_answer_points_at_the_observations() -> None:
-    """Out of steps, the model does the arithmetic again and gets it wrong.
+def test_a_forced_reply_without_an_answer_is_not_handed_over_raw() -> None:
+    """The second place raw protocol text reached the user as an answer.
 
-    With the question restated, the forced reply to "What is 2 to the power of
-    11, minus 48?" became "2 to the power of 11 is 2048, and when you subtract
-    48 from that, you get 1996" -- identically in all three runs. It is now
-    answering the right question, and 2048 minus 48 is 2000. The correct
-    figure was already in the scratchpad as "2 ** 11 - 48 = 2000", put there
-    by calculate at step 2, so there was nothing left to work out.
+    _answer_only cuts a Final Answer short at the next block, but a forced
+    reply that never writes the marker at all skipped that entirely: the loop
+    returned the reply verbatim. Told to read the Observations instead of
+    recomputing, the model answered a question with
+
+        Thought: The question asks for 2 to the power of 11 minus 48.
+        Action: calculate
+
+    in all three runs -- a tool request, at the step where tools are refused,
+    printed as prose. The raw reply stays in Step.raw and in the log; what the
+    caller gets is an admission.
     """
     loop = CALL.format(expression="1 + 1")
-    fake = FakeOpenAI(replies=[loop, loop, FINAL.format(answer="2")])
+    protocol = "Thought: I will work it out\nAction: calculate\nAction Input: 1 + 1"
+    fake = FakeOpenAI(replies=[loop, protocol])
 
-    build(fake, max_steps=2).run("What is 1 + 1?")
+    answer = build(fake, max_steps=1).run("What is 1 + 1?")
 
-    forced = str(fake.calls[-1]["messages"][-1]["content"])
-    assert "Observations above" in forced
-    assert "rather than working it out again" in forced
+    assert "Action:" not in answer
+    assert "Thought:" not in answer
+    assert answer == "I ran out of reasoning steps before reaching an answer."

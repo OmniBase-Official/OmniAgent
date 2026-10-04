@@ -885,10 +885,9 @@ class ReActAgent:
             _user(
                 f"You have used all {self.config.max_steps} available steps. "
                 f"The question you are answering is: {question}\n"
-                "Take the answer from the Observations above, which are what "
-                "the tools actually returned, rather than working it out "
-                "again. Reply now with 'Thought:' followed by 'Final Answer:' "
-                "only, and do not request another tool."
+                "Reply now with 'Thought:' followed by 'Final Answer:' only, "
+                "answering that question with what you already know. Do not "
+                "request another tool."
             )
         )
         reply = self._complete(scratchpad, stop=False)
@@ -896,7 +895,16 @@ class ReActAgent:
         self.last_trace.append(step)
         if step.final_answer:
             return step.final_answer
-        return reply or "I ran out of reasoning steps before reaching an answer."
+        # Plain prose with no markers is still usable, which is what this path
+        # is for. A reply that opens a ReAct block is not: told to answer from
+        # the Observations, the model replied "Thought: The question asks for 2
+        # to the power of 11 minus 48.\nAction: calculate" -- a tool request at
+        # the one step where tools are refused -- and the loop printed it to
+        # the user as the answer. The reply is kept in Step.raw and in the log;
+        # the caller gets the admission, which is what actually happened.
+        if reply.strip() and not _BLOCK_START_RE.search(reply):
+            return reply.strip()
+        return "I ran out of reasoning steps before reaching an answer."
 
     def _remember(self, question: str, answer: str) -> str:
         self.history.append(_user(question))
