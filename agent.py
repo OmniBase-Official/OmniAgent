@@ -582,7 +582,7 @@ class ReActAgent:
             level=logging.WARNING,
             max_steps=self.config.max_steps,
         )
-        fallback = self._force_final_answer(scratchpad)
+        fallback = self._force_final_answer(scratchpad, question)
         return self._finish(question, fallback, started, self.config.max_steps)
 
     def _check_for_a_rut(
@@ -867,12 +867,27 @@ class ReActAgent:
             hint = f" Pull the model first: 'ollama pull {self.config.model}'."
         raise AgentError(f"Model server error (HTTP {status_code}).{hint}") from exc
 
-    def _force_final_answer(self, scratchpad: list[ChatCompletionMessageParam]) -> str:
+    def _force_final_answer(
+        self, scratchpad: list[ChatCompletionMessageParam], question: str
+    ) -> str:
+        # The question is restated here because by this point it is the oldest
+        # message in the scratchpad, behind every step that has been taken, and
+        # the model answers the most recent thing instead. Asked for
+        # 2 ** 11 - 48 with four questions behind it, the agent had the right
+        # figure out of calculate at step 2, drifted onto the previous
+        # question's file, and the forced reply came back "agent.py contains
+        # 909 lines of code".
+        #
+        # Not the change measured and reverted on 2026-10-03: that one restated
+        # the question after every observation and cost two arithmetic answers.
+        # This message exists only once the budget is already gone.
         scratchpad.append(
             _user(
                 f"You have used all {self.config.max_steps} available steps. "
+                f"The question you are answering is: {question}\n"
                 "Reply now with 'Thought:' followed by 'Final Answer:' only, "
-                "using what you already know. Do not request another tool."
+                "answering that question with what you already know. Do not "
+                "request another tool."
             )
         )
         reply = self._complete(scratchpad, stop=False)

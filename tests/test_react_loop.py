@@ -346,3 +346,29 @@ def test_a_fabricated_fact_does_not_survive_a_format_violation() -> None:
     resent = contents(fake, 1)
     assert not any("204" in text for text in resent), "the invented count came back"
     assert any("discarded" in text for text in resent), "nothing says it was dropped"
+
+
+def test_the_forced_final_answer_restates_the_question() -> None:
+    """Out of steps, the model answers the last thing it looked at.
+
+    Measured: asked "What is 2 to the power of 11, minus 48?" with four
+    questions behind it, the agent got 2 ** 11 - 48 = 2000 out of calculate at
+    step 2, then drifted onto the previous question's file and spent the rest
+    of the budget on it. The forced reply came back "`agent.py` contains 909
+    lines of code" -- the most recent observation, not the question. The
+    question was the oldest message in the scratchpad, behind eight steps of
+    Thought, Action and Observation.
+
+    Restating it here is not the change that was measured and reverted on
+    2026-10-03. That one appended the question to every observation and cost
+    two arithmetic answers on the held-out set. This reaches a prompt only once
+    the step budget is gone, so a turn that ends normally never sees it.
+    """
+    loop = CALL.format(expression="1 + 1")
+    fake = FakeOpenAI(replies=[loop, loop, FINAL.format(answer="2")])
+
+    build(fake, max_steps=2).run("What is 2 to the power of 11, minus 48?")
+
+    forced = str(fake.calls[-1]["messages"][-1]["content"])
+    assert "out of steps" in forced.lower() or "all 2 available steps" in forced
+    assert "What is 2 to the power of 11, minus 48?" in forced
