@@ -908,7 +908,22 @@ class ReActAgent:
 
     def _remember(self, question: str, answer: str) -> str:
         self.history.append(_user(question))
-        self.history.append(_assistant(answer))
+        # Stored in the shape the next turn is required to reply in. The
+        # history held plain prose, and the longer it grew the harder it pulled
+        # the model into answering conversationally -- which the format guard
+        # then rejected, taking the content with it. Both settled drifts begin
+        # exactly there: asked for 2 ** 11 - 48 with four questions behind it
+        # the model opened with "2 to the power of 11 is 2048, and that minus
+        # 48 is 2000", and asked for the weather with seven behind it, "I don't
+        # have a built-in way to look up current weather conditions". Right,
+        # and in the second case the honest answer, both discarded for want of
+        # a prefix -- after which the turn wandered onto the previous
+        # question's subject and answered that instead.
+        #
+        # Every past turn now demonstrates the format rather than arguing
+        # against it. Nothing unverified is reintroduced, and the answer handed
+        # back to the caller is unchanged.
+        self.history.append(_assistant(f"Final Answer: {answer}"))
         return answer
 
     def _trace(self, iteration: int, step: Step) -> None:

@@ -116,7 +116,9 @@ def test_the_second_turn_sees_the_first_question_and_answer() -> None:
 
     assert roles(fake, 1) == ["system", "user", "assistant", "user"]
     assert contents(fake, 1)[1] == "What is 99 * 47?"
-    assert contents(fake, 1)[2] == "4653"
+    # Stored with the marker, so that every past turn shows the next one the
+    # format it has to reply in.
+    assert contents(fake, 1)[2] == "Final Answer: 4653"
     assert contents(fake, 1)[3] == "Now divide that by 3"
 
 
@@ -161,7 +163,8 @@ def test_the_answer_returned_is_the_answer_remembered() -> None:
     agent = build(fake)
 
     assert agent.run("What is 2 + 2?") == "It is 4."
-    assert agent.history[-1]["content"] == "It is 4."
+    # The caller gets the answer; the history keeps it in ReAct shape.
+    assert agent.history[-1]["content"] == "Final Answer: It is 4."
 
 
 # --------------------------------------------------------------------------- #
@@ -303,7 +306,7 @@ def test_the_forced_answer_is_remembered_like_any_other() -> None:
     agent = build(fake, max_steps=1)
     agent.run("go")
 
-    assert agent.history[-1]["content"] == "2"
+    assert agent.history[-1]["content"] == "Final Answer: 2"
 
 
 # --------------------------------------------------------------------------- #
@@ -400,3 +403,34 @@ def test_a_forced_reply_without_an_answer_is_not_handed_over_raw() -> None:
     assert "Action:" not in answer
     assert "Thought:" not in answer
     assert answer == "I ran out of reasoning steps before reaching an answer."
+
+
+def test_a_remembered_answer_is_stored_in_the_shape_the_next_turn_must_use() -> None:
+    """The history is what pulls a long session out of the ReAct format.
+
+    Diagnosed with per-step logs on both settled drifts. Asked for
+    2 ** 11 - 48 with four questions behind it the model opened with "2 to the
+    power of 11 is 2048, and that minus 48 is 2000"; asked for the weather with
+    seven behind it, "I don't have a built-in way to look up current weather
+    conditions". Both are right -- the second is the honest answer the honesty
+    axis wants -- and both were thrown away for want of a Final Answer prefix,
+    after which the turn wandered onto the previous question's subject and
+    answered that instead.
+
+    The history was plain prose, so the longer it grew the harder it pulled
+    towards replying conversationally. Stored with the marker, every past turn
+    demonstrates the format instead of arguing against it. The answer handed
+    back to the caller is unchanged.
+    """
+    fake = FakeOpenAI(replies=[FINAL.format(answer="4"), FINAL.format(answer="8")])
+    agent = build(fake)
+
+    assert agent.run("What is 2 + 2?") == "4"
+    agent.run("And double it?")
+
+    stored = [str(message["content"]) for message in agent.history]
+    assert stored[1].startswith("Final Answer: ")
+    assert "4" in stored[1]
+    # And the second turn's prompt carries that shape in front of the model.
+    second = [str(message["content"]) for message in sent_messages(fake, 1)]
+    assert any(text.startswith("Final Answer: ") for text in second)
