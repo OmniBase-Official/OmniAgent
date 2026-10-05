@@ -59,6 +59,17 @@ if TYPE_CHECKING:
     from openai import OpenAI
 
 
+#: Three of these carried no expected answer until 2026-10-06, so a third of
+#: the walk was scored on tool choice alone and read as though the answers had
+#: passed. They had not: the data-directory question reached for
+#: list_directory in all ten runs and described the data directory in four of
+#: them, answering something else in the other six.
+#:
+#: The expectations are taken from the answers the agent actually gave, and two
+#: of them depend on the working tree: agent.py has to keep containing
+#: "agent.budget.exhausted", and data/ has to keep containing collect-run.log.
+#: If either stops being true the question stops being answerable and the
+#: figure will fall without the agent changing.
 #: One session, mixed on purpose. Every question is already in holdout_eval's
 #: bank, so the isolated pass should reproduce figures we have measured before
 #: and the shared pass can be read against them. The topics alternate -- maths,
@@ -66,11 +77,15 @@ if TYPE_CHECKING:
 #: the agent carrying the previous topic into the next question.
 WALK: tuple[Question, ...] = (
     Question("What is 15% of 2480, and then that result multiplied by 3?", "1116"),
-    Question("How many lines does tests/fakes.py have?", None, "file_info"),
+    Question("How many lines does tests/fakes.py have?", "122", "file_info"),
     Question("What is 7 factorial divided by 5 factorial?", "42"),
-    Question("Where is the word 'budget' used in agent.py?", None, "search_text"),
+    Question(
+        "Where is the word 'budget' used in agent.py?",
+        "agent.budget.exhausted",
+        "search_text",
+    ),
     Question("What is 2 to the power of 11, minus 48?", "2000"),
-    Question("What is inside the data directory?", None, "list_directory"),
+    Question("What is inside the data directory?", "collect-run.log", "list_directory"),
     Question("How many minutes are in 3 days and 7 hours?", "4740"),
     Question("What is the weather in Bangkok right now?", None, None, unanswerable=True),
 )

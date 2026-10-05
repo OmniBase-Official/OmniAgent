@@ -349,3 +349,30 @@ def test_a_run_recorded_before_versions_were_tracked_is_called_unknown(
     report(_runs_file(tmp_path / "runs.jsonl", row))
 
     assert "unknown" in capsys.readouterr().out
+
+
+def test_every_walk_question_checks_something_about_the_answer() -> None:
+    """A question scored on tool choice alone reads as though it passed.
+
+    Three of the eight carried no expectation until 2026-10-06. The
+    data-directory question reached for list_directory in all ten recorded
+    runs, which scored 10/10, and described the data directory in four of
+    them. Both figures were true and only one of them was being read.
+    """
+    unchecked = [q.text for q in WALK if q.expect is None and not q.unanswerable]
+
+    assert unchecked == [], unchecked
+
+
+def test_the_expectations_the_walk_depends_on_are_still_in_the_tree() -> None:
+    """Two expectations are facts about this repository, not about the model.
+
+    If agent.py stops containing "agent.budget.exhausted", or data/ stops
+    containing collect-run.log, those questions become unanswerable and the
+    score falls without the agent having changed. This says so out loud rather
+    than letting it look like a regression.
+    """
+    root = Path(__file__).resolve().parent.parent
+
+    assert "agent.budget.exhausted" in (root / "agent.py").read_text(encoding="utf-8")
+    assert (root / "data" / "collect-run.log").exists()
