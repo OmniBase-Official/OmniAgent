@@ -73,8 +73,8 @@ shipped, not because the work looks finished.
 
 # PART 2 — Where the project stands
 
-**543 tests pass**, mypy strict clean across 32 files, ruff clean. HEAD is
-`06f9ab0`. The demo is **2026-10-10**, five days out.
+**545 tests pass**, mypy strict clean across 32 files, ruff clean. HEAD is
+`a97aab0`. The demo is **2026-10-10**, five days out.
 
 **The drift is fixed and the fix is confirmed.** See the ten-run table below.
 
@@ -115,13 +115,43 @@ that matters:**
 So ask the `search_text` question **first**. Measured on the path the demo
 actually uses, settled in both directions.
 
-**And a correction to how the tables below should be read.** Three of the eight
-questions in `WALK` carry no expected answer at all -- `Question(text, None,
-"file_info")` and the same for `search_text` and `list_directory`. Their 10/10
-means *the right tool was reached for*, not *the answer was right*. The 'budget'
-question scores 10/10 accumulated and answered wrongly in all three rehearsals;
-both are true, because nothing has ever checked that answer. The apparent
-contradiction between the harnesses was mine to make, not theirs.
+## 2026-10-06: what those figures were actually measuring
+
+Three of the eight questions in `WALK` carried no expected answer, so a third
+of the walk was scored on tool choice alone and read as though the answers had
+passed. `a97aab0` gives them one. Re-scored from the same ten transcripts --
+adding an expectation changes the scoring, not the agent, so no runs were
+needed:
+
+| question | isolated | accumulated | was reported |
+|---|---|---|---|
+| lines in tests/fakes.py | 10/10 | 10/10 | 10/10 — genuinely right |
+| where 'budget' is used | 10/10 | 9/10 | 10/10 |
+| **what is inside the data directory** | **4/10** | **4/10** | **10/10** |
+
+The data-directory question reached for `list_directory` in all ten runs and
+described the data directory in four. 4/10 in **both** arrangements, so it is
+not drift -- a plain failure the tool-choice score hid completely. Six answers
+were about something else entirely, including "There is no 'data' directory in
+this workspace", about a directory that exists.
+
+The mechanism is the one already diagnosed, not a new one: every run gets the
+correct listing at step 1 and then does not stop. The passing runs answer in
+three steps; the failing ones wander into `search_text` and `read_file` until
+the listing is no longer what they are answering from. One of them dispatched
+a tool called `action_input`, which is the same shape of mistake as
+`Action: Final Answer` and costs the same wasted step.
+
+Two expectations are facts about this repository, not the model: `agent.py`
+must keep containing `agent.budget.exhausted` and `data/` must keep containing
+`collect-run.log`. A test asserts both, so if either stops being true the
+figure falls for a reason that is not the agent.
+
+**`holdout_eval.py` has the same gap and has not been re-read.** Its
+questions carry `prefer_tool` and no `expect` for every file question, so its
+`correct` axis -- the 9/10 and 10/10 quoted for it -- only ever covered the
+arithmetic. Treat its tool-pick figures as sound and its correctness figures
+as not covering the file questions at all.
 
 ## The diagnosis of the drift, from 2026-10-04
 
@@ -213,13 +243,13 @@ too few runs.
 
 ## Still open
 
-1. **Three questions in `WALK` have no expected answer**, so a third of the
-   walk is scored on tool choice alone. Give `fakes.py`, `budget` and the data
-   directory an `expect`, then re-measure -- the figures for those three are
-   not what they look like. Pick the expectation carefully: 'budget' now
-   appears in many comments in agent.py, so the answer worth demanding is
-   probably a line number.
-2. **The weather question is unstable in both arrangements** -- 6/10 isolated,
+1. **`holdout_eval.py`'s file questions have no expected answer.** Same gap,
+   same fix, and its figures appear throughout this file. It needs one run to
+   collect the real answers before expectations can be chosen.
+2. **The data-directory question is 4/10 both ways** and the cause is failure
+   to stop after a correct first observation. It is the clearest remaining
+   target and it is not a history problem.
+3. **The weather question is unstable in both arrangements** -- 6/10 isolated,
    3/10 accumulated. Both unsettled.
    Diagnose it the way the drift was diagnosed: a throwaway script that
    configures `obs` with a `log_file`, walks `WALK[:8]` through one agent and
@@ -238,11 +268,11 @@ too few runs.
 
 ## Next ten-percent milestone, in order
 
-1. Give the three unchecked questions an `expect` and re-measure. Until then
-   a third of the walk's score means less than it appears to.
-2. Rehearse the demo again with the search_text question first, and settle the
-   final question order. 15/15 over three runs is where it stands.
-3. Diagnose the weather question's instability with logged runs.
+1. Do the same for `holdout_eval.py`: one run to see the answers, then
+   expectations, then re-read its numbers.
+2. Settle the demo's final question order (see below) and rehearse it.
+3. Attack the failure to stop after a correct first observation -- it now
+   accounts for the data-directory question as well as the old drift.
 4. Measure `qwen-ctx8k` on both evaluations.
 
 ## What the demo should and should not ask
@@ -261,6 +291,11 @@ Avoid:
   3/10 accumulated. It invents a temperature, or answers the previous question.
 - **"Where is the word 'budget' used in agent.py?" anywhere but first** — wrong
   in all three rehearsals at position 4, right in all three at position 1.
+  Re-scored against `agent.budget.exhausted` rather than the weak check used on
+  the day, which does not change that conclusion.
+- **"What is inside the data directory?" in a long session** — 4/10 across the
+  evaluation's eight questions, though 5/6 on the demo's five. It survives a
+  short walk; do not lean on it.
 - **"How many minutes are in 3 days and 7 hours?"** — 0/10 even alone.
 - **Elliptical follow-ups on file metadata** ("And sandbox.py?") — picks
   `read_file` and copies a number from history. The same question in full picks
