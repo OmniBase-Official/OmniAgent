@@ -9,12 +9,18 @@ runs on is covered by the suite.
 
 from __future__ import annotations
 
+import inspect
+import sys
 import tomllib
 from pathlib import Path
 
 import pytest
 
 from config import DEFAULT_CONFIG_NAME, Settings, resolve
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+
+from session_eval import run_walk
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / DEFAULT_CONFIG_NAME
@@ -69,3 +75,19 @@ def test_demo_profile_is_deterministic() -> None:
 def test_demo_profile_records_the_run() -> None:
     settings, _ = _resolve("demo")
     assert settings.log_file is not None
+
+
+def test_the_demo_runs_the_step_budget_the_evaluations_measure() -> None:
+    """The demo should not be the one configuration nobody has measured.
+
+    Every figure in NEXT_CHAT.md comes from max_steps=8. The demo profile
+    shipped 12, and rehearsing it there the question "What is inside the data
+    directory?" spent all twelve steps and returned "I ran out of reasoning
+    steps before reaching an answer" -- a question that is 10/10 at 3-9 steps
+    in the evaluation. One rehearsal does not prove twelve is the cause, but
+    it is reason enough for the demo to run what was measured.
+    """
+    measured = inspect.signature(run_walk).parameters["max_steps"].default
+    settings, _ = _resolve("demo")
+
+    assert settings.max_steps == measured

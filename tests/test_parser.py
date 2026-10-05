@@ -147,3 +147,51 @@ def test_a_final_answer_marker_with_nothing_usable_after_it_is_a_violation() -> 
 
     assert step.final_answer is None
     assert step.action is None
+
+
+# --------------------------------------------------------------------------- #
+# the answer written into the Action slot
+# --------------------------------------------------------------------------- #
+
+
+def test_final_answer_named_as_an_action_is_an_answer() -> None:
+    """Measured on the demo path, which session_eval does not exercise.
+
+    Asked where 'budget' is used in agent.py, the agent searched, found it,
+    and replied "Thought: ...\nAction: Final Answer". The parser dispatched a
+    tool called "Final Answer", the loop logged tool.unknown, a step was spent
+    on nothing and the eventual answer was worse for it. The model is naming
+    the marker in the slot it has been taught to put a verb in.
+    """
+    step = _parse("Thought: done\nAction: Final Answer\nAction Input: 42")
+
+    assert step.final_answer == "42"
+    assert step.action is None
+
+
+@pytest.mark.parametrize("named", ["Final Answer", "final_answer", "FINAL ANSWER", "finalanswer"])
+def test_the_marker_is_recognised_however_it_is_spelled(named: str) -> None:
+    step = _parse(f"Thought: done\nAction: {named}\nAction Input: 42")
+
+    assert step.final_answer == "42"
+
+
+def test_the_marker_as_an_action_with_no_input_is_a_format_violation() -> None:
+    """There is no answer there, so none is invented from the Thought.
+
+    This is the reply that was actually measured: the marker in the Action
+    slot and no Action Input at all. Falling through to the loop's format
+    correction costs the same one step as the bogus tool call did, and does
+    not put a tool that does not exist into the log.
+    """
+    step = _parse("Thought: I have found where 'budget' is used.\nAction: Final Answer")
+
+    assert step.final_answer is None
+    assert step.action is None
+
+
+def test_a_real_tool_name_is_still_a_tool() -> None:
+    step = _parse("Thought: look\nAction: file_info\nAction Input: agent.py")
+
+    assert step.action == "file_info"
+    assert step.final_answer is None

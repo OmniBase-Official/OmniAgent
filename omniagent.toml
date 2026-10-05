@@ -11,7 +11,12 @@ max_steps = 8
 # the stock 7B, whose own default context is 4096 -- short enough to truncate
 # the system prompt from the front. The fine-tune's Modelfile pins 16384.
 model = "omniagent"
-max_steps = 12
+# 8, not 12: every figure in NEXT_CHAT.md was measured at 8, and the demo
+# should not be the one configuration nobody has evaluated. Rehearsing at 12,
+# "What is inside the data directory?" spent all twelve steps and gave up -- a
+# question the evaluation has at 10/10 in 3 to 9 steps. A test ties this to the
+# evaluation's own default so the two cannot drift apart again.
+max_steps = 8
 log_file = "data/demo.jsonl"
 temperature = 0.0
 

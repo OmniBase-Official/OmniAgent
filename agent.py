@@ -365,9 +365,27 @@ def _parse(text: str) -> Step:
         if not raw_input.strip():
             raw_input = inline.group(2)
 
+    if _names_the_marker(name):
+        # The model put the marker in the slot it has been taught to put a verb
+        # in. Measured on the demo path: "Thought: I have found where 'budget'
+        # is used in agent.py\nAction: Final Answer" dispatched a tool called
+        # "Final Answer", logged tool.unknown, and spent a step on nothing.
+        # With no Action Input there is no answer to take, so this falls
+        # through to the loop's format correction rather than promoting the
+        # Thought, which would be inventing one.
+        answer = _answer_only(raw_input)
+        if answer:
+            step.final_answer = answer
+        return step
+
     step.action = name
     step.action_input = _clean_action_input(raw_input)
     return step
+
+
+def _names_the_marker(action: str) -> bool:
+    """Whether an Action names the final-answer marker rather than a tool."""
+    return "".join(c for c in action.lower() if c.isalnum()) == "finalanswer"
 
 
 def _answer_only(captured: str) -> str:
