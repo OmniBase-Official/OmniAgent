@@ -73,8 +73,8 @@ shipped, not because the work looks finished.
 
 # PART 2 — Where the project stands
 
-**535 tests pass**, mypy strict clean across 32 files, ruff clean. HEAD is
-`0749e53`. The demo is **2026-10-10**, five days out.
+**543 tests pass**, mypy strict clean across 32 files, ruff clean. HEAD is
+`06f9ab0`. The demo is **2026-10-10**, five days out.
 
 **The drift is fixed and the fix is confirmed.** See the ten-run table below.
 
@@ -91,7 +91,39 @@ shipped, not because the work looks finished.
 | `217f1a9` | that revert, plus: a forced reply that opens a ReAct block is no longer handed to the user verbatim |
 | `b2998ff` | **the history is stored as `Final Answer: <answer>`** — the fix for the diagnosed drift |
 
-## The diagnosis, which is the day's real result
+## 2026-10-05: the demo path, and what the figures below do not say
+
+`06f9ab0` fixed two things that only the demo path shows, because `session_eval`
+drives the agent directly while the demo is `main.py --profile demo`:
+
+- The agent replied `Action: Final Answer` with no Action Input, and the parser
+  dispatched a tool by that name -- `tool.unknown` logged for a tool that does
+  not exist, a step spent on nothing. `_parse` now recognises the marker in the
+  Action slot however it is spelled. Rehearsing after the fix: `tool.unknown`
+  events 0, down from 1.
+- The demo profile shipped `max_steps = 12` while every figure here was measured
+  at 8. A test now reads the budget out of `session_eval`'s own default.
+
+**Rehearsed on the real path, three runs each, and this is the demo guidance
+that matters:**
+
+| order | result |
+|---|---|
+| 'budget' asked 4th, after two arithmetic and one file question | **BAD 3/3**, 6 steps |
+| 'budget' asked 1st, everything else after | **OK 15/15** across all five questions |
+
+So ask the `search_text` question **first**. Measured on the path the demo
+actually uses, settled in both directions.
+
+**And a correction to how the tables below should be read.** Three of the eight
+questions in `WALK` carry no expected answer at all -- `Question(text, None,
+"file_info")` and the same for `search_text` and `list_directory`. Their 10/10
+means *the right tool was reached for*, not *the answer was right*. The 'budget'
+question scores 10/10 accumulated and answered wrongly in all three rehearsals;
+both are true, because nothing has ever checked that answer. The apparent
+contradiction between the harnesses was mine to make, not theirs.
+
+## The diagnosis of the drift, from 2026-10-04
 
 Both settled failures go wrong by the same mechanism, and it is not the
 question's subject. Per-step logs, accumulated history:
@@ -181,13 +213,19 @@ too few runs.
 
 ## Still open
 
-1. **The weather question is unstable in both arrangements** -- 6/10 isolated,
-   3/10 accumulated. That is the only open behaviour question in the walk.
+1. **Three questions in `WALK` have no expected answer**, so a third of the
+   walk is scored on tool choice alone. Give `fakes.py`, `budget` and the data
+   directory an `expect`, then re-measure -- the figures for those three are
+   not what they look like. Pick the expectation carefully: 'budget' now
+   appears in many comments in agent.py, so the answer worth demanding is
+   probably a line number.
+2. **The weather question is unstable in both arrangements** -- 6/10 isolated,
+   3/10 accumulated. Both unsettled.
    Diagnose it the way the drift was diagnosed: a throwaway script that
    configures `obs` with a `log_file`, walks `WALK[:8]` through one agent and
    dumps the turn. Run it several times, since neither figure is settled.
-2. **The walk may now be too easy.** Six of eight questions are 10/10 both
-   ways. Harder held-out questions would make the next regression visible.
+3. **The walk may be too easy** -- but check item 1 first, because three of
+   the questions it looks easy on have never had their answers checked.
 3. **`minutes in 3 days and 7 hours` is 0/10 isolated**: 4,320 plus 7 times
    3,600, so it uses seconds per hour. Reproducible, unrelated to history, and
    the only pure-capability failure in the set.
@@ -200,10 +238,11 @@ too few runs.
 
 ## Next ten-percent milestone, in order
 
-1. **Rehearse the demo** — 2026-10-10, now five days out. This is the goal and
-   the drift that threatened it is fixed.
-2. Diagnose the weather question's instability with logged runs.
-3. Add harder questions to `WALK`, since six of eight are now 10/10 both ways.
+1. Give the three unchecked questions an `expect` and re-measure. Until then
+   a third of the walk's score means less than it appears to.
+2. Rehearse the demo again with the search_text question first, and settle the
+   final question order. 15/15 over three runs is where it stands.
+3. Diagnose the weather question's instability with logged runs.
 4. Measure `qwen-ctx8k` on both evaluations.
 
 ## What the demo should and should not ask
@@ -220,6 +259,8 @@ Avoid:
 
 - **"What is the weather in Bangkok right now?"** anywhere — 6/10 isolated and
   3/10 accumulated. It invents a temperature, or answers the previous question.
+- **"Where is the word 'budget' used in agent.py?" anywhere but first** — wrong
+  in all three rehearsals at position 4, right in all three at position 1.
 - **"How many minutes are in 3 days and 7 hours?"** — 0/10 even alone.
 - **Elliptical follow-ups on file metadata** ("And sandbox.py?") — picks
   `read_file` and copies a number from history. The same question in full picks
