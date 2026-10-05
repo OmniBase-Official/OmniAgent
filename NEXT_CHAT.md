@@ -74,7 +74,9 @@ shipped, not because the work looks finished.
 # PART 2 — Where the project stands
 
 **535 tests pass**, mypy strict clean across 32 files, ruff clean. HEAD is
-`b2998ff`. The demo is **2026-10-10**, six days out.
+`0749e53`. The demo is **2026-10-10**, five days out.
+
+**The drift is fixed and the fix is confirmed.** See the ten-run table below.
 
 **Tools:** `calculate`, `get_current_time`, `file_info`, `read_file`,
 `list_directory`, `search_text`. **Model:** `omniagent`.
@@ -136,19 +138,35 @@ Settled across twenty consecutive runs: `2 ** 11 - 48` is right in exactly 2
 steps alone and wrong in exactly 9 with history. Also settled: history costs
 steps even when the answer survives — 3 to 6, and 2 to 7-9.
 
-## Measured: `b2998ff`, two runs — promising, not settled
+## Measured: the fix, ten runs — confirmed
+
+Ten runs, pooled from two labels: 2 under `b2998ff` and 8 under `0749e53`,
+which differ only in NEXT_CHAT.md -- `git diff --stat b2998ff 0749e53` shows
+that one file, so the agent code is identical and the runs are one sample.
 
 | question | isolated | accumulated |
 |---|---|---|
-| **2 to the power of 11, minus 48** | 2/2 [2] | **2/2 [2-3]** |
-| where 'budget' is used in agent.py | 2/2 [3] | 2/2 [2-3] |
-| what is inside the data directory | 2/2 [2] | 2/2 [4-9] |
-| minutes in 3 days and 7 hours | 0/2 [3] | 1/2 [2] |
-| weather in Bangkok | 1/2 [6-9] | **0/2 [3-4]** |
+| 15% of 2480, times 3 | 10/10 [3] | 10/10 [3] |
+| lines in tests/fakes.py | 10/10 [2] | 10/10 [2] |
+| 7! / 5! | 10/10 [2] | 10/10 [2] |
+| where 'budget' is used in agent.py | 10/10 [3] | 10/10 [2-3] |
+| **2 to the power of 11, minus 48** | **10/10 [2]** | **10/10 [2-3]** |
+| what is inside the data directory | 10/10 [2] | 10/10 [3-9] |
+| minutes in 3 days and 7 hours | 0/10 [3] | 1/10 [2-5] |
+| weather in Bangkok | 6/10 [3-9] | 3/10 [3-7] |
 
-No question was flagged as drifting. Against a baseline of 0-out-of-10, two
-passes in two runs and a step count falling from 9 to 2-3 is a strong signal,
-and two runs settle nothing. **Getting this to ten runs is the first job.**
+Ten runs against ten runs with no overlap: the question that failed 0/10 at
+exactly 9 steps now passes 10/10 in 2-3. Nothing is flagged as drifting.
+
+The step cost of history is gone too, which was a settled finding of its own:
+'budget' was 6 steps accumulated and is now 2-3, and the data directory was
+7-9 and is now 3-9. The model is no longer floundering before it answers.
+
+The weather question is now 6/10 isolated and 3/10 accumulated. Both
+unsettled, so nothing is established either way -- and the earlier 0/10
+accumulated is not reproduced. Honesty on that question is unstable in both
+arrangements, which is a different problem from drift and needs its own
+diagnosis.
 
 ## Yesterday's retraction was itself over-corrected
 
@@ -163,13 +181,13 @@ too few runs.
 
 ## Still open
 
-1. **Ten runs on `b2998ff`.** Eight more, one per tool call, ~6 minutes each.
-   Do not delete `data/session-runs.jsonl`; versions are separated by hash now.
-2. **The weather question still fails accumulated**, 0/10 then 0/2, and is only
-   9/10 isolated, so it is not reliably honest even alone. `b2998ff` did not
-   touch it. Diagnose it the same way: there is a throwaway script pattern for
-   this — configure `obs` with a `log_file`, walk `WALK[:8]` through one agent,
-   dump the turn.
+1. **The weather question is unstable in both arrangements** -- 6/10 isolated,
+   3/10 accumulated. That is the only open behaviour question in the walk.
+   Diagnose it the way the drift was diagnosed: a throwaway script that
+   configures `obs` with a `log_file`, walks `WALK[:8]` through one agent and
+   dumps the turn. Run it several times, since neither figure is settled.
+2. **The walk may now be too easy.** Six of eight questions are 10/10 both
+   ways. Harder held-out questions would make the next regression visible.
 3. **`minutes in 3 days and 7 hours` is 0/10 isolated**: 4,320 plus 7 times
    3,600, so it uses seconds per hour. Reproducible, unrelated to history, and
    the only pure-capability failure in the set.
@@ -182,12 +200,11 @@ too few runs.
 
 ## Next ten-percent milestone, in order
 
-1. Ten runs on `b2998ff`, then `--report`. Everything else waits on this.
-2. If the drift is gone, that is the demo-critical fix confirmed — say so with
-   the numbers and consider whether the walk needs harder questions.
-3. Diagnose the weather question's accumulated failure with a logged run.
-4. **Rehearse the demo** — 2026-10-10.
-5. Measure `qwen-ctx8k` on both evaluations.
+1. **Rehearse the demo** — 2026-10-10, now five days out. This is the goal and
+   the drift that threatened it is fixed.
+2. Diagnose the weather question's instability with logged runs.
+3. Add harder questions to `WALK`, since six of eight are now 10/10 both ways.
+4. Measure `qwen-ctx8k` on both evaluations.
 
 ## What the demo should and should not ask
 
@@ -201,11 +218,9 @@ Settled at 10/10 both arrangements on `217f1a9`, and unchanged on `b2998ff`:
 
 Avoid:
 
-- **"What is the weather in Bangkok right now?" late in a session** — 0/10
-  accumulated. It invents something, or answers the previous question.
+- **"What is the weather in Bangkok right now?"** anywhere — 6/10 isolated and
+  3/10 accumulated. It invents a temperature, or answers the previous question.
 - **"How many minutes are in 3 days and 7 hours?"** — 0/10 even alone.
-- **"What is 2 to the power of 11, minus 48?" late in a session** until the ten
-  runs on `b2998ff` confirm the fix.
 - **Elliptical follow-ups on file metadata** ("And sandbox.py?") — picks
   `read_file` and copies a number from history. The same question in full picks
   `file_info` and is right.
@@ -215,10 +230,11 @@ Avoid:
 ## Traps already paid for once
 
 - **Ollama does not autostart.** `Start-Process "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" -ArgumentList "serve" -WindowStyle Hidden`, wait ~15 s. `&` from Bash does not work.
-- **A `session_eval` run can exceed the 600-second tool limit** and be moved to
-  the background, where it survives only until the session ends. It usually
-  takes 340-420 s, so give it the full timeout and do not start a second one
-  while it runs.
+- **A `session_eval` run now usually exceeds the 600-second tool limit** and is
+  moved to the background, where it survives only until the session ends. It
+  took 340-420 s on 2026-10-03 and runs past 600 s since. Give it the full
+  timeout, expect to wait for the completion notification, and never start a
+  second one while one is running -- they fight over the 4 GB card.
 - **Ollama at temperature 0 is not deterministic for long trajectories.** Short
   clean ones are stable to the step; a question that goes off the rails swings
   `[3-9]`. Read `steps` as a range.
