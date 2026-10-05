@@ -34,6 +34,20 @@ import observability as obs
 from agent import AgentConfig, AgentError, ReActAgent
 from sandbox import Workspace, set_workspace
 
+
+def _lines(relative: str) -> str:
+    """The true line count, read from the tree rather than written down.
+
+    A hardcoded count is wrong the moment the file is edited, and the figure
+    then falls for a reason that is not the model.
+    """
+    return str(len((PROJECT / relative).read_text(encoding="utf-8").splitlines()))
+
+
+def _last_line(relative: str) -> str:
+    return (PROJECT / relative).read_text(encoding="utf-8").splitlines()[-1].strip()
+
+
 SESSIONS_UNDER_TEST: list[list[Question]] = [
     # -- arithmetic needing more than one step ---------------------------- #
     [Question("What is 15% of 2480, and then that result multiplied by 3?", "1116")],
@@ -48,7 +62,15 @@ SESSIONS_UNDER_TEST: list[list[Question]] = [
     ],
     [Question("What is 2 to the power of 11, minus 48?", "2000")],
     # -- tool choice: metadata should not cost a whole file ---------------- #
-    [Question("How many lines does tests/fakes.py have?", None, "file_info")],
+    #
+    # Expectations were added on 2026-10-06. Until then every question here
+    # carried prefer_tool and no expect, so the `correct` column only ever
+    # covered the arithmetic above, while these read as though their answers
+    # had passed. Line counts are read from the tree, not written down, so an
+    # edit to a file cannot make the figure fall for a reason that is not the
+    # model. The two comparison questions still carry no expectation, which is
+    # deliberate: a substring cannot score a comparison.
+    [Question("How many lines does tests/fakes.py have?", _lines("tests/fakes.py"), "file_info")],
     [
         Question(
             "Which has more lines, tests/test_config.py or tests/test_sandbox.py?",
@@ -56,9 +78,21 @@ SESSIONS_UNDER_TEST: list[list[Question]] = [
             "file_info",
         )
     ],
-    [Question("What is the very last line of scripts/build_notebook.py?", None, "file_info")],
-    [Question("Where is the word 'budget' used in agent.py?", None, "search_text")],
-    [Question("What is inside the data directory?", None, "list_directory")],
+    [
+        Question(
+            "What is the very last line of scripts/build_notebook.py?",
+            _last_line("scripts/build_notebook.py"),
+            "file_info",
+        )
+    ],
+    [
+        Question(
+            "Where is the word 'budget' used in agent.py?",
+            "agent.budget.exhausted",
+            "search_text",
+        )
+    ],
+    [Question("What is inside the data directory?", "collect-run.log", "list_directory")],
     # -- a question no tool can answer ------------------------------------ #
     [Question("What is the weather in Bangkok right now?", None, None, unanswerable=True)],
     # -- follow-up chains, where the format used to collapse -------------- #
@@ -69,8 +103,15 @@ SESSIONS_UNDER_TEST: list[list[Question]] = [
         Question("Finally, what is 10% of that?", "50"),
     ],
     [
-        Question("How many lines does tests/fakes.py have?", None, "file_info"),
-        Question("And scripts/build_notebook.py?", None, "file_info"),
+        Question("How many lines does tests/fakes.py have?", _lines("tests/fakes.py"), "file_info"),
+        Question(
+            "And scripts/build_notebook.py?",
+            _lines("scripts/build_notebook.py"),
+            "file_info",
+        ),
+        # No expectation, and not an oversight: a substring cannot score a
+        # comparison. "fakes.py is longer than build_notebook.py" contains
+        # every word a right answer would. Scored on tool choice only.
         Question("Which of the two is longer?", None),
     ],
 ]
