@@ -168,9 +168,8 @@ The denominator moved from 10 to 16 because six file questions became
 checkable. Four failed: `minutes in 3 days and 7 hours` and the last line of
 `build_notebook.py`, both already documented; `And scripts/build_notebook.py?`
 wanting 461, newly checked; and `Finally, what is 10% of that?` wanting 50,
-which **already had an expectation and passed on 2026-10-02**. One run cannot
-tell that apart from variance, so it is a thing to check and not yet a
-regression.
+which already had an expectation and passed on 2026-10-02. **Settled, and it
+is not a regression** -- see below.
 
 ## The diagnosis of the drift, from 2026-10-04
 
@@ -260,13 +259,38 @@ The phenomenon is real. The original reasoning was wrong, and the retraction
 went too far on three runs. Both mistakes have the same cause: concluding from
 too few runs.
 
+## `Finally, what is 10% of that?` — settled, and not a regression
+
+Run alone, the four-question chain ten times: 10/10 on the first three and
+**0/10 on the fourth**. Reproducible, so not variance. The answer is "10% of
+1000 is 100" -- correct arithmetic on the wrong operand, because "that" has
+resolved to the step-2 answer rather than the step-3 answer of 500. In the
+remembered history 1000 appears twice, once as its own answer and once inside
+"Half of 1000 is 500", while 500 appears once.
+
+The 2026-10-02 transcripts under `data/` settle where it came from:
+
+| run | the answer | scored |
+|---|---|---|
+| `829ee76` | "10% of 1000 is 50." | ANSWER OK |
+| `58bb801` | "10% of 1000 is 50." | ANSWER OK |
+| today | "10% of 1000 is 100." | ANSWER WRONG |
+
+It said "10% of **1000**" then too. The referent error was already there; what
+has changed is only which number it printed. On 2026-10-02 the sentence
+contradicted itself -- ten percent of a thousand is not fifty -- and a
+substring looking for "50" scored it as correct. Today the sentence is
+internally consistent and wrong, so it fails.
+
+So nothing this week broke it, and the `correct 10/10` quoted for 2026-10-02
+was in part a lenient match on an incoherent answer. **A substring expectation
+cannot tell a right answer from a sentence that happens to contain the right
+characters.** That is the same lesson as the tool-choice scores, one level
+down, and it limits every `correct` figure in this file.
+
 ## Still open
 
-1. **`Finally, what is 10% of that?` wants 50 and did not get it.** It passed
-   on 2026-10-02 with the same expectation, so either the loop changes since
-   then cost it or it is variance. Ten runs decide; it is the only figure in
-   either evaluation that might be a regression from this week's work.
-2. **The data-directory question is 4/10 both ways** and the cause is failure
+1. **The data-directory question is 4/10 both ways** and the cause is failure
    to stop after a correct first observation. It is the clearest remaining
    target and it is not a history problem.
 3. **The weather question is unstable in both arrangements** -- 6/10 isolated,
