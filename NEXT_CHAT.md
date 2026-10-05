@@ -73,8 +73,8 @@ shipped, not because the work looks finished.
 
 # PART 2 — Where the project stands
 
-**545 tests pass**, mypy strict clean across 32 files, ruff clean. HEAD is
-`a97aab0`. The demo is **2026-10-10**, five days out.
+**549 tests pass**, mypy strict clean across 33 files, ruff clean. HEAD is
+`deed75a` plus the holdout expectations. The demo is **2026-10-10**, five days out.
 
 **The drift is fixed and the fix is confirmed.** See the ten-run table below.
 
@@ -147,11 +147,30 @@ must keep containing `agent.budget.exhausted` and `data/` must keep containing
 `collect-run.log`. A test asserts both, so if either stops being true the
 figure falls for a reason that is not the agent.
 
-**`holdout_eval.py` has the same gap and has not been re-read.** Its
-questions carry `prefer_tool` and no `expect` for every file question, so its
-`correct` axis -- the 9/10 and 10/10 quoted for it -- only ever covered the
-arithmetic. Treat its tool-pick figures as sound and its correctness figures
-as not covering the file questions at all.
+`holdout_eval.py` had the identical gap and now has expectations too, with
+the line counts read from the tree by `_lines()` and `_last_line()` rather
+than written down, so editing a file cannot make the score fall for a reason
+that is not the model. Its two comparison questions keep no expectation on
+purpose: a substring cannot score a comparison, since "fakes.py is longer than
+build_notebook.py" contains every word a right answer would.
+
+**The first honest figure for that evaluation, one run:**
+
+| metric | quoted before | now |
+|---|---|---|
+| correct | 9/10 — 10/10 | **12/16** |
+| tool pick | 6/7 | 6/7 |
+| follow-ups | 5/5 | 5/5 |
+| honest | 1/1 | 1/1 |
+| steps | 59 | 55 |
+
+The denominator moved from 10 to 16 because six file questions became
+checkable. Four failed: `minutes in 3 days and 7 hours` and the last line of
+`build_notebook.py`, both already documented; `And scripts/build_notebook.py?`
+wanting 461, newly checked; and `Finally, what is 10% of that?` wanting 50,
+which **already had an expectation and passed on 2026-10-02**. One run cannot
+tell that apart from variance, so it is a thing to check and not yet a
+regression.
 
 ## The diagnosis of the drift, from 2026-10-04
 
@@ -243,9 +262,10 @@ too few runs.
 
 ## Still open
 
-1. **`holdout_eval.py`'s file questions have no expected answer.** Same gap,
-   same fix, and its figures appear throughout this file. It needs one run to
-   collect the real answers before expectations can be chosen.
+1. **`Finally, what is 10% of that?` wants 50 and did not get it.** It passed
+   on 2026-10-02 with the same expectation, so either the loop changes since
+   then cost it or it is variance. Ten runs decide; it is the only figure in
+   either evaluation that might be a regression from this week's work.
 2. **The data-directory question is 4/10 both ways** and the cause is failure
    to stop after a correct first observation. It is the clearest remaining
    target and it is not a history problem.
@@ -268,8 +288,8 @@ too few runs.
 
 ## Next ten-percent milestone, in order
 
-1. Do the same for `holdout_eval.py`: one run to see the answers, then
-   expectations, then re-read its numbers.
+1. Ten runs of `holdout_eval` to settle 12/16, and in particular whether
+   `Finally, what is 10% of that?` is a regression or noise.
 2. Settle the demo's final question order (see below) and rehearse it.
 3. Attack the failure to stop after a correct first observation -- it now
    accounts for the data-directory question as well as the old drift.
