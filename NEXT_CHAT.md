@@ -355,6 +355,40 @@ a substring grades characters, not answers.
 Clean on screen and in substance: questions 3, 4 and 5 (`fakes.py` lines,
 7!/5!, 2**11-48), two steps each.
 
+## How far the answer key has spread — measured
+
+18 held-out question texts, searched across every `.txt .log .md .jsonl .py
+.json .toml` file in the tree the agent's workspace points at:
+
+| where | files | what is in them |
+|---|---|---|
+| `data/` transcripts and jsonl | **48** | the question beside the answer the model gave |
+| `scripts/holdout_eval.py`, `scripts/session_eval.py` | 2 | the purest key: `Question("...", "agent.budget.exhausted", "search_text")` -- text and expectation adjacent |
+| `NEXT_CHAT.md`, `docs/demo-script.md` | 2 | this file's own tables, question and answer in one row |
+| `tests/test_eval_scoring.py`, `test_holdout_questions.py`, `test_react_loop.py`, `omniagent.toml` | 4 | quoted questions in docstrings and fixtures |
+| `.kilo/worktrees/quick-palladium/` | 7 | **a second full copy of the repository**, git-ignored but on disk and searchable |
+
+So moving `data/` is not the fix. The expectations live in tracked source that
+cannot be deleted, and in the documentation that explains the measurements.
+
+**The only sound fix is that an evaluation must run against a workspace holding
+only what its questions are about, rather than the repository root.** Both
+evaluations currently call `set_workspace(Workspace.at(PROJECT))`.
+`Workspace` has no exclusion mechanism, so this is a design change: either a
+temporary workspace populated with the files the questions name, or an
+exclusion list on `Workspace`.
+
+Reproduce the scan with (one paste, no new files needed):
+
+```
+.venv/Scripts/python.exe -c "import sys;sys.path.insert(0,'scripts');from pathlib import Path;from holdout_eval import SESSIONS_UNDER_TEST;from session_eval import WALK;qs={q.text for q in WALK}|{q.text for s in SESSIONS_UNDER_TEST for q in s};skip={'.venv','.ci-venv','.git','models','__pycache__','.mypy_cache','.pytest_cache','.ruff_cache','notebooks','.superpowers'};[print(sum(1 for q in qs if q in p.read_text(encoding='utf-8',errors='ignore')), str(p)) for p in Path('.').rglob('*') if p.is_file() and not any(x in p.parts for x in skip) and p.suffix.lower() in {'.txt','.log','.md','.jsonl','.py','.json','.toml'} and any(q in p.read_text(encoding='utf-8',errors='ignore') for q in qs)]"
+```
+
+Until that lands, treat as untrustworthy every figure for a question the model
+could answer by searching: **the 'budget' question above all**, which was
+observed answering out of `data/holdout-expects.txt` verbatim. The arithmetic
+questions are unaffected -- `calculate` does not read the tree.
+
 ## Still open
 
 1. **The data-directory question is 4/10 both ways** and the cause is failure
