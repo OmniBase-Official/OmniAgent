@@ -315,6 +315,19 @@ was authored in the same session; the run stops at a ledger line when the
 budget runs out; and `write_sidecar` returns its path, which the plan's
 Produces block implied and its steps did not say.
 
+## The demo script is measured and written down
+
+`docs/demo-script.md` holds the five questions, in order, with the numbers.
+Three rehearsals on the real path at `8914b63`: **15/15** against the real
+expected answers. The data-directory question is out -- it failed 3/3 at 8
+steps and its answer was the honest step-budget fallback -- and
+`2 ** 11 - 48` is in, which is the question `b2998ff` fixed.
+
+Yesterday's "15/15" for the earlier set was inflated by a weak check
+(`'data' in answer` passes for "there is no 'data' directory"). Scored
+properly that set is 12/15. The lesson keeps arriving in the same shape: an
+ad-hoc check grades the characters, not the answer.
+
 ## Still open
 
 1. **The data-directory question is 4/10 both ways** and the cause is failure
