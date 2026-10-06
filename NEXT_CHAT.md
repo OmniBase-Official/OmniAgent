@@ -518,6 +518,64 @@ question is **unanswerable by construction**. Neither evaluation has been
 re-run yet, on purpose: a run now would produce a figure that is wrong for a
 reason that is not the model. Settle this first.
 
+### Option A landed: `data/` is listable and unreadable
+
+`8374367`. `Workspace` has two tiers now:
+
+| tier | opened | named | used for |
+|---|---|---|---|
+| `denied_paths` | no | no | `docs/`, `NEXT_CHAT.md`, the eval scripts, five test files, `omniagent.egg-info`, `omniagent.toml`, `models/` |
+| `listing_only_paths` | no, nor anything strictly beneath it | **yes** | `data/` |
+
+So "What is inside the data directory?" is answerable again -- verified on the
+real sealed workspace, not on a fixture:
+
+```
+list_directory(".")            names data/                      True
+list_directory("data")         collect-run.log (17128 bytes)     listed
+read_file("data/holdout-expects.txt")   Error: that file is not readable
+search_text("budget", "agent.py")       17 matches, all in agent.py
+file_info("tests/fakes.py")             122 lines, 3,670 bytes
+```
+
+**Collection has its own, narrower workspace** (`collection_workspace`), and
+the reason is a question in the training bank: the evaluation seals
+`omniagent.toml` because it quotes held-out questions, while a collected
+question asks whether any `.toml` files are here. Reusing the evaluation's
+seal would have changed the answer to a question being collected. Collection
+seals only the transcripts' contents and the active log.
+
+**The invariant caught the same mistake four times.** Every file written to
+close this leak carried the key into the tree: `test_file_tools.py`,
+`test_eval_workspace.py` and `eval_workspace.py` quoted the answer sentence;
+`test_sandbox.py` and `test_collect_dataset.py` quoted the question and its
+expected answer. All five are sealed. Expect the next one to do it too.
+
+### The 'budget' question cannot be fixed by sealing, and here is why
+
+`search_text("budget", "agent.py")` returns 17 matches, and `agent.py:193-196`
+is a comment that reads:
+
+> the model read agent.py three times, saw the capped head each time, and
+> answered that the word 'budget' is not used anywhere in the file -- it is on
+> the line that computes the context budget.
+
+That is **a wrong answer to this question, written inside the file the
+question asks about**, next to a pointer at a different line, in the same
+observation as the expected answer at `agent.py:598`. `agent.py` is the
+question's subject, so it cannot be sealed.
+
+I expected the observation cap to hide the right answer behind the wrong one
+and **measured it instead: it does not.** The observation is 1,102 characters
+and `cap_observation` leaves it untouched, so the model sees all three
+candidates. Nothing is hidden; it simply has to choose, and one of the
+choices is a sentence asserting the opposite of the truth.
+
+Together with the five-file spread of `agent.budget.exhausted`, the honest
+conclusion is that **sealing makes this question's figure honest about
+transcripts and does not make the question good.** Treat a re-measured
+10/10 as evidence about the seal, not as evidence about retrieval.
+
 ### Not fixed: a search from `.` enumerates `.venv`
 
 `search_text` does `sorted(start.rglob("*"))`, which materialises every path
