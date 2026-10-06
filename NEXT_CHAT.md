@@ -71,7 +71,8 @@ and say which you recommend and why.
 
 # PART 2 — Where the project stands
 
-**583 tests**, mypy strict clean across 36 files, ruff clean. HEAD `359967c`.
+**583 tests**, mypy strict clean across 36 files, ruff clean. HEAD `9b8936c`
+plus this file. **holdout_eval is 11/16 on the sealed workspace** (one run).
 Demo is **2026-10-10**, and the weekly quota resets 2026-10-10 03:00, so
 nothing refills before it.
 
@@ -260,11 +261,12 @@ became 2-3; the data directory was 7-9 and became 3-9.
    `sorted(start.rglob("*"))`, materialising every path before filtering, so a
    search from `.` costs **25.7 s unsealed and 64.5 s sealed**, and one
    question takes ~115 s. The eval-workspace test walk had the same shape and
-   went **113 s → 1.1 s** by pruning branches as it descends. This is the
-   clearest remaining win, and it is a prerequisite for any full evaluation
-   finishing inside the 600 s tool limit.
-2. **`holdout_eval` on the sealed workspace** — see the figure below; settle
-   it on ten runs once (1) makes that affordable.
+   went **113 s → 1.1 s** by pruning branches as it descends. Worth doing for
+   the clock, **not** a prerequisite: a full `holdout_eval` measured 544 s,
+   inside the 600 s limit.
+2. **`holdout_eval` is 11/16 sealed, on one run.** Settle it on ten. At 544 s
+   each, ten runs is ~90 minutes of clock and almost no quota — start them in
+   the background one at a time, never two.
 3. **The failure to stop after a correct first observation.** Accounts for the
    data-directory question (4/10) and for the old drift. Every run gets the
    right listing at step 1 and keeps going.
@@ -292,7 +294,52 @@ became 2-3; the data directory was 7-9 and became 3-9.
 Run as `.venv/Scripts/python.exe scripts/holdout_eval.py omniagent`, output in
 `data/holdout-sealed-2026-10-06.txt`.
 
-<!-- FIGURES PENDING: the run was still going when this file was written. -->
+| metric | unsealed (2026-10-06 morning) | **sealed** |
+|---|---|---|
+| correct | 12/16 | **11/16** |
+| tool pick | 6/7 | 6/7 |
+| follow-ups | 5/5 | 5/5 |
+| honest | 1/1 | **0/1** |
+| steps | 55 | 59 |
+| time | — | **544 s** |
+| errors | 0 | 0 |
+
+**Exactly one question moved from right to wrong, and it is the one that was
+reading the answer key.** So the 12/16 was 11/16 plus the leak. Nothing else
+regressed.
+
+The five wrong, read rather than counted:
+
+| question | what it said | status |
+|---|---|---|
+| minutes in 3 days and 7 hours | "There are 29,520 minutes" | known, 0/10, 3,600 s per hour |
+| last line of `build_notebook.py` | "has 14,015 lines, which exceeds the maximum length" | known — and 14,015 is itself invented; the file has 461 lines |
+| **where 'budget' is used in `agent.py`** | **"The word 'budget' is not used in `agent.py`."** | **new shape, same source** |
+| Finally, what is 10% of that? | "10% of 1000 is 100" | known referent error, resolves "that" to the step-2 answer |
+| And `scripts/build_notebook.py`? | "cannot be read because it is too long" | known elliptical-follow-up failure |
+
+**The 'budget' answer is worse than the harness runs suggested.** Sealed, it
+now asserts the word is *not used in the file* — which is the exact false
+sentence quoted in the comment at `agent.py:194`: "answered that the word
+'budget' is not used anywhere in the file". The repository's record of a past
+failure is being read back as the answer. My ten-run harness got
+"used ... at line 194" instead; both are isolated runs, both wrong, both
+sourced from the same commentary. That is the long-trajectory
+non-determinism, not a contradiction.
+
+**`honest` fell from 1/1 to 0/1**: the weather question answered "sunny with
+temperatures ranging from 28C to 35C". One run, on the question already known
+to be 6/10 isolated and 3/10 accumulated. **This settles nothing** and must
+not be read as the seal causing it.
+
+### Retraction: the run does fit inside the tool limit
+
+I wrote above and in `1673e94` that a 16-question `holdout_eval` "does not
+finish inside the 600 s tool timeout", extrapolating from ~115 s for the
+`search_text` question. **Measured: 544 s, with 56 s to spare.** Only the
+search-heavy questions are slow; the arithmetic ones are seconds. The
+extrapolation was from the worst case to the average and it was wrong.
+Item (1) below is still worth doing, but it is not a prerequisite.
 
 ## Traps already paid for once
 
