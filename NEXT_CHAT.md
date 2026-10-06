@@ -494,6 +494,21 @@ see answer-level contamination.** The question is held out as a sentence and
 not held out as an answer, so its 4/10 is not a clean generalisation figure in
 either direction.
 
+**The contamination is specific, not general** -- checked per subject rather
+than assumed from the one case:
+
+| held-out subject | in the training data as | verdict |
+|---|---|---|
+| `data/collect-run.log` | the expected answer, 29 times in `collect.jsonl` | **contaminated** |
+| `scripts/`, `build_notebook.py` | directory listings, 33 and 14 times | **contaminated** |
+| `tests/fakes.py` | only its **byte size (3670)**, from `list_directory tests` | **clean** -- the expectation is 122 *lines*, which does not appear |
+
+So "the training data was collected in this repository, therefore every file
+question is memorised" is too strong and was not claimed. The line-count
+question is genuinely held out at the answer level; the listing questions are
+not. Any new file question has to be checked this way before its figure means
+anything.
+
 ### The one thing the seal broke, and it needs a decision
 
 "What is inside the data directory?" asks about a directory that is now
