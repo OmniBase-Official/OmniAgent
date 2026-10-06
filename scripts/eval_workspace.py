@@ -36,8 +36,23 @@ from sandbox import Workspace
 #: ``models/`` holds no question subject and no answer, and is sealed only so a
 #: ``search_text`` walk from the root does not spend its file budget inside a
 #: vendored C++ tree.
+#: Directories the agent may list but not read inside.
+#:
+#: ``data/`` holds the transcripts, and sealing it outright made
+#: "What is inside the data directory?" unanswerable by construction -- the
+#: listing is what that question measures, while the contents are what hold
+#: the answers to every other question. So the names stay visible and nothing
+#: under it opens.
+#:
+#: Worth stating beside this: that question's figure is not clean even so.
+#: ``data/collect-run.log`` is its expected answer and appears 29 times in
+#: ``data/collect.jsonl`` as a ``list_directory`` observation, so the answer is
+#: in the training data. This keeps the figure comparable with the ones
+#: already collected; it does not make the question a measure of
+#: generalisation.
+LISTING_ONLY: tuple[str, ...] = ("data",)
+
 ANSWER_KEY: tuple[str, ...] = (
-    "data",
     "docs",
     "models",
     "NEXT_CHAT.md",
@@ -49,11 +64,13 @@ ANSWER_KEY: tuple[str, ...] = (
     "scripts/eval_workspace.py",
     "scripts/holdout_eval.py",
     "scripts/session_eval.py",
+    "tests/test_collect_dataset.py",
     "tests/test_eval_scoring.py",
     "tests/test_eval_workspace.py",
     "tests/test_file_tools.py",
     "tests/test_holdout_questions.py",
     "tests/test_react_loop.py",
+    "tests/test_sandbox.py",
     "tests/test_session_eval.py",
 )
 #: Three of those are sealed for a reason worth stating. ``eval_workspace.py``,
@@ -73,4 +90,10 @@ def sealed_workspace(project: Path, *, also_deny: tuple[Path, ...] = ()) -> Work
     """
     denied = {(project / relative).resolve() for relative in ANSWER_KEY}
     denied.update(path.resolve() for path in also_deny)
-    return Workspace.at(project, denied_paths=frozenset(denied))
+    return Workspace.at(
+        project,
+        denied_paths=frozenset(denied),
+        listing_only_paths=frozenset(
+            (project / relative).resolve() for relative in LISTING_ONLY
+        ),
+    )

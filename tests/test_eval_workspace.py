@@ -18,12 +18,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from eval_scoring import Question
-from eval_workspace import ANSWER_KEY, sealed_workspace
+from eval_workspace import ANSWER_KEY, LISTING_ONLY, sealed_workspace
 from holdout_eval import SESSIONS_UNDER_TEST
 from session_eval import WALK
 
 from sandbox import _BINARY_SNIFF_BYTES, SandboxError, Workspace, get_workspace, set_workspace
-from tools import list_directory, search_text
+from tools import list_directory, read_file, search_text
 
 PROJECT = Path(__file__).resolve().parent.parent
 
@@ -225,12 +225,12 @@ def test_search_text_no_longer_finds_the_leaked_answer(sealed: Workspace) -> Non
     finally:
         set_workspace(original)
 
-    assert observation.startswith("Error:")
-    assert "not readable by the agent" in observation
+    assert "holdout" not in observation
+    assert observation.startswith("No match")
 
 
-def test_the_sealed_directories_are_not_named_in_a_listing(sealed: Workspace) -> None:
-    """`list_directory` pointing at data/ tells the model where the answers are."""
+def test_a_fully_sealed_directory_is_not_named_in_a_listing(sealed: Workspace) -> None:
+    """`docs/` holds the demo script, question and answer in one table row."""
     original = get_workspace()
     set_workspace(sealed)
     try:
@@ -238,16 +238,44 @@ def test_the_sealed_directories_are_not_named_in_a_listing(sealed: Workspace) ->
     finally:
         set_workspace(original)
 
-    assert "data/" not in observation
     assert "docs/" not in observation
     assert "agent.py" in observation
 
 
-def test_every_sealed_path_exists(sealed: Workspace) -> None:
-    """A typo in ANSWER_KEY would seal nothing and say nothing."""
-    missing = [relative for relative in ANSWER_KEY if not (PROJECT / relative).exists()]
+def test_the_transcripts_directory_is_listable_but_not_readable(sealed: Workspace) -> None:
+    """What option A bought, asserted on the three tools separately.
 
-    assert missing == [], f"ANSWER_KEY names paths that are not there: {missing}"
+    Sealing `data/` outright closed the leak and took the question with it.
+    These are the two halves that have to hold at once: the listing answers
+    "What is inside the data directory?", and nothing inside opens.
+    """
+    original = get_workspace()
+    set_workspace(sealed)
+    try:
+        listing = list_directory("data")
+        read = read_file("data/holdout-expects.txt")
+        searched = search_text(LEAKED_SENTENCE, "data")
+    finally:
+        set_workspace(original)
+
+    assert "collect-run.log" in listing, "the question's expected answer is no longer listed"
+    assert read.startswith("Error:")
+    assert "not readable by the agent" in read
+    assert "holdout" not in searched
+    # Scoped to "data" rather than ".", and the reason is a measurement: a
+    # search from the root costs 64 s on this tree because search_text
+    # materialises every path under .venv and models/ before filtering any of
+    # them. The code path is the same one; the invariant tests above cover the
+    # root case by walking it with pruning instead.
+
+
+def test_every_sealed_path_exists(sealed: Workspace) -> None:
+    """A typo in either list would seal nothing and say nothing."""
+    missing = [
+        relative for relative in (*ANSWER_KEY, *LISTING_ONLY) if not (PROJECT / relative).exists()
+    ]
+
+    assert missing == [], f"a sealed path is not there: {missing}"
 
 
 def test_a_run_log_can_be_sealed_as_well(tmp_path: Path) -> None:

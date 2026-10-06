@@ -195,6 +195,32 @@ def already_answered(log_file: Path) -> set[str]:
     return answered
 
 
+
+def collection_workspace(root: Path, log_file: Path | None) -> Workspace:
+    """The workspace a collection run may read.
+
+    Narrower than the evaluation's seal, and deliberately so. The evaluation
+    seals every file holding a held-out question or its answer, which includes
+    ``omniagent.toml`` -- and a training question asks whether any ``.toml``
+    files are here, so reusing that seal would change the answer to a question
+    being collected.
+
+    What collection needs is that a trajectory cannot record the model reading
+    an earlier answer out of a transcript, because that trajectory becomes an
+    example teaching it to search the logs. So the transcripts directory is
+    listable -- 41 collected examples are a ``list_directory`` observation of
+    it -- and nothing inside it opens. The active log is denied by name as
+    well, since it may be written outside that directory.
+    """
+    denied = {log_file.resolve()} if log_file else set()
+    transcripts = (log_file.parent if log_file else root / "data").resolve()
+    separate = transcripts.is_dir() and transcripts != root.resolve()
+    listing_only = {transcripts} if separate else set()
+    return Workspace.at(
+        root, denied_paths=frozenset(denied), listing_only_paths=frozenset(listing_only)
+    )
+
+
 def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915
     parser = argparse.ArgumentParser(
         description="Run a bank of questions through the agent to collect training data."
@@ -258,14 +284,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915
         return 0
 
     session_id = obs.configure(level="INFO", log_file=settings.log_file)
-    set_workspace(
-        Workspace.at(
-            settings.workspace,
-            denied_paths=frozenset({settings.log_file.resolve()})
-            if settings.log_file
-            else frozenset(),
-        )
-    )
+    set_workspace(collection_workspace(settings.workspace, settings.log_file))
     print(f"logging to {settings.log_file} (session {session_id})")
 
     probe = ReActAgent(config=settings.agent_config(), printer=lambda _: None)

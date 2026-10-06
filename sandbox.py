@@ -91,6 +91,7 @@ class Workspace:
     max_file_bytes: int = MAX_FILE_BYTES
     max_read_chars: int = MAX_READ_CHARS
     denied_paths: frozenset[Path] = field(default_factory=frozenset)
+    listing_only_paths: frozenset[Path] = field(default_factory=frozenset)
 
     @classmethod
     def at(cls, root: Path | str, **kwargs: object) -> Workspace:
@@ -140,7 +141,18 @@ class Workspace:
         return resolved == self.root or resolved.is_relative_to(self.root)
 
     def _is_denied(self, resolved: Path) -> bool:
-        """True for a denied path and for anything beneath a denied directory.
+        """True when the agent may not open this path.
+
+        Two tiers, because an evaluation needs both. A directory in
+        :attr:`denied_paths` is gone entirely -- unopenable and unnameable. A
+        directory in :attr:`listing_only_paths` may be listed, while nothing
+        strictly beneath it may be opened: the evaluation asks what is inside
+        the transcripts directory, so the listing is the thing being measured
+        while the contents are what hold the answers to every other question.
+        Sealing both made that question unanswerable by construction.
+
+        Anything beneath a listing-only directory is refused, subdirectories
+        included -- otherwise one ``mkdir`` reopens the leak under a new name.
 
         Exact membership was the whole test once, which read as an exclusion
         mechanism and was not one: denying ``data/`` left
@@ -149,6 +161,18 @@ class Workspace:
 
         Compared on path components, not on strings -- a string prefix would
         deny ``database.py`` along with ``data/``.
+        """
+        return self._is_unnameable(resolved) or any(
+            resolved != listed and resolved.is_relative_to(listed)
+            for listed in self.listing_only_paths
+        )
+
+    def _is_unnameable(self, resolved: Path) -> bool:
+        """True when the agent may not even be told this path exists.
+
+        Narrower than :meth:`_is_denied` on purpose: a listing-only directory
+        has to be named by its parent and has to list its own entries, so
+        ``list_dir`` asks this question rather than the opening one.
         """
         return any(
             resolved == denied or resolved.is_relative_to(denied) for denied in self.denied_paths
@@ -240,7 +264,7 @@ class Workspace:
         for child in path.iterdir():
             if child.name.startswith("."):
                 continue
-            if self._is_denied(child.resolve()):
+            if self._is_unnameable(child.resolve()):
                 continue  # naming it is a pointer to what it holds
             if child.is_dir():
                 entries.append((0, child.name, f"{child.name}/"))

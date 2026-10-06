@@ -18,9 +18,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from collect_dataset import SESSIONS, already_answered, load_questions
+from collect_dataset import (
+    SESSIONS,
+    already_answered,
+    collection_workspace,
+    load_questions,
+)
 
 from export_dataset import build_examples, collect_turns
+from sandbox import SandboxError
 
 
 def write_log(path: Path, records: list[dict[str, Any]]) -> Path:
@@ -259,3 +265,70 @@ def test_distinct_session_ids_export_cleanly(tmp_path: Path) -> None:
 def test_the_scoped_session_id_is_stable_and_sortable(index: int) -> None:
     assert f"abc-{index:03d}" == f"abc-{index:03d}"
     assert len(f"{index:03d}") == 3
+
+
+# --------------------------------------------------------------------------- #
+# the workspace collection runs in
+# --------------------------------------------------------------------------- #
+
+
+def test_collection_cannot_read_a_transcript(tmp_path: Path) -> None:
+    """Otherwise a trajectory records the model reading an earlier answer.
+
+    That trajectory then becomes a training example teaching it to search the
+    logs. Measured before changing anything: 0 of 1,459 lines in
+    data/collect.jsonl mention a transcript path, so no collected example is
+    affected -- this closes the path, it does not repair the dataset.
+    """
+    transcripts = tmp_path / "data"
+    transcripts.mkdir()
+    (transcripts / "earlier.jsonl").write_text('{"answer": "122"}\n', encoding="utf-8")
+    log = transcripts / "run.jsonl"
+    log.write_text("", encoding="utf-8")
+
+    workspace = collection_workspace(tmp_path, log)
+
+    with pytest.raises(SandboxError, match="not readable by the agent"):
+        workspace.resolve("data/earlier.jsonl")
+
+
+def test_collection_still_lists_the_transcripts_directory(tmp_path: Path) -> None:
+    """41 collected examples are a list_directory observation of this directory."""
+    transcripts = tmp_path / "data"
+    transcripts.mkdir()
+    (transcripts / "collect-run.log").write_text("collected\n", encoding="utf-8")
+    log = transcripts / "run.jsonl"
+    log.write_text("", encoding="utf-8")
+
+    workspace = collection_workspace(tmp_path, log)
+
+    assert any(entry.startswith("collect-run.log") for entry in workspace.list_dir("data"))
+
+
+def test_collection_denies_a_log_kept_outside_the_transcripts_directory(
+    tmp_path: Path,
+) -> None:
+    """The log is the conversation so far wherever it is written."""
+    (tmp_path / "data").mkdir()
+    log = tmp_path / "run.jsonl"
+    log.write_text("", encoding="utf-8")
+
+    workspace = collection_workspace(tmp_path, log)
+
+    with pytest.raises(SandboxError, match="not readable by the agent"):
+        workspace.resolve("run.jsonl")
+
+
+def test_collection_keeps_the_config_readable(tmp_path: Path) -> None:
+    """A training question asks whether any .toml files are here.
+
+    The evaluation's seal covers omniagent.toml, because it quotes held-out
+    questions. Reusing that seal for collection would have changed the answer
+    to a training question, so collection has its own and narrower one.
+    """
+    (tmp_path / "data").mkdir()
+    (tmp_path / "omniagent.toml").write_text("[tool]\n", encoding="utf-8")
+
+    workspace = collection_workspace(tmp_path, None)
+
+    assert workspace.resolve("omniagent.toml").name == "omniagent.toml"

@@ -400,3 +400,56 @@ def test_the_workspace_can_be_replaced(workspace: Workspace) -> None:
 
 def test_the_default_workspace_is_the_current_directory() -> None:
     assert get_workspace().root == Path.cwd().resolve()
+
+
+# --------------------------------------------------------------------------- #
+# listing-only: visible from outside, unreadable inside
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def listing_only(workspace: Workspace) -> Workspace:
+    """A transcripts directory the agent may list but not read.
+
+    An evaluation asks "What is inside the data directory?", so the listing is
+    the thing being measured; the contents are the thing holding the answers
+    to every other question. Sealing both made the question unanswerable by
+    construction.
+    """
+    transcripts = workspace.root / "data"
+    (transcripts / "archive").mkdir(parents=True)
+    (transcripts / "collect-run.log").write_text("collected\n", encoding="utf-8")
+    (transcripts / "holdout-expects.txt").write_text("the answer is 42\n", encoding="utf-8")
+    return Workspace.at(workspace.root, listing_only_paths=frozenset({transcripts.resolve()}))
+
+
+def test_a_listing_only_directory_can_still_be_listed(listing_only: Workspace) -> None:
+    entries = listing_only.list_dir("data")
+
+    assert any(entry.startswith("collect-run.log") for entry in entries)
+
+
+def test_a_listing_only_directory_is_named_by_its_parent(listing_only: Workspace) -> None:
+    """Hiding the name would make the question about it unanswerable too."""
+    assert "data/" in listing_only.list_dir(".")
+
+
+def test_a_file_inside_a_listing_only_directory_cannot_be_read(
+    listing_only: Workspace,
+) -> None:
+    """The leak itself: the contents are what held the answers."""
+    with pytest.raises(SandboxError, match="not readable by the agent"):
+        listing_only.resolve("data/holdout-expects.txt")
+
+
+def test_a_subdirectory_of_a_listing_only_directory_cannot_be_opened(
+    listing_only: Workspace,
+) -> None:
+    """Otherwise one mkdir reopens the whole leak under a different name."""
+    with pytest.raises(SandboxError, match="not readable by the agent"):
+        listing_only.resolve("data/archive")
+
+
+def test_a_listing_only_directory_is_readable_as_a_directory(listing_only: Workspace) -> None:
+    """resolve() has to admit the directory itself, or list_dir cannot run."""
+    assert listing_only.resolve("data").name == "data"
