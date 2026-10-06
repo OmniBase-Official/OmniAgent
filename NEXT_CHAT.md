@@ -628,10 +628,21 @@ out of `data/holdout-expects.txt` exactly as it was in the hand run -- and
 so the observation line naming `data/holdout-expects.txt` appears **on the
 audience's screen**.
 
-The demo's 15/15 includes this question. It is a real 15/15 of what the agent
-said; it is not 15/15 of the agent answering from the file it was asked
-about. Decide before the day: leave it, seal the demo path and drop the
-question, or seal and replace it.
+**Retracted the same evening.** I wrote above that the demo's 15/15 includes
+this question. It does not. `docs/demo-script.md` already excludes it, on this
+exact measurement, and its five questions are `144 * 12`, the follow-up
+`Now subtract 728 from that`, `tests/fakes.py` lines, `7!/5!` and
+`2 ** 11 - 48`. I asserted the contents of a file I had not opened in this
+session. The demo was never exposed to this; only the two evaluations were.
+
+**Fixed anyway, because the principle was already written down and too
+narrow.** `main.py:265` said the agent must not read its own log back, since
+that replays an earlier conversation into the context and into the dataset. A
+*sibling* log does the same thing. `sandbox.without_own_transcripts` now
+builds that workspace -- the transcripts directory listable, nothing inside it
+readable, the active log denied by name -- and `main.py` and
+`collect_dataset.py` both use it, so the duplicated construction is gone. A
+run of the demo path on the 'budget' question names **zero** transcripts.
 
 ### Not fixed: a search from `.` enumerates `.venv`
 

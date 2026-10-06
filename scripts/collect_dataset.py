@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import observability as obs
 from agent import AgentError, ReActAgent, model_is_installed
 from config import resolve
-from sandbox import Workspace, set_workspace
+from sandbox import Workspace, set_workspace, without_own_transcripts
 
 #: Each entry is one session: the questions are asked of a single agent, in
 #: order, so later ones can refer back to earlier answers.
@@ -212,13 +212,7 @@ def collection_workspace(root: Path, log_file: Path | None) -> Workspace:
     it -- and nothing inside it opens. The active log is denied by name as
     well, since it may be written outside that directory.
     """
-    denied = {log_file.resolve()} if log_file else set()
-    transcripts = (log_file.parent if log_file else root / "data").resolve()
-    separate = transcripts.is_dir() and transcripts != root.resolve()
-    listing_only = {transcripts} if separate else set()
-    return Workspace.at(
-        root, denied_paths=frozenset(denied), listing_only_paths=frozenset(listing_only)
-    )
+    return without_own_transcripts(root, log_file)
 
 
 def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915

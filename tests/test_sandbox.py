@@ -14,7 +14,13 @@ from pathlib import Path
 
 import pytest
 
-from sandbox import SandboxError, Workspace, get_workspace, set_workspace
+from sandbox import (
+    SandboxError,
+    Workspace,
+    get_workspace,
+    set_workspace,
+    without_own_transcripts,
+)
 
 
 @pytest.fixture
@@ -453,3 +459,81 @@ def test_a_subdirectory_of_a_listing_only_directory_cannot_be_opened(
 def test_a_listing_only_directory_is_readable_as_a_directory(listing_only: Workspace) -> None:
     """resolve() has to admit the directory itself, or list_dir cannot run."""
     assert listing_only.resolve("data").name == "data"
+
+
+def test_an_agent_cannot_read_its_earlier_transcripts(tmp_path: Path) -> None:
+    """The principle at main.py:265, widened from one log to all of them.
+
+    It already said the agent must not read its own log back, because that
+    replays an earlier conversation into the context and into the dataset. A
+    sibling log from a previous session does the same thing, and that is not a
+    hypothetical: asked where 'budget' was used, the agent answered a line it
+    found in an earlier run's transcript rather than reading the file.
+    """
+    logs = tmp_path / "data"
+    logs.mkdir()
+    (logs / "earlier.jsonl").write_text('{"answer": "from last time"}\n', encoding="utf-8")
+    active = logs / "run.jsonl"
+    active.write_text("", encoding="utf-8")
+    (tmp_path / "agent.py") .write_text("x = 1\n", encoding="utf-8")
+
+    workspace = without_own_transcripts(tmp_path, active)
+
+    with pytest.raises(SandboxError, match="not readable by the agent"):
+        workspace.resolve("data/earlier.jsonl")
+    with pytest.raises(SandboxError, match="not readable by the agent"):
+        workspace.resolve("data/run.jsonl")
+    assert workspace.resolve("agent.py").name == "agent.py"
+
+
+def test_the_transcripts_directory_is_still_listable(tmp_path: Path) -> None:
+    """Asking what is in it is a fair question; reading them is not."""
+    logs = tmp_path / "data"
+    logs.mkdir()
+    (logs / "notes.log").write_text("x\n", encoding="utf-8")
+    workspace = without_own_transcripts(tmp_path, logs / "run.jsonl")
+
+    assert any(entry.startswith("notes.log") for entry in workspace.list_dir("data"))
+
+
+def test_without_a_log_file_the_default_transcripts_directory_is_used(
+    tmp_path: Path,
+) -> None:
+    """A run with logging off still must not read what earlier runs wrote."""
+    logs = tmp_path / "data"
+    logs.mkdir()
+    (logs / "earlier.jsonl").write_text("{}\n", encoding="utf-8")
+
+    workspace = without_own_transcripts(tmp_path, None)
+
+    with pytest.raises(SandboxError, match="not readable by the agent"):
+        workspace.resolve("data/earlier.jsonl")
+
+
+def test_a_log_written_into_the_workspace_root_does_not_seal_everything(
+    tmp_path: Path,
+) -> None:
+    """Otherwise pointing the log at the root makes the whole tree unreadable."""
+    (tmp_path / "agent.py").write_text("x = 1\n", encoding="utf-8")
+    active = tmp_path / "run.jsonl"
+    active.write_text("", encoding="utf-8")
+
+    workspace = without_own_transcripts(tmp_path, active)
+
+    assert workspace.resolve("agent.py").name == "agent.py"
+    with pytest.raises(SandboxError, match="not readable by the agent"):
+        workspace.resolve("run.jsonl")
+
+
+def test_the_cli_cannot_build_an_unsealed_workspace() -> None:
+    """Structural, because the wiring is one line and the logic is elsewhere.
+
+    main.py builds its workspace through without_own_transcripts, which is
+    tested above. What is not otherwise covered is the wiring itself: a revert
+    to Workspace.at would pass every other test in this file. Reintroducing it
+    means reintroducing the import, so this fails on that.
+    """
+    source = (Path(__file__).resolve().parent.parent / "main.py").read_text("utf-8")
+
+    assert "Workspace.at(" not in source
+    assert "without_own_transcripts(" in source

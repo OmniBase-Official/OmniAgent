@@ -63,6 +63,23 @@ it says any other model, stop: the demo is not running what was measured.
 | 4 | What is 7 factorial divided by 5 factorial? | 42 | 2 |
 | 5 | What is 2 to the power of 11, minus 48? | 2000 | 2 |
 
+**Re-rehearsed on 2026-10-06 after the workspace changed**, because the CLI
+now runs where the agent cannot read its own transcripts and that is a change
+to the environment the demo runs in. Five consecutive runs of all five
+questions through `main.py --profile demo`: **25/25**, one tool call per
+question, and **zero** `data/` transcript paths anywhere in any trace. The
+answers were identical in all five runs, word for word, and were read rather
+than substring-matched:
+
+> 144 multiplied by 12 is 1728. / The result of subtracting 728 from the
+> product of 144 and 12 is 1000. / The file `tests/fakes.py` has 122 lines. /
+> The result of 7 factorial divided by 5 factorial is 42. / 2 to the power of
+> 11, minus 48, is 2000.
+
+Note question 2's phrasing: it names its own antecedent ("the product of 144
+and 12") rather than saying "that", which is the follow-up working, not
+hedging.
+
 Questions 1 and 2 open the demo because **a follow-up has to come directly
 after the question it refers to.** Asked fifth, with three unrelated questions
 in between, "Now subtract 728 from that" answered "144 multiplied by 12, minus
@@ -75,11 +92,28 @@ show: it is the agent remembering across turns.
 
 Each of these is excluded on measurement, not on taste.
 
-- **Where is the word 'budget' used in agent.py?** It searches the whole
-  workspace, finds `data/holdout-expects.txt`, and reads its own answer from an
-  earlier run's transcript back out of the log. The answer is right and it
-  came from the wrong place, and the screen fills with `data/holdout-*.txt`
-  paths while it happens.
+- **Where is the word 'budget' used in agent.py?** Excluded twice over, and
+  the second reason outlives the first.
+
+  It used to search the whole workspace, find `data/holdout-expects.txt` and
+  read its own answer out of an earlier run's transcript, filling the screen
+  with `data/holdout-*.txt` paths while it happened. **That is fixed**: the
+  CLI now runs in a workspace where the agent cannot read any of its own
+  transcripts, so a run on this path names none of them (measured: zero
+  transcript paths in the trace).
+
+  It is still excluded, because what the fix revealed is worse. Sealed, the
+  search from `.` returns `agent.py:194`, `195`, `207`, `211` and `370`
+  before it reaches the answer at `agent.py:598` -- and those earlier lines
+  are comments in which this repository *documents its own past failures on
+  this very question*, including the sentence "answered that the word
+  'budget' is not used anywhere in the file". Six of the first seven matches
+  are commentary about the question.
+
+  On the demo path the agent then ran the identical search three times and
+  answered **"Where the word 'budget' is used in agent.py"** -- the question
+  restated, not an answer. Ten runs through the evaluation harness: 0/10, all
+  ten answering `agent.py:194` word for word.
 - **What is 15% of 2480, and then that result multiplied by 3?** The number is
   right and the sentence is not: "15% of 2480 is 1116, and that multiplied by
   3 gives 1116." Fifteen percent of 2480 is 372. It collapses both steps into

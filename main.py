@@ -22,7 +22,7 @@ from agent import (
     model_is_installed,
 )
 from config import DEFAULT_CONFIG_NAME, LOG_LEVELS, ConfigError, render, resolve
-from sandbox import SandboxError, Workspace, set_workspace
+from sandbox import SandboxError, set_workspace, without_own_transcripts
 from tools import TOOLS
 
 BANNER = r"""
@@ -259,14 +259,12 @@ def main(argv: list[str] | None = None) -> int:
         console=settings.log_console,
     )
 
-    log_resolved = settings.log_file.resolve() if settings.log_file is not None else None
     try:
-        workspace = Workspace.at(
-            settings.workspace,
-            # The agent must not read its own log back: that would replay
-            # earlier conversations into the context and into the dataset.
-            denied_paths=frozenset({log_resolved} if log_resolved else ()),
-        )
+        # Not just the active log: any earlier transcript replays an earlier
+        # conversation into the context and into the dataset just as well.
+        # Asked where 'budget' was used in agent.py, the agent answered a
+        # sentence it found in a previous run's transcript, verbatim.
+        workspace = without_own_transcripts(settings.workspace, settings.log_file)
     except SandboxError as exc:
         print(Style.red(f"[!] {exc}"))
         return 1

@@ -284,6 +284,39 @@ class Workspace:
 _workspace: Workspace | None = None
 
 
+
+#: Where this project writes its run logs, when a run is not logging to a file
+#: of its own. Relative to the workspace root.
+TRANSCRIPTS_DIRNAME = "data"
+
+
+def without_own_transcripts(root: Path, log_file: Path | None) -> Workspace:
+    """A workspace in which the agent cannot read any of its own transcripts.
+
+    The rule this widens was already here, stated at the one call site that
+    had it: the agent must not read its own log back, because that replays an
+    earlier conversation into the context and into the dataset. A *sibling*
+    log from a previous session does exactly the same thing, and it is not a
+    hypothetical -- asked where the word 'budget' was used in ``agent.py``,
+    the agent searched the tree, found the sentence in a previous run's
+    transcript and answered that, verbatim. Ten runs with the transcripts out
+    of reach: the answer changed and the transcript never appeared in it.
+
+    The directory stays listable, because asking what is inside it is a fair
+    question and only reading the contents is the problem. A log written
+    straight into the root is denied by name alone -- sealing the root's
+    contents would make the whole tree unreadable.
+    """
+    denied = {log_file.resolve()} if log_file else set()
+    transcripts = (log_file.parent if log_file else root / TRANSCRIPTS_DIRNAME).resolve()
+    separate = transcripts.is_dir() and transcripts != root.resolve()
+    return Workspace.at(
+        root,
+        denied_paths=frozenset(denied),
+        listing_only_paths=frozenset({transcripts} if separate else set()),
+    )
+
+
 def set_workspace(workspace: Workspace) -> None:
     """Install the workspace the file tools will use."""
     global _workspace  # noqa: PLW0603 - module-level singleton by design
