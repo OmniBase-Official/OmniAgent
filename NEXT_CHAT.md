@@ -84,8 +84,10 @@ the cost of each, and you say which you recommend and why.
 
 # PART 2 — Where the project stands
 
-**549 tests pass**, mypy strict clean across 33 files, ruff clean. HEAD is
-`deed75a` plus the holdout expectations. The demo is **2026-10-10**, five days out.
+**553 tests pass**, mypy strict clean across 35 files, ruff clean. HEAD is
+`5c82c1d`, tree clean, all three gates re-run green on 2026-10-06. The demo is
+**2026-10-10**, and the weekly quota resets 2026-10-10 03:00, so nothing
+refills before it.
 
 **The drift is fixed and the fix is confirmed.** See the ten-run table below.
 
@@ -377,7 +379,7 @@ Clean on screen and in substance: questions 3, 4 and 5 (`fakes.py` lines,
 | `scripts/holdout_eval.py`, `scripts/session_eval.py` | 2 | the purest key: `Question("...", "agent.budget.exhausted", "search_text")` -- text and expectation adjacent |
 | `NEXT_CHAT.md`, `docs/demo-script.md` | 2 | this file's own tables, question and answer in one row |
 | `tests/test_eval_scoring.py`, `test_holdout_questions.py`, `test_react_loop.py`, `omniagent.toml` | 4 | quoted questions in docstrings and fixtures |
-| `.kilo/worktrees/quick-palladium/` | 7 | **a second full copy of the repository**, git-ignored but on disk and searchable |
+| `.kilo/worktrees/quick-palladium/` | 7 | a second full copy of the repository -- but **not reachable by the agent**, see below |
 
 So moving `data/` is not the fix. The expectations live in tracked source that
 cannot be deleted, and in the documentation that explains the measurements.
@@ -385,9 +387,39 @@ cannot be deleted, and in the documentation that explains the measurements.
 **The only sound fix is that an evaluation must run against a workspace holding
 only what its questions are about, rather than the repository root.** Both
 evaluations currently call `set_workspace(Workspace.at(PROJECT))`.
-`Workspace` has no exclusion mechanism, so this is a design change: either a
-temporary workspace populated with the files the questions name, or an
-exclusion list on `Workspace`.
+**Correction (2026-10-06, read from the source):** `Workspace` does have an
+exclusion mechanism. `denied_paths: frozenset[Path]` is a field on it, checked
+in `resolve()` at `sandbox.py:129`, and `search_text` re-resolves every
+candidate it walks (`tools.py:568`) and skips the ones that raise -- so a
+denied file is already invisible to the search, not merely unreadable. What is
+missing is narrower than "no mechanism":
+
+- the check is `resolved in self.denied_paths`, **exact match only**, so
+  denying `data/` does not deny `data/holdout-expects.txt`; it needs a prefix
+  test to cover a subtree;
+- `list_dir` (`sandbox.py:218`) filters hidden entries and does **not** consult
+  `denied_paths`, so a denied file would still be listed by name.
+
+So this is still a design change, but a smaller one than previously written
+here: a subtree-aware deny test plus `list_dir` honouring it, then wiring the
+set into both evaluations -- or a temporary workspace populated with only the
+files the questions name.
+
+The leak is reproducible from the tool itself, not only from an observed
+transcript. `tools.search_text("The word 'budget' is used in the line", ".")`
+against `Workspace.at(PROJECT)` returns **50 matches and stops at the limit**,
+the first four from `data/holdout-expects.txt`,
+`data/holdout-after-fix.log`, `data/holdout-omniagent-refuse.txt` and
+`data/s-0749e53-1.txt`.
+
+**And the 63-file figure overstates the agent's reach by seven.**
+`Workspace._is_hidden` (`sandbox.py:141`) returns true when **any** component
+of the path is dot-prefixed, and `resolve()` refuses on it -- so
+`.kilo/worktrees/quick-palladium/` and `.superpowers/` were never reachable by
+`read_file`, `list_directory` or `search_text`. The scan above walks the tree
+with Python and its own `skip` set, which is not the agent's rule. The surface
+the fix has to cover is **56 files, not 63**: 48 under `data/`, both eval
+scripts, two docs, and the row of three test files plus `omniagent.toml`.
 
 Reproduce the scan with (one paste, no new files needed):
 
@@ -478,8 +510,12 @@ Avoid:
   `git checkout -- <file>` silently reverted real uncommitted work.
 - **`git add -A` sweeps in whatever else is in the tree.**
 - **A recursive `grep` from Bash scans `.venv` and hangs past 120 s.**
-- **`pytest -q | tail` drops the summary line**, so `grep passed &&` in a chain
-  fails silently.
+- **`pytest -q` drops the summary line, and the cause is `addopts`.**
+  `pyproject.toml:168` already sets `addopts = "-q --strict-markers
+  --strict-config"`, so typing `-q` yourself makes it `-qq`, which suppresses
+  `NNN passed` entirely -- `grep -E "passed|failed"` then matches nothing and
+  a chained `&&` fails silently while the run was green. Run
+  `.venv/Scripts/python.exe -m pytest` with **no** `-q` of your own.
 - **A quoted bash heredoc still eats `\n` and `\\` in Python source.** Use
   Write/Edit, or `chr(10)`. Hit in all three sessions so far.
 - **`sed` patterns containing `\n` silently match nothing**, so a mutation check
