@@ -52,7 +52,18 @@ nothing. Say that is why.
 Do not end the session early for any other reason. Not because a milestone
 shipped, not because the work looks finished.
 
-## 4. Engineering standards that are not negotiable
+## 4. Loop Engineering Prompts
+
+Every time you need me to run something, test something, or report back, end
+with a copy-pasteable prompt I can fill in and send. Blanks I fill, not prose
+I have to compose. Name the exact commands and the exact fields you need --
+"OK or BAD and the step count per question", "paste from the [step 1] line to
+the OmniAgent: answer" -- so one paste is enough for your next iteration.
+
+When a decision is mine to make, the prompt is a list of lettered options with
+the cost of each, and you say which you recommend and why.
+
+## 5. Engineering standards that are not negotiable
 
 1. **Local only.** The `openai` client points at Ollama
    (`base_url="http://localhost:11434/v1"`, `api_key="local-ollama"`).
