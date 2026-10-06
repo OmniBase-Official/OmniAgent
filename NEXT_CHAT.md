@@ -432,6 +432,89 @@ could answer by searching: **the 'budget' question above all**, which was
 observed answering out of `data/holdout-expects.txt` verbatim. The arithmetic
 questions are unaffected -- `calculate` does not read the tree.
 
+## 2026-10-06 evening: the seal landed, and what it exposed
+
+`41cabe6`. `scripts/eval_workspace.py` builds the workspace an evaluation may
+read; both evaluations call `sealed_workspace(PROJECT)` instead of
+`Workspace.at(PROJECT)`. `sandbox.Workspace` got the subtree-aware deny it
+needed (`e43dba8`), so the mechanism is one field, not a new object.
+
+Measured on the real tree, the same search the agent made by hand:
+
+| | matches | where from |
+|---|---|---|
+| unsealed | **50, stopped at the limit** | 49 transcripts under `data/`, each holding the answer sentence |
+| sealed | **9** | `agent.py:598` first, none under `data/` |
+
+### Three things the tests found that reading the tree had not
+
+1. **The seal moved the leak instead of closing it.** `tests/test_file_tools.py`,
+   written an hour earlier to close this leak, quoted the answer sentence in a
+   docstring and stayed readable. A question-text invariant passed. Only an
+   expected-answer invariant caught it. `eval_workspace.py` and
+   `test_eval_workspace.py` had the same problem. All three are sealed now: a
+   file whose purpose is to explain the key is part of the key.
+2. **Modelling reachability by file suffix does not model reachability.**
+   `omniagent.egg-info/PKG-INFO` has no suffix, holds a copy of `README.md`
+   and returned two matches from a *sealed* search. `search_text` does not
+   look at suffixes -- it binary-sniffs. The test now mirrors that rule,
+   importing the sniff size from `sandbox` rather than copying it.
+3. **`agent.budget.exhausted` is not unique to `agent.py`.** It is a log event
+   this codebase emits, and it occurs in **five** reachable files:
+   `agent.py`, `README.md`, `export_dataset.py`,
+   `tests/test_agent_logging.py`, `tests/test_export_dataset.py`. Sealing the
+   transcripts stops the answer *sentence* coming back; it does not make the
+   'budget' question uniquely answerable from its subject. A test pins the
+   spread, so if it ever narrows the figure can be re-read.
+
+### The training data is clean of transcript reads -- measured
+
+| dataset | lines | lines mentioning a transcript path |
+|---|---|---|
+| `data/train.jsonl` | 37 | **0** |
+| `data/dataset.jsonl` | 109 | **0** |
+| `data/collect.jsonl` | 1459 | **0** |
+
+So the fine-tune recorded in `models/omniagent-qwen2.5-1.5b-manifest.json` was
+not trained on trajectories that read an answer out of a log. That was worth
+checking before anything else, and it is the one figure here that came back
+better than feared.
+
+### But the training data does contain the held-out answer
+
+`data/` is mentioned 14 times in `dataset.jsonl` and 62 times in
+`collect.jsonl`, and the mentions are `list_directory` observations naming
+`data/collect-run.log` -- 41 of them in `collect.jsonl` alone. That string is
+the **expected answer** of the held-out question "What is inside the data
+directory?".
+
+Both evaluations guard against this with `TRAINED`, which raises if a held-out
+question's *text* appears in the training bank. **A text-level guard cannot
+see answer-level contamination.** The question is held out as a sentence and
+not held out as an answer, so its 4/10 is not a clean generalisation figure in
+either direction.
+
+### The one thing the seal broke, and it needs a decision
+
+"What is inside the data directory?" asks about a directory that is now
+sealed, in `WALK` and in `SESSIONS_UNDER_TEST` both. Under the seal the honest
+observation is `Error: that file is not readable by the agent`, so the
+question is **unanswerable by construction**. Neither evaluation has been
+re-run yet, on purpose: a run now would produce a figure that is wrong for a
+reason that is not the model. Settle this first.
+
+### Not fixed: a search from `.` enumerates `.venv`
+
+`search_text` does `sorted(start.rglob("*"))`, which materialises every path
+under the root before any filtering, so `.venv` and `models/` are walked even
+though both are unreachable. Measured: **25.7 s unsealed** (it stops early on
+hitting the 50-match limit) and **64.5 s sealed** (fewer matches, so it scans
+to the file limit instead). The eval test walk had the same shape and went
+from 113 s to 1.1 s by pruning branches as it descends; `search_text` could
+take the same fix. It matters because a `session_eval` run already exceeds the
+600 s tool limit, and the seal makes the `search_text` question slower, not
+faster.
+
 ## Still open
 
 1. **The data-directory question is 4/10 both ways** and the cause is failure
