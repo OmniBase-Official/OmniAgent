@@ -328,6 +328,33 @@ Yesterday's "15/15" for the earlier set was inflated by a weak check
 properly that set is 12/15. The lesson keeps arriving in the same shape: an
 ad-hoc check grades the characters, not the answer.
 
+## 2026-10-06, run by hand: the answer key is inside the box
+
+The five-question demo scored 5/5 and two of the five should not count.
+
+**`search_text` can read the evaluation transcripts.** Asked where 'budget' is
+used in agent.py, the agent called `search_text` with `path: "."`, so the
+observation came back full of `data/holdout-*.txt` lines -- including
+`data/holdout-expects.txt:33: The word 'budget' is used in the line
+"agent.budget.exhausted" within the system_prompt of agent.py.` Its final
+answer was that line verbatim. It did not answer from `agent.py`; it read its
+own earlier answer out of a log.
+
+That is a measurement-integrity problem before it is a demo problem. Every
+figure for that question, in either evaluation, was collected in a workspace
+whose `data/` holds the answers. **The 10/10 for 'budget' is not trustworthy
+until the transcripts are out of reach of the search.**
+
+**A right number inside a wrong sentence, again.** Question 2 answered "15% of
+2480 is 1116, and that multiplied by 3 gives 1116." 15% of 2480 is 372. The
+model collapsed both steps into one `calculate` call and narrated both clauses
+wrongly; `expect="1116"` passed it. Same shape as "10% of 1000 is 50" from
+2026-10-05, and the rehearsal's own 15/15 was blind to it for the same reason:
+a substring grades characters, not answers.
+
+Clean on screen and in substance: questions 3, 4 and 5 (`fakes.py` lines,
+7!/5!, 2**11-48), two steps each.
+
 ## Still open
 
 1. **The data-directory question is 4/10 both ways** and the cause is failure
