@@ -7,11 +7,39 @@ answers rather than a loose keyword match. 11 steps in total.
 
 ## Before you start
 
-```bash
-# Ollama does not autostart. From PowerShell, not Bash:
-#   Start-Process "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" -ArgumentList "serve" -WindowStyle Hidden
+Two commands, and the slashes matter. `cmd.exe` reads `/` as the start of a
+switch, so `.venv/Scripts/python.exe` makes it look for a command called
+`.venv` -- which is the error "'.venv' is not recognized as an internal or
+external command". Use backslashes there.
+
+**Step 1 — start Ollama.** It does not autostart. In **PowerShell**:
+
+```powershell
+Start-Process "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" -ArgumentList "serve" -WindowStyle Hidden
+```
+
+Wait about fifteen seconds. Check it answered:
+
+```powershell
+Invoke-RestMethod http://localhost:11434/api/tags | Select-Object -ExpandProperty models | Select-Object name
+```
+
+`omniagent:latest` must be in that list.
+
+**Step 2 — start the agent.** In **cmd.exe** (backslashes):
+
+```
+.venv\Scripts\python.exe main.py --profile demo
+```
+
+In **PowerShell or Git Bash** either slash works:
+
+```
 .venv/Scripts/python.exe main.py --profile demo
 ```
+
+You should see the banner, then `profile : demo` and `model : omniagent`. If
+it says any other model, stop: the demo is not running what was measured.
 
 The profile pins `omniagent` (the fine-tune, `num_ctx` 16384), `temperature 0`
 and `max_steps 8` — the configuration every published figure was measured at.
