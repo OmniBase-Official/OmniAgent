@@ -288,6 +288,33 @@ cannot tell a right answer from a sentence that happens to contain the right
 characters.** That is the same lesson as the tool-choice scores, one level
 down, and it limits every `correct` figure in this file.
 
+## 2026-10-06 afternoon: a plan, and Task 1 of it
+
+`docs/superpowers/plans/2026-10-06-train-and-deploy.md` plans four tasks for
+training the next fine-tune and promoting it. The survey that preceded it
+changed the shape of the work: the pipeline already exists and already runs
+locally -- `models/omniagent-qwen2.5-1.5b-manifest.json` records qlora-4bit on
+an RTX 3050 Laptop GPU, 109 examples, 2026-10-02 -- so the plan is about
+memory and a gate, not about building a pipeline.
+
+Executing inline. **Task 1 is done** (`1bf0051`): `dataset_provenance.py`
+renders the system prompt by importing `SYSTEM_PROMPT_TEMPLATE` rather than
+copying it, hashes it with the same sha256 the agent already logs at
+`agent.py:467`, and `export_dataset` now writes a
+`<dataset>.provenance.json` sidecar. A missing sidecar raises rather than
+reading as agreement.
+
+**The ledger is at `.superpowers/sdd/2026-10-06-train-and-deploy/progress.md`**
+(git-ignored). Resume at Task 2. Trust the ledger and `git log` over
+recollection, and read the task's section in the plan before starting it --
+what is remembered is a summary.
+
+Three rulings so far, all in the ledger: no worktree and no per-task brief
+files, because the standing protocol commits to `main` every step and the plan
+was authored in the same session; the run stops at a ledger line when the
+budget runs out; and `write_sidecar` returns its path, which the plan's
+Produces block implied and its steps did not say.
+
 ## Still open
 
 1. **The data-directory question is 4/10 both ways** and the cause is failure
