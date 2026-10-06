@@ -139,7 +139,7 @@ needed:
 | question | isolated | accumulated | was reported |
 |---|---|---|---|
 | lines in tests/fakes.py | 10/10 | 10/10 | 10/10 — genuinely right |
-| where 'budget' is used | 10/10 | 9/10 | 10/10 |
+| where 'budget' is used | ~~10/10~~ | ~~9/10~~ | 10/10 -- all collected unsealed, superseded by 0/10 |
 | **what is inside the data directory** | **4/10** | **4/10** | **10/10** |
 
 The data-directory question reached for `list_directory` in all ten runs and
@@ -221,7 +221,7 @@ unverified is reintroduced; the discard policy from `9ef1577` is untouched.
 | 15% of 2480, times 3 | 10/10 [3] | 10/10 [3] |
 | lines in tests/fakes.py | 10/10 [2] | 10/10 [2] |
 | 7! / 5! | 10/10 [2] | 10/10 [2] |
-| where 'budget' is used in agent.py | 10/10 [3] | 10/10 [6] |
+| where 'budget' is used in agent.py | ~~10/10~~ [3] | ~~10/10~~ [6] | collected unsealed -- superseded by 0/10
 | **2 to the power of 11, minus 48** | **10/10 [2]** | **0/10 [9]** ← drift |
 | what is inside the data directory | 10/10 [2] | 10/10 [7-9] |
 | minutes in 3 days and 7 hours | **0/10 [3]** | 2/10 [2-4] |
@@ -242,7 +242,7 @@ that one file, so the agent code is identical and the runs are one sample.
 | 15% of 2480, times 3 | 10/10 [3] | 10/10 [3] |
 | lines in tests/fakes.py | 10/10 [2] | 10/10 [2] |
 | 7! / 5! | 10/10 [2] | 10/10 [2] |
-| where 'budget' is used in agent.py | 10/10 [3] | 10/10 [2-3] |
+| where 'budget' is used in agent.py | ~~10/10~~ [3] | ~~10/10~~ [2-3] | collected unsealed -- superseded by 0/10
 | **2 to the power of 11, minus 48** | **10/10 [2]** | **10/10 [2-3]** |
 | what is inside the data directory | 10/10 [2] | 10/10 [3-9] |
 | minutes in 3 days and 7 hours | 0/10 [3] | 1/10 [2-5] |
@@ -575,6 +575,63 @@ Together with the five-file spread of `agent.budget.exhausted`, the honest
 conclusion is that **sealing makes this question's figure honest about
 transcripts and does not make the question good.** Treat a re-measured
 10/10 as evidence about the seal, not as evidence about retrieval.
+
+### MEASURED: the 'budget' question is 0/10 sealed. The 10/10 is retracted
+
+Ten runs, fresh agent each time, sealed workspace, `omniagent`, `max_steps=8`,
+`temperature=0`. Raw records in `data/budget-sealed.jsonl`, answers kept in
+full because a substring grades characters.
+
+| | before the seal | sealed, ten runs |
+|---|---|---|
+| matches `agent.budget.exhausted` | 10/10 | **0/10** |
+| steps | 3 | **3, all ten** |
+| seconds | not recorded | 100.1 / 115.6 / 132.3 (min/med/max) |
+| searched `path: "."` | observed once | **10/10** |
+| answer mentions a transcript | observed verbatim | **0/10** |
+
+**All ten answers are identical, word for word:**
+
+> The word 'budget' is used in agent.py at line 194. It refers to the context
+> budget, which determines how much of a reply can be written before the
+> conversation stops.
+
+Read on substance rather than against the string: this is **not a false
+sentence**. Line 194 does contain the word, inside the comment at
+`agent.py:193-196` that documents a *past failure on this very question*. So
+the agent cites the one occurrence out of 17 that exists only because the
+repository writes about the question -- the least informative of them -- and
+never reaches `agent.budget.exhausted` at line 598.
+
+**What this settles.** The seal works: nothing in any of the ten answers came
+out of `data/`. And the 10/10 this question carried was never a retrieval
+figure -- it was the answer key being read aloud. Sealed, the model does not
+fall back to reading `agent.py` properly; it falls onto the next
+answer-shaped sentence in the tree. Prediction made before the run and
+confirmed by it.
+
+Every `10/10` for "where is the word 'budget' used in `agent.py`" in the
+tables above was collected in a workspace holding the answer. **Read them as
+superseded by 0/10.** The arithmetic rows are unaffected.
+
+Also measured, and it matters for the 600 s limit: **~115 s for this one
+question**, 3 steps. A 16-question `holdout_eval` at that rate does not
+finish inside the tool timeout.
+
+### The demo still reads the answer key, and the trace is on screen
+
+`main.py` builds its workspace at `main.py:264` and denies **only the active
+log file**. The seal is on the two evaluations, not on the demo path. So on
+2026-10-10, "Where is the word 'budget' used in agent.py?" will be answered
+out of `data/holdout-expects.txt` exactly as it was in the hand run -- and
+`main.py` prints the ReAct trace through `printer=lambda text: print(...)`,
+so the observation line naming `data/holdout-expects.txt` appears **on the
+audience's screen**.
+
+The demo's 15/15 includes this question. It is a real 15/15 of what the agent
+said; it is not 15/15 of the agent answering from the file it was asked
+about. Decide before the day: leave it, seal the demo path and drop the
+question, or seal and replace it.
 
 ### Not fixed: a search from `.` enumerates `.venv`
 
