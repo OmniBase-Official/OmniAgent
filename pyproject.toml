@@ -61,6 +61,7 @@ files = [
     "sandbox.py",
     "validate_dataset.py",
     "config.py",
+    "dataset_provenance.py",
     "scripts/collect_dataset.py",
     # The evaluation scripts produce the numbers this project quotes, so they
     # are checked like the agent is. They were outside this list until the

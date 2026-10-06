@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from dataset_provenance import write_sidecar
 from observability import TRUNCATION_MARKER
 
 #: Events that mean the turn contains a message the log does not record
@@ -423,7 +424,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     written = write_examples(examples, args.output)
+    # After the dataset, so a failed export leaves no sidecar claiming to
+    # describe it. The prompt in force now is what these examples were
+    # collected under, and nothing else records that.
+    sidecar = write_sidecar(args.output)
     print(f"wrote {written} example{'s' if written != 1 else ''} to {args.output}")
+    print(f"recorded the system prompt it was collected under in {sidecar}")
     return 0
 
 

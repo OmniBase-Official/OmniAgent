@@ -36,3 +36,4 @@ omniagent.local.toml
 
 # Trained models, adapters, GGUF and the llama.cpp checkout
 models/
+.superpowers/
