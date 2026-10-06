@@ -6,6 +6,13 @@ Five questions, in this order, measured on the path the demo actually uses
 answers rather than a loose keyword match. Two steps per question, ten in
 total.
 
+Confirmed by hand on 2026-10-06 as well as by the three scripted rehearsals:
+5/5, two steps each, and every sentence correct and not merely containing the
+right number. The follow-up was typed "Now SubStract 728 from that." --
+misspelled, oddly capitalised -- and still resolved "that" to the right
+antecedent, and question 5 was typed with leading spaces. A typo on the day is
+not a risk.
+
 ## Before you start
 
 Two commands, and the slashes matter. `cmd.exe` reads `/` as the start of a
