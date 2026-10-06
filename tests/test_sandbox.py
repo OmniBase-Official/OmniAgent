@@ -239,6 +239,57 @@ def test_the_active_log_file_cannot_be_read_back(workspace: Workspace) -> None:
         guarded.resolve("run.jsonl")
 
 
+def test_denying_a_directory_denies_every_file_under_it(workspace: Workspace) -> None:
+    """An evaluation seals a whole transcript directory, not one file at a time.
+
+    Exact membership was not enough: denying `data/` left
+    `data/holdout-expects.txt` readable, and the agent was observed answering
+    out of it.
+    """
+    transcripts = workspace.root / "data"
+    transcripts.mkdir()
+    (transcripts / "expects.txt").write_text("the answer is 42\n", encoding="utf-8")
+    sealed = Workspace.at(workspace.root, denied_paths=frozenset({transcripts.resolve()}))
+
+    with pytest.raises(SandboxError, match="not readable by the agent"):
+        sealed.resolve("data/expects.txt")
+
+
+def test_a_denied_directory_is_itself_refused(workspace: Workspace) -> None:
+    """Otherwise list_directory on the denied root still reports its contents."""
+    transcripts = workspace.root / "data"
+    transcripts.mkdir()
+    sealed = Workspace.at(workspace.root, denied_paths=frozenset({transcripts.resolve()}))
+
+    with pytest.raises(SandboxError, match="not readable by the agent"):
+        sealed.resolve("data")
+
+
+def test_a_sibling_sharing_a_name_prefix_stays_readable(workspace: Workspace) -> None:
+    """A prefix test on strings would deny `database.py` along with `data/`."""
+    (workspace.root / "data").mkdir()
+    (workspace.root / "database.py").write_text("x = 1\n", encoding="utf-8")
+    sealed = Workspace.at(
+        workspace.root, denied_paths=frozenset({(workspace.root / "data").resolve()})
+    )
+
+    assert sealed.resolve("database.py").name == "database.py"
+
+
+def test_list_dir_does_not_name_a_denied_entry(workspace: Workspace) -> None:
+    """A listing that names the file is a pointer to the answer key."""
+    (workspace.root / "data").mkdir()
+    (workspace.root / "data" / "expects.txt").write_text("42\n", encoding="utf-8")
+    sealed = Workspace.at(
+        workspace.root, denied_paths=frozenset({(workspace.root / "data").resolve()})
+    )
+
+    entries = sealed.list_dir(".")
+
+    assert "data/" not in entries
+    assert any(entry.startswith("README.md") for entry in entries)
+
+
 # --------------------------------------------------------------------------- #
 # resource limits
 # --------------------------------------------------------------------------- #

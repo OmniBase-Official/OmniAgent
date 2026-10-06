@@ -126,7 +126,7 @@ class Workspace:
                 f"path is outside the workspace ({self.root}); "
                 "only files under it can be read"
             )
-        if resolved in self.denied_paths:
+        if self._is_denied(resolved):
             raise SandboxError("that file is not readable by the agent")
         if self._is_hidden(resolved):
             raise SandboxError(
@@ -138,6 +138,21 @@ class Workspace:
 
     def _inside(self, resolved: Path) -> bool:
         return resolved == self.root or resolved.is_relative_to(self.root)
+
+    def _is_denied(self, resolved: Path) -> bool:
+        """True for a denied path and for anything beneath a denied directory.
+
+        Exact membership was the whole test once, which read as an exclusion
+        mechanism and was not one: denying ``data/`` left
+        ``data/holdout-expects.txt`` readable, and the agent was observed
+        answering an evaluation question out of that file verbatim.
+
+        Compared on path components, not on strings -- a string prefix would
+        deny ``database.py`` along with ``data/``.
+        """
+        return any(
+            resolved == denied or resolved.is_relative_to(denied) for denied in self.denied_paths
+        )
 
     def _is_hidden(self, resolved: Path) -> bool:
         try:
@@ -225,6 +240,8 @@ class Workspace:
         for child in path.iterdir():
             if child.name.startswith("."):
                 continue
+            if self._is_denied(child.resolve()):
+                continue  # naming it is a pointer to what it holds
             if child.is_dir():
                 entries.append((0, child.name, f"{child.name}/"))
             elif child.is_file():

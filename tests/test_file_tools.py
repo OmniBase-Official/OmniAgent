@@ -315,3 +315,67 @@ def test_read_file_never_returns_more_than_the_agent_will_keep(
         if observation.startswith("Error:"):
             continue
         assert cap_observation(observation, budget) == observation, f"{size} lines got capped"
+
+
+# --------------------------------------------------------------------------- #
+# a sealed workspace: the answer key out of reach
+# --------------------------------------------------------------------------- #
+
+
+def test_search_text_reports_no_match_inside_a_denied_directory(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """The leak this exists to close.
+
+    Asked where 'budget' is used in agent.py, the agent called search_text with
+    path "." and its observation came back holding
+    `data/holdout-expects.txt:33: The word 'budget' is used in the line
+    "agent.budget.exhausted" ...`. It answered that line verbatim -- its own
+    earlier answer out of a log, not a reading of agent.py.
+    """
+    root = tmp_path / "work"
+    transcripts = root / "data"
+    transcripts.mkdir()
+    (transcripts / "holdout-expects.txt").write_text(
+        "The word 'budget' is used in the line \"agent.budget.exhausted\".\n",
+        encoding="utf-8",
+    )
+
+    leaky = search_text("agent.budget.exhausted", ".")
+    assert "holdout-expects.txt" in leaky, "fixture does not reproduce the leak"
+
+    set_workspace(Workspace.at(root, denied_paths=frozenset({transcripts.resolve()})))
+    sealed = search_text("agent.budget.exhausted", ".")
+
+    assert "holdout-expects.txt" not in sealed
+    assert sealed.startswith("No match")
+
+
+def test_a_denied_directory_cannot_be_searched_by_naming_it(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """Sealing the walk is not enough if the directory can be the start of one."""
+    root = tmp_path / "work"
+    transcripts = root / "data"
+    transcripts.mkdir()
+    (transcripts / "holdout-expects.txt").write_text("the answer is 42\n", encoding="utf-8")
+    set_workspace(Workspace.at(root, denied_paths=frozenset({transcripts.resolve()})))
+
+    observation = search_text("answer", "data")
+
+    assert observation.startswith("Error:")
+    assert "not readable by the agent" in observation
+
+
+def test_list_directory_does_not_name_a_denied_directory(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """A listing that names data/ tells the model where to look next."""
+    root = tmp_path / "work"
+    (root / "data").mkdir()
+    set_workspace(Workspace.at(root, denied_paths=frozenset({(root / "data").resolve()})))
+
+    observation = list_directory(".")
+
+    assert "data/" not in observation
+    assert "README.md" in observation
