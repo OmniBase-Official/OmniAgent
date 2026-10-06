@@ -50,10 +50,11 @@ sys.path.insert(0, str(PROJECT / "scripts"))
 
 from collect_dataset import SESSIONS
 from eval_scoring import Question, Score, Verdict, header, judge, row
+from eval_workspace import sealed_workspace
 
 import observability as obs
 from agent import AgentConfig, AgentError, ReActAgent
-from sandbox import Workspace, set_workspace
+from sandbox import set_workspace
 
 if TYPE_CHECKING:
     from openai import OpenAI
@@ -348,7 +349,7 @@ def _is_drift(before: Spread | None, after: Spread | None) -> bool:
 def main(model: str) -> None:
     obs.reset()
     obs.configure(level="ERROR")
-    set_workspace(Workspace.at(PROJECT))
+    set_workspace(sealed_workspace(PROJECT))
 
     print(f"\n{'=' * 78}\n{model}: a fresh agent for every question\n{'=' * 78}", flush=True)
     isolated = run_walk(model, shared_history=False)

@@ -29,10 +29,11 @@ sys.path.insert(0, str(PROJECT / "scripts"))
 
 from collect_dataset import SESSIONS
 from eval_scoring import Question, Score, header, judge, row
+from eval_workspace import sealed_workspace
 
 import observability as obs
 from agent import AgentConfig, AgentError, ReActAgent
-from sandbox import Workspace, set_workspace
+from sandbox import set_workspace
 
 
 def _lines(relative: str) -> str:
@@ -125,7 +126,7 @@ if leaked:
 def evaluate(model: str) -> Score:
     obs.reset()
     obs.configure(level="ERROR")
-    set_workspace(Workspace.at(PROJECT))
+    set_workspace(sealed_workspace(PROJECT))
     # temperature 0: an earlier pair of runs disagreed on the honesty question,
     # so variance was being read as a difference between models.
     config = AgentConfig(
