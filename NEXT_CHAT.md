@@ -71,7 +71,7 @@ and say which you recommend and why.
 
 # PART 2 — Where the project stands
 
-**596 tests**, mypy strict clean across 37 files, ruff clean. HEAD `801d455`
+**602 tests**, mypy strict clean across 37 files, ruff clean. HEAD `251a96f`
 plus this file. **holdout_eval is 11/16 on the sealed workspace** (one run).
 Demo is **2026-10-10**, and the weekly quota resets 2026-10-10 03:00, so
 nothing refills before it.
@@ -387,15 +387,69 @@ G: ever becomes a synced folder, stop:** publishing there would send the
 dataset off the machine. Format and training steps are in
 `docs/dataset-bundles.md`, which travels inside each bundle.
 
-### At risk and not yet handled: the shipped model's own training data
+### The provenance check this project was waiting for — made, and it failed
 
-`data/dataset.jsonl` — the 109 examples the running `omniagent` was trained on
-— lives in a gitignored directory with **no backup anywhere**, and it has **no
-provenance sidecar**. `publish_dataset` refuses it by design, and that refusal
-is right: `write_sidecar` records the **current** prompt, so writing one now
-would assert a fingerprint the data was probably not collected under. Backing
-it up needs a label that says provenance is unknown rather than a sidecar that
-claims it is known. Decide before the drive or the directory is next cleaned.
+`dataset_provenance.py`'s own docstring said the served model was trained
+against a prompt it is no longer given, that this was found by reading a commit
+log, and that "this module is how it gets found by a check instead". **The
+check could not be made.** `write_sidecar` hashed the prompt the code renders
+*now*, which stamps today's fingerprint onto a dataset of any age — so the one
+thing the module existed to detect was the one thing it could not see.
+
+`dataset_fingerprint` reads the digest out of the dataset's **own** examples.
+Each example carries the prompt in force when the turn was logged and the
+exporter replays it verbatim, so this is a measurement of the file rather than
+a claim about the checkout it is sitting in.
+
+| | |
+|---|---|
+| `data/dataset.jsonl` carries | `ee43a4af…` in **all 109** examples |
+| live prompt renders | `36397f37…` |
+| `matches_live_prompt` | **false** |
+
+**So the shipped `omniagent` was trained under a prompt that no longer
+exists** — previously inferred from `58bb801` changing `read_file`'s
+description, now two hashes apart. The old run log agrees independently: 105
+`agent.created` events, every one carrying `ee43a4af`.
+
+**And the teacher was recoverable the same way:** the old log records
+`qwen-ctx8k` in all 105 events — **not** the `qwen2.5-coder:7b` that
+`[defaults]` names today. So the legacy and the new dataset differ in *three*
+ways at once:
+
+| | legacy (shipped model) | new 2026-10-07 |
+|---|---|---|
+| teacher | `qwen-ctx8k` | `qwen2.5-coder:7b` |
+| prompt | `ee43a4af…` | `36397f37…` |
+| workspace | unsealed — could read its own transcripts | sealed |
+
+Anyone comparing a fine-tune trained on one against a fine-tune trained on the
+other is varying three things, not one.
+
+`write_sidecar` also now refuses a dataset that mixes two prompts rather than
+reducing it to one of them, and refuses an empty dataset rather than giving it
+a sidecar recording a claim about data that is not there.
+
+### Both datasets are now on G: with honest provenance
+
+| bundle | examples | teacher | verify |
+|---|---|---|---|
+| `G:\OmniAgent\datasets\2026-10-07\` | 117 | `qwen2.5-coder:7b` | **verified** |
+| `G:\OmniAgent\datasets\2026-10-02-shipped-model\` | 109 | `qwen-ctx8k` (recovered) | **verified** |
+
+The legacy bundle's `MANIFEST.json` records the unsealed workspace and names
+where the teacher was recovered from, so nothing in it is asserted without a
+source. The risk noted below is closed: that dataset is no longer a single
+copy in a gitignored directory.
+
+### Previously at risk, now handled
+
+It lived in a gitignored directory with no backup and no sidecar, and the
+refusal to invent one was right: `write_sidecar` recorded the **current**
+prompt, so writing one would have asserted a fingerprint the data was not
+collected under. The fix was not to label the provenance unknown but to
+**recover it** — the fingerprint from the dataset's own examples, the teacher
+from the old run log. Both are now facts with sources rather than labels.
 
 ## Traps already paid for once
 
