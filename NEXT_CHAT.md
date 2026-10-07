@@ -99,8 +99,8 @@ Questions 1 and 2 lead because **a follow-up must come directly after its
 antecedent**. Asked fifth, "Now subtract 728 from that" reached back past its
 antecedent in 3 of 3 rehearsals.
 
-**Re-rehearsed 2026-10-06 after the workspace changed: 25/25 over five
-consecutive runs**, one tool call per question, zero `data/` paths in any
+**Re-rehearsed 2026-10-07 after the workspace changed: 25/25 over five
+scripted runs, plus 5/5 run by hand -- 30/30 over six**, one tool call per question, zero `data/` paths in any
 trace, answers identical word for word and read rather than substring-matched.
 
 ## 2026-10-06: the answer key is out of the box

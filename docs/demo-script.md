@@ -80,6 +80,28 @@ Note question 2's phrasing: it names its own antecedent ("the product of 144
 and 12") rather than saying "that", which is the follow-up working, not
 hedging.
 
+**Run by hand on 2026-10-07, after the five scripted runs: 5/5**, two steps
+and one tool call per question, no `data/` path anywhere in the trace, no
+`tool.unknown` and no repeated action. Session `d62050798f00`, model
+`omniagent`. That makes **30/30 over six runs, one of them by hand** — and the
+hand run is the one that counts most, because the first demo rehearsal
+(`2779d46`, 2026-10-02) found six defects while 463 tests and a 300-second
+evaluation were both passing.
+
+Two behaviours worth knowing before standing in front of it:
+
+- **Question 2 recomputes rather than remembering.** Its Thought says it will
+  calculate the product *and* the subtraction, and it sends
+  `144 * 12 - 728` as one call. The answer is right and the referent resolves
+  correctly, and it gets there by redoing the arithmetic instead of reaching
+  into the history for 1728. That is the opposite mechanism to the one that
+  breaks "Finally, what is 10% of that?", which reaches into the history and
+  picks the wrong number out of it.
+- **Question 3 picks `file_info`, not `read_file`.** That is the distinction
+  the "do not ask" list below is about: the same question asked elliptically
+  ("And sandbox.py?") picks `read_file` and copies a number out of the
+  conversation.
+
 Questions 1 and 2 open the demo because **a follow-up has to come directly
 after the question it refers to.** Asked fifth, with three unrelated questions
 in between, "Now subtract 728 from that" answered "144 multiplied by 12, minus
