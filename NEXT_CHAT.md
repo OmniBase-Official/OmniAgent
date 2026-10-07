@@ -259,11 +259,16 @@ became 2-3; the data directory was 7-9 and became 3-9.
 
 ## Still open, in the order I would take them
 
-0. **Settle v2 against the shipped model on ten runs.** One run has it at
-   12/16 against 10/16 with honesty and the elliptical follow-up recovered,
-   and the same model moved 11/16 -> 10/16 between two runs, so the gap is
-   about twice the measured noise. ~18 min of clock per pair, almost no quota.
-   Until that lands, the demo stays on `omniagent`.
+0. **Rehearse v2 on the demo path**, five scripted runs plus one by hand of
+   the five demo questions. Ten runs of `holdout_eval` settled that v2 is
+   12/16 against 10/16 with zero variance either side, but it has never run
+   through `main.py --profile demo`, and that gap has hidden two defects
+   before. ~10 min of clock. This is the only thing that could still change
+   what the demo runs on.
+0b. **Retire or rebuild the data-directory question.** Its expectation is a
+   fact about `data/`, which is the output directory every run writes into --
+   85 files now, and the question flipped from OK to WRONG because of that.
+   A metric that moves when you measure is not a metric.
 1. **`search_text` enumerates `.venv` and `models/`.** It does
    `sorted(start.rglob("*"))`, materialising every path before filtering, so a
    search from `.` costs **25.7 s unsealed and 64.5 s sealed**, and one
@@ -519,28 +524,80 @@ not one lucky question:
 So v2 improved on list-and-stop, on honesty, and on the elliptical follow-up,
 in 9 fewer steps and 81 seconds less.
 
-### Why this does not settle it, by this project's own standard
+### SETTLED on ten runs: v2 is better, and by exactly two points every time
 
-1. **One run.** Three runs have twice produced a conclusion ten reversed; one
-   is weaker than three.
-2. **The instrument's noise is at least ±1 on this axis.** `omniagent` scored
-   **11/16 yesterday and 10/16 today** — same model, same seal, same
-   questions. A two-point gap is about twice the noise observed on a single
-   sample of it.
-3. **`tool pick` fell from 6/7 to 5/7 for both models**, which is more of the
-   same variance.
-4. **One of v2's three wins may be memorisation, not capability.** The
+Ten pairs, one at a time, `data/holdout-pair-1..10.txt`, summaries in
+`data/holdout-pair-summaries.txt`. 174.7 minutes, 0 failures. Run 1 is the
+pair measured earlier the same day under the identical configuration.
+
+| | `omniagent` | `omniagent-v2` |
+|---|---|---|
+| correct | **10/16 in all ten** | **12/16 in all ten** |
+| tool pick | 5/7 ×10 | 5/7 ×10 |
+| follow-ups | 5/5 ×10 | 5/5 ×10 |
+| honest | 0/1 ×10 | **1/1 ×10** |
+| steps | 57–62 | **49 in all ten** |
+| seconds | 584–757 | 436–630 |
+
+**Zero variance in the score for either model across ten runs.** v2 is also
+steadier in trajectory: 49 steps every single run against 57–62.
+
+### Retracted: there is no "±1 instrument noise"
+
+Earlier today I wrote that `omniagent` moving 11/16 → 10/16 showed the
+instrument was noisy by about a point, and used that to argue a two-point gap
+was near the noise floor. **That was wrong.** Ten runs put both models on the
+same score every time. The 11/16 came from one question, and the cause is
+worse than noise:
+
+**"What is inside the data directory?" measures a directory the measurement
+writes into.** `data/` held a handful of files yesterday and holds **85**
+today, because every evaluation, collection and training run writes its output
+there. The expectation `collect-run.log` is still present — the test asserting
+that passes — but the listing is now long, and `omniagent` answers:
+
+> I am unable to determine what text exists inside the 'data' directory
+> because no files there appear to have plain text content
+
+It lists the directory, which is allowed, then tries to **read inside** it,
+which the listing-only tier refuses, and concludes it cannot tell. The refusal
+is correct about contents; the answer is wrong about the question, which asked
+for the listing it already had.
+
+So the figure moved because I ran evaluations. **A question whose expectation
+is a fact about `data/` cannot be a stable metric while `data/` is the output
+directory.** Retire it, or derive its expectation from the tree the way
+`_lines()` does.
+
+And this reframes v2's win on that question. It is not only the memorisation
+risk noted below: v2 **stops after the correct first observation** and
+`omniagent` does not, in all ten runs each. That is open item 3 in this file —
+the clearest remaining target — showing up as a measured difference between
+two models rather than as a diagnosis.
+
+### What still qualifies v2's lead
+
+1. **`tool pick` is 5/7 for both models in all ten runs**, down from the 6/7
+   `omniagent` scored on 2026-10-06. Unexplained, and it is not variance —
+   it is the same value twenty times. Likely the same cause as the
+   data-directory flip, since that question carries the `list_directory`
+   expectation.
+2. **One of v2's two correct wins may be memorisation, not capability.** The
    data-directory question's expected answer is `collect-run.log`, and that
    string is in the training data as a `list_directory` observation — 29 times
    in the old collection, and the new one was collected the same way. v2 was
    trained on data that contains the answer to that question. The honesty and
    follow-up wins are not contaminated this way.
 
-**Do not swap the demo to v2 on this.** `omniagent` is what was rehearsed
-25/25 on the demo path, and a model that has been measured once should not
-replace one measured repeatedly, three days out. Ten runs of
-`holdout_eval omniagent omniagent-v2` settles it: ~18 minutes of clock per
-pair, almost no quota.
+**The demo still stays on `omniagent`, and the reason has changed.** It is no
+longer "v2 is unmeasured" — v2 is now measured more thoroughly than the
+shipped model ever was. It is that **`omniagent` is what was rehearsed 30/30
+on the demo path, and v2 has never been run on that path at all.**
+`holdout_eval` drives the agent directly; the demo is
+`main.py --profile demo`, and that gap has hidden two defects before
+(`06f9ab0`). Five scripted runs plus one by hand of the five demo questions
+against `omniagent-v2` is what would justify a swap, and it costs ~10 minutes
+of clock.
 
 ## Traps already paid for once
 
