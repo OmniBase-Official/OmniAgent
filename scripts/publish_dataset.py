@@ -161,9 +161,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Publish a dataset and its provenance to a training store."
     )
-    parser.add_argument("dataset", type=Path, help="The exported .jsonl dataset.")
+    # dataset and --teacher are optional only because --verify-only reads
+    # SHA256SUMS and nothing else; requiring them there made the documented
+    # re-check command ask for a teacher it ignores. Still required to publish.
+    parser.add_argument(
+        "dataset", type=Path, nargs="?", help="The exported .jsonl dataset."
+    )
     parser.add_argument("--dest", type=Path, required=True, help="Destination directory.")
-    parser.add_argument("--teacher", required=True, help="Model tag the bank was asked of.")
+    parser.add_argument("--teacher", help="Model tag the bank was asked of.")
     parser.add_argument(
         "--workspace-rule",
         help="How the agent's workspace was restricted while collecting.",
@@ -175,6 +180,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--verify-only", action="store_true", help="Re-check an existing destination."
     )
     args = parser.parse_args(argv)
+
+    if not args.verify_only and (args.dataset is None or args.teacher is None):
+        parser.error("dataset and --teacher are required unless --verify-only is given")
 
     try:
         if args.verify_only:

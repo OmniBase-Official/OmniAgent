@@ -20,6 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
+import publish_dataset
 from publish_dataset import PublishError, publish, verify
 
 from dataset_provenance import write_sidecar
@@ -156,3 +157,37 @@ def test_a_copy_that_arrives_different_fails_the_publish(
 
     with pytest.raises(PublishError, match="does not match the source"):
         publish(dataset, tmp_path / "drive", teacher="t")
+
+
+def test_verify_only_needs_nothing_but_a_destination(dataset: Path, tmp_path: Path) -> None:
+    """Writing the docs exposed this: a re-check asked for a teacher it ignores.
+
+    The verify path reads SHA256SUMS and nothing else, so requiring the
+    dataset and --teacher made the documented command a lie.
+    """
+    dest = tmp_path / "drive"
+    publish(dataset, dest, teacher="t")
+
+    assert publish_dataset.main(["--verify-only", "--dest", str(dest)]) == 0
+
+
+def test_verify_only_reports_a_tampered_bundle_as_failure(
+    dataset: Path, tmp_path: Path
+) -> None:
+    dest = tmp_path / "drive"
+    publish(dataset, dest, teacher="t")
+    (dest / "dataset.jsonl").write_text("tampered\n", encoding="utf-8")
+
+    assert publish_dataset.main(["--verify-only", "--dest", str(dest)]) == 1
+
+
+def test_publishing_still_requires_a_dataset_and_a_teacher(tmp_path: Path) -> None:
+    """Making them optional must not make them optional for a real publish.
+
+    argparse exits 2 on a usage error rather than returning it, which is the
+    convention every other CLI here follows.
+    """
+    with pytest.raises(SystemExit) as exit_info:
+        publish_dataset.main(["--dest", str(tmp_path / "drive")])
+
+    assert exit_info.value.code == 2
