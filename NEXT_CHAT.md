@@ -71,15 +71,20 @@ and say which you recommend and why.
 
 # PART 2 — Where the project stands
 
-**604 tests**, mypy strict clean across 37 files, ruff clean. HEAD `1343bd1`
-plus this file. Two fine-tunes exist: `omniagent` (rehearsed, demo) and
-`omniagent-v2` (better on one run, not settled).
-plus this file. **holdout_eval is 11/16 on the sealed workspace** (one run).
-Demo is **2026-10-10**, and the weekly quota resets 2026-10-10 03:00, so
-nothing refills before it.
+**604 tests**, mypy strict clean across 37 files, ruff clean. HEAD `105224b`
+plus this file. Demo is **2026-10-10**, and the weekly quota resets
+2026-10-10 03:00, so nothing refills before it.
+
+**The demo runs on `omniagent-v2`** since `4a7d0bb`. Ten runs of
+`holdout_eval` over both tags, zero variance in either: **12/16 against
+10/16**, honest **1/1 against 0/1**, **49 steps** every run against 57–62.
+Then the demo path itself: **35/35 over seven runs**, one of them by hand.
+`omniagent` is still registered and still 30/30 there, so reverting is one
+line in `omniagent.toml`.
 
 **Tools:** `calculate`, `get_current_time`, `file_info`, `read_file`,
-`list_directory`, `search_text`. **Model:** `omniagent`.
+`list_directory`, `search_text`. **Models:** `omniagent-v2` (demo),
+`omniagent` (previous), both local in Ollama.
 
 ## The demo is ready and re-rehearsed under the new workspace
 
