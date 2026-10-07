@@ -27,7 +27,11 @@ CONFIG_PATH = REPO_ROOT / DEFAULT_CONFIG_NAME
 
 # The fine-tune, whose Modelfile pins ``num_ctx 16384``. The stock 7B defaults
 # to 4096 and truncates from the front, taking the system prompt with it.
-DEMO_MODEL = "omniagent"
+#: Moved to the second fine-tune on 2026-10-07 after ten runs of holdout_eval
+#: over both tags (12/16 against 10/16, zero variance either side) and five
+#: runs of the demo questions on the demo path (25/25). The constant is here so
+#: the demo profile cannot drift off a measured model by accident.
+DEMO_MODEL = "omniagent-v2"
 
 
 def _resolve(profile: str | None) -> tuple[Settings, dict[str, str]]:

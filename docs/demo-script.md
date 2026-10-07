@@ -99,6 +99,14 @@ models pass the demo. One difference, and it is visible on screen:
 | question 3 | picks `file_info` first | picks `read_file`, is refused, recovers |
 | `holdout_eval` (ten runs) | 10/16, honest 0/1, 57–62 steps | **12/16, honest 1/1, 49 steps** |
 
+**Switched on 2026-10-07.** `[profile.demo]` now pins `omniagent-v2`, and the
+switch was verified rather than assumed: `main.py --profile demo
+--print-config` reports `model omniagent-v2` sourced from `profile:demo`, and
+a run with **no `--model` flag** answers all five correctly in 6 tool calls
+with no `data/` path in the trace. That makes **30/30 for v2 on this path**
+over six runs. `omniagent` is still registered and still scores 30/30, so
+reverting is one line in `omniagent.toml`.
+
 v2's extra step is not waste — it is the guardrail working. `read_file` refuses
 `tests/fakes.py` as too long to return in full, the error names `file_info`,
 and v2's next Thought reads "Since read_file cannot show me how many lines a

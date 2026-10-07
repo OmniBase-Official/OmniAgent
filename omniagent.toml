@@ -10,7 +10,17 @@ max_steps = 8
 # The model is pinned here on purpose. Inheriting [defaults] put the demo on
 # the stock 7B, whose own default context is 4096 -- short enough to truncate
 # the system prompt from the front. The fine-tune's Modelfile pins 16384.
-model = "omniagent"
+#
+# Moved to the second fine-tune on 2026-10-07, on measurement rather than on
+# the newer thing being assumed better. Ten runs of holdout_eval over both
+# tags, zero variance in either: 12/16 against 10/16, honesty 1/1 against
+# 0/1, 49 steps every run against 57-62. Then five runs of the five demo
+# questions on this path: 25/25. It costs one extra tool call on question 3,
+# where read_file refuses tests/fakes.py as too long and the agent recovers
+# to file_info -- the guardrail working, and nothing of the file reaches the
+# screen. `omniagent` is still registered and still scores 30/30 here, so
+# reverting is a one-line change.
+model = "omniagent-v2"
 # 8, not 12: every figure in NEXT_CHAT.md was measured at 8, and the demo
 # should not be the one configuration nobody has evaluated. Rehearsing at 12,
 # "What is inside the data directory?" spent all twelve steps and gave up -- a
