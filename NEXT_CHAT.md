@@ -71,7 +71,7 @@ and say which you recommend and why.
 
 # PART 2 — Where the project stands
 
-**583 tests**, mypy strict clean across 36 files, ruff clean. HEAD `9b8936c`
+**596 tests**, mypy strict clean across 37 files, ruff clean. HEAD `801d455`
 plus this file. **holdout_eval is 11/16 on the sealed workspace** (one run).
 Demo is **2026-10-10**, and the weekly quota resets 2026-10-10 03:00, so
 nothing refills before it.
@@ -340,6 +340,62 @@ finish inside the 600 s tool timeout", extrapolating from ~115 s for the
 search-heavy questions are slow; the arithmetic ones are seconds. The
 extrapolation was from the worst case to the average and it was wrong.
 Item (1) below is still worth doing, but it is not a prerequisite.
+
+## 2026-10-07: a dataset collected, and stored where it can be trained from
+
+**Collected:** 104 sessions, 126 questions, **0 failed, 42.5 min**, teacher
+`qwen2.5-coder:7b` (the project's `[defaults]`), into a **fresh** log
+`data/collect-2026-10-07.jsonl` rather than appended to `data/collect.jsonl`.
+Fresh because the workspace changed on 2026-10-06: mixing logs collected under
+different workspaces makes a dataset true of neither, which is the mistake
+`82884ae` fixed for the evaluation reports.
+
+**Exported:** 117 examples from 126 turns. Skipped 5 tool errors and 4
+`agent.loop.repeated_action` as unreconstructible. `validate_dataset` verdict
+**OK**; sidecar fingerprint matches the live prompt
+(`36397f37…`).
+
+| | old (what the shipped model was trained on) | new 2026-10-07 |
+|---|---|---|
+| examples | 109 | **117** |
+| calculate | 74 | 82 |
+| file_info | 18 | 22 |
+| get_current_time | 13 | 15 |
+| list_directory | 13 | 12 |
+| search_text | 7 | 8 |
+| **read_file** | 7 | **3** |
+
+`read_file` coverage more than halved. Likely the five skipped tool errors:
+`read_file` on a file over the character cap returns an error and those turns
+are dropped. Not investigated — worth knowing before training, since it is the
+least-represented tool in the data.
+
+**Leak check on the new dataset, measured rather than assumed.** `holdout`
+appears **4 times**, and all four are `list_directory` observations of
+`tests/` and `scripts/` naming `test_holdout_questions.py` and
+`holdout_eval.py` — **file names, not contents**. `data/session`, `data/s-`,
+`system_prompt of` and `collect-run.log`: **0 each**. So the seal held: no
+trajectory contains an answer read out of a transcript. The names appear
+because `collection_workspace` seals the transcripts directory, not `tests/`
+or `scripts/`, and a listing of those is an ordinary observation.
+
+**Stored:** `G:\OmniAgent\datasets\2026-10-07\`, five files plus
+`MANIFEST.json` and `SHA256SUMS`, **`--verify-only` → `verified`**. G: is a
+removable exFAT volume (`DriveType Removable`, 2 TB) — local hardware, not a
+cloud sync folder, which is what keeps this inside the local-only rule. **If
+G: ever becomes a synced folder, stop:** publishing there would send the
+dataset off the machine. Format and training steps are in
+`docs/dataset-bundles.md`, which travels inside each bundle.
+
+### At risk and not yet handled: the shipped model's own training data
+
+`data/dataset.jsonl` — the 109 examples the running `omniagent` was trained on
+— lives in a gitignored directory with **no backup anywhere**, and it has **no
+provenance sidecar**. `publish_dataset` refuses it by design, and that refusal
+is right: `write_sidecar` records the **current** prompt, so writing one now
+would assert a fingerprint the data was probably not collected under. Backing
+it up needs a label that says provenance is unknown rather than a sidecar that
+claims it is known. Decide before the drive or the directory is next cleaned.
 
 ## Traps already paid for once
 
