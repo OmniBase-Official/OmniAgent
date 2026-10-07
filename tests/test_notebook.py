@@ -170,6 +170,7 @@ def test_the_modelfile_cell_writes_what_ollama_accepts(
     namespace: dict[str, Any] = {
         "gguf_path": tmp_path / "model-f16.gguf",
         "OUTPUT_DIR": tmp_path,
+        "OUTPUT_NAME": "omniagent-test",
         "OLLAMA_NAME": "omniagent",
         "NUM_CTX": 16384,
         "Path": Path,
@@ -177,7 +178,9 @@ def test_the_modelfile_cell_writes_what_ollama_accepts(
     }
 
     exec(cell, namespace)  # noqa: S102 - executing our own notebook cell is the test
-    written = (tmp_path / "Modelfile").read_text(encoding="utf-8")
+    # Named for the run, so a second training does not overwrite the record of
+    # how the first one was registered.
+    written = (tmp_path / "Modelfile-omniagent-test").read_text(encoding="utf-8")
 
     assert written.startswith("FROM ./model-f16.gguf")
     assert "{{ if .System }}" in written
@@ -200,6 +203,7 @@ def test_the_modelfile_cell_registers_the_model(
         {
             "gguf_path": tmp_path / "model-f16.gguf",
             "OUTPUT_DIR": tmp_path,
+            "OUTPUT_NAME": "omniagent-test",
             "OLLAMA_NAME": "omniagent",
             "NUM_CTX": 16384,
             "Path": Path,
@@ -209,6 +213,28 @@ def test_the_modelfile_cell_registers_the_model(
 
     assert len(recorder.calls) == 1
     args, kwargs = recorder.calls[0]
-    assert args == ["ollama", "create", "omniagent", "-f", "Modelfile"]
+    assert args == ["ollama", "create", "omniagent", "-f", "Modelfile-omniagent-test"]
     assert kwargs["cwd"] == tmp_path
     assert kwargs["check"] is True
+
+
+def test_a_run_can_be_named_without_editing_the_notebook(notebook: dict[str, Any]) -> None:
+    """Three days before the demo, a retrain must not land on its model.
+
+    Every path in the notebook derives from OUTPUT_NAME and the demo is pinned
+    to the OLLAMA_NAME tag, so a second run with the defaults overwrites both
+    the shipped files and the registered model. The defaults stay as they are,
+    because this notebook is the record of how that model was built; a run that
+    wants different names sets them in the environment instead.
+    """
+    settings = next(s for s in sources(notebook) if "BASE_MODEL" in s)
+
+    for variable in ("OMNIAGENT_DATASET", "OMNIAGENT_OUTPUT_NAME", "OMNIAGENT_OLLAMA_NAME"):
+        assert variable in settings, f"{variable} cannot be overridden"
+
+
+def test_each_training_run_keeps_its_own_trainer_directory(notebook: dict[str, Any]) -> None:
+    """models/runs/ was one directory for every run, so each overwrote the last."""
+    training = next(s for s in sources(notebook) if "output_dir=" in s)
+
+    assert 'OUTPUT_DIR / "runs" / OUTPUT_NAME' in training
