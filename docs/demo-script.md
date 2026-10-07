@@ -59,7 +59,7 @@ it says any other model, stop: the demo is not running what was measured.
 |---|---|---|---|
 | 1 | What is 144 * 12? | 1728 | 2 |
 | 2 | Now subtract 728 from that. | 1000 | 2 |
-| 3 | How many lines does tests/fakes.py have? | 122 | 2 |
+| 3 | How many lines does tests/fakes.py have? | 122 | **3** — see below |
 | 4 | What is 7 factorial divided by 5 factorial? | 42 | 2 |
 | 5 | What is 2 to the power of 11, minus 48? | 2000 | 2 |
 
@@ -99,12 +99,39 @@ models pass the demo. One difference, and it is visible on screen:
 | question 3 | picks `file_info` first | picks `read_file`, is refused, recovers |
 | `holdout_eval` (ten runs) | 10/16, honest 0/1, 57–62 steps | **12/16, honest 1/1, 49 steps** |
 
+**Question 3 takes three steps on `omniagent-v2`, and that is expected.** It
+is the only question that does not go straight to its answer, so here is
+exactly what the screen shows, so nobody reads it as a fault on the day:
+
+```
+  [step 1]
+  Thought      : I need to find out how many lines the file has.
+  Action       : read_file
+  Observation  : Error: tests/fakes.py is 3,670 characters, too long to return
+                 in full. ... Use file_info for its size, first line and last
+                 line, or search_text to find something inside it.
+
+  [step 2]
+  Thought      : Since read_file cannot show me how many lines a long file has,
+                 I will use file_info instead.
+  Action       : file_info
+  Observation  : tests/fakes.py: 122 lines, 3,670 bytes
+
+  [step 3]
+OmniAgent: tests/fakes.py has 122 lines.
+```
+
+The refusal is the sandbox's read cap, the error message names the tool that
+can answer, and the agent takes it. Identical in all seven runs of this
+question on this path, including by hand. If it is ever worth narrating: this
+is the one moment in the demo where a tool says no and the agent recovers.
+
 **Switched on 2026-10-07.** `[profile.demo]` now pins `omniagent-v2`, and the
 switch was verified rather than assumed: `main.py --profile demo
 --print-config` reports `model omniagent-v2` sourced from `profile:demo`, and
 a run with **no `--model` flag** answers all five correctly in 6 tool calls
-with no `data/` path in the trace. That makes **30/30 for v2 on this path**
-over six runs. `omniagent` is still registered and still scores 30/30, so
+with no `data/` path in the trace. That makes **35/35 for v2 on this path** over
+seven runs -- five scripted, one through the profile, one by hand. `omniagent` is still registered and still scores 30/30, so
 reverting is one line in `omniagent.toml`.
 
 v2's extra step is not waste — it is the guardrail working. `read_file` refuses
