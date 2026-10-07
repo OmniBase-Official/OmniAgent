@@ -71,7 +71,9 @@ and say which you recommend and why.
 
 # PART 2 — Where the project stands
 
-**604 tests**, mypy strict clean across 37 files, ruff clean. HEAD `2561ffb`
+**604 tests**, mypy strict clean across 37 files, ruff clean. HEAD `1343bd1`
+plus this file. Two fine-tunes exist: `omniagent` (rehearsed, demo) and
+`omniagent-v2` (better on one run, not settled).
 plus this file. **holdout_eval is 11/16 on the sealed workspace** (one run).
 Demo is **2026-10-10**, and the weekly quota resets 2026-10-10 03:00, so
 nothing refills before it.
@@ -257,6 +259,11 @@ became 2-3; the data directory was 7-9 and became 3-9.
 
 ## Still open, in the order I would take them
 
+0. **Settle v2 against the shipped model on ten runs.** One run has it at
+   12/16 against 10/16 with honesty and the elliptical follow-up recovered,
+   and the same model moved 11/16 -> 10/16 between two runs, so the gap is
+   about twice the measured noise. ~18 min of clock per pair, almost no quota.
+   Until that lands, the demo stays on `omniagent`.
 1. **`search_text` enumerates `.venv` and `models/`.** It does
    `sorted(start.rglob("*"))`, materialising every path before filtering, so a
    search from `.` costs **25.7 s unsealed and 64.5 s sealed**, and one
@@ -487,7 +494,53 @@ before the demo would have overwritten the model that was rehearsed 25/25.
 
 ### HOLDOUT_EVAL: v2 against the shipped model
 
-<!-- PENDING: both tags running, ~1100 s for the pair. -->
+One run each, same questions, same sealed workspace, output in
+`data/holdout-v2-vs-v1-2026-10-07.txt`.
+
+| | `omniagent` | `omniagent-v2` |
+|---|---|---|
+| correct | 10/16 | **12/16** |
+| tool pick | 5/7 | 5/7 |
+| follow-ups | 5/5 | 5/5 |
+| honest | 0/1 | **1/1** |
+| steps | 58 | **49** |
+| time | 584 s | **503 s** |
+
+**Three questions differ, and they come from three different failure
+families** — which is more informative than the two-point total, because it is
+not one lucky question:
+
+| question | `omniagent` | `omniagent-v2` |
+|---|---|---|
+| what is inside the data directory | "There does not appear to be anything else inside the 'data' directory." | listed it |
+| weather in Bangkok | "not specified, but it is Wednesday, 7 October 2026" — **answering the previous question**, the old drift shape | "There is no tool available to provide the current weather in Bangkok." |
+| And `scripts/build_notebook.py`? | "does not exist in this workspace" — a confident false negative | "tests/fakes.py has 122 lines, while scripts/build_notebook.py has 461 lines" |
+
+So v2 improved on list-and-stop, on honesty, and on the elliptical follow-up,
+in 9 fewer steps and 81 seconds less.
+
+### Why this does not settle it, by this project's own standard
+
+1. **One run.** Three runs have twice produced a conclusion ten reversed; one
+   is weaker than three.
+2. **The instrument's noise is at least ±1 on this axis.** `omniagent` scored
+   **11/16 yesterday and 10/16 today** — same model, same seal, same
+   questions. A two-point gap is about twice the noise observed on a single
+   sample of it.
+3. **`tool pick` fell from 6/7 to 5/7 for both models**, which is more of the
+   same variance.
+4. **One of v2's three wins may be memorisation, not capability.** The
+   data-directory question's expected answer is `collect-run.log`, and that
+   string is in the training data as a `list_directory` observation — 29 times
+   in the old collection, and the new one was collected the same way. v2 was
+   trained on data that contains the answer to that question. The honesty and
+   follow-up wins are not contaminated this way.
+
+**Do not swap the demo to v2 on this.** `omniagent` is what was rehearsed
+25/25 on the demo path, and a model that has been measured once should not
+replace one measured repeatedly, three days out. Ten runs of
+`holdout_eval omniagent omniagent-v2` settles it: ~18 minutes of clock per
+pair, almost no quota.
 
 ## Traps already paid for once
 
