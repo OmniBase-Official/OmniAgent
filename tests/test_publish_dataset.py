@@ -31,11 +31,19 @@ def dataset(tmp_path: Path) -> Path:
     """A two-example dataset with its provenance sidecar beside it."""
     path = tmp_path / "source" / "dataset.jsonl"
     path.parent.mkdir()
-    path.write_text(
-        json.dumps({"messages": [{"role": "user", "content": "hi"}]}) + "\n"
-        + json.dumps({"messages": [{"role": "user", "content": "again"}]}) + "\n",
-        encoding="utf-8",
+    # With a system turn, because an exported dataset always carries one and
+    # write_sidecar now reads the fingerprint out of it rather than stamping
+    # whatever the code renders today.
+    example = json.dumps(
+        {
+            "messages": [
+                {"role": "system", "content": "A PROMPT"},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "Final Answer: hello"},
+            ]
+        }
     )
+    path.write_text(example + "\n" + example + "\n", encoding="utf-8")
     write_sidecar(path)
     return path
 
