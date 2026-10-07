@@ -259,12 +259,15 @@ became 2-3; the data directory was 7-9 and became 3-9.
 
 ## Still open, in the order I would take them
 
-0. **Rehearse v2 on the demo path**, five scripted runs plus one by hand of
-   the five demo questions. Ten runs of `holdout_eval` settled that v2 is
-   12/16 against 10/16 with zero variance either side, but it has never run
-   through `main.py --profile demo`, and that gap has hidden two defects
-   before. ~10 min of clock. This is the only thing that could still change
-   what the demo runs on.
+0. **Decide what the demo runs on — both models now pass both paths.** v2
+   rehearsed 25/25 on the demo path over five runs, so the last gap is closed
+   and the choice is a judgement, not a missing measurement. See the table in
+   `docs/demo-script.md`: v2 wins the instrument (12/16 vs 10/16, honest 1/1
+   vs 0/1, 49 steps vs 57-62, all with zero variance over ten runs) and costs
+   one extra tool call on demo question 3, where it tries `read_file`, is
+   refused, and recovers to `file_info`. Switching means editing
+   `[profile.demo]` in `omniagent.toml`, which `tests/test_shipped_config.py`
+   covers.
 0b. **Retire or rebuild the data-directory question.** Its expectation is a
    fact about `data/`, which is the output directory every run writes into --
    85 files now, and the question flipped from OK to WRONG because of that.

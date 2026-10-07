@@ -88,6 +88,24 @@ hand run is the one that counts most, because the first demo rehearsal
 (`2779d46`, 2026-10-02) found six defects while 463 tests and a 300-second
 evaluation were both passing.
 
+**`omniagent-v2` rehearsed on the same path, five runs: 25/25**, identical
+sentences every run, no `data/` path anywhere, 0.4–0.7 min per run. So both
+models pass the demo. One difference, and it is visible on screen:
+
+| | `omniagent` | `omniagent-v2` |
+|---|---|---|
+| demo path | **30/30** over six runs, one by hand | 25/25 over five scripted runs |
+| tool calls per run | **5** — one per question | **6** |
+| question 3 | picks `file_info` first | picks `read_file`, is refused, recovers |
+| `holdout_eval` (ten runs) | 10/16, honest 0/1, 57–62 steps | **12/16, honest 1/1, 49 steps** |
+
+v2's extra step is not waste — it is the guardrail working. `read_file` refuses
+`tests/fakes.py` as too long to return in full, the error names `file_info`,
+and v2's next Thought reads "Since read_file cannot show me how many lines a
+long file has, I will use file_info instead." Nothing of the file reaches the
+screen; one error line does, then the right answer. On a demo that is
+arguably worth showing. It still means the first instinct is the wrong tool.
+
 Two behaviours worth knowing before standing in front of it:
 
 - **Question 2 recomputes rather than remembering.** Its Thought says it will
