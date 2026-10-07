@@ -71,7 +71,7 @@ and say which you recommend and why.
 
 # PART 2 — Where the project stands
 
-**602 tests**, mypy strict clean across 37 files, ruff clean. HEAD `251a96f`
+**604 tests**, mypy strict clean across 37 files, ruff clean. HEAD `2561ffb`
 plus this file. **holdout_eval is 11/16 on the sealed workspace** (one run).
 Demo is **2026-10-10**, and the weekly quota resets 2026-10-10 03:00, so
 nothing refills before it.
@@ -451,6 +451,44 @@ collected under. The fix was not to label the provenance unknown but to
 **recover it** — the fingerprint from the dataset's own examples, the teacher
 from the old run log. Both are now facts with sources rather than labels.
 
+## 2026-10-07: a second fine-tune, trained without touching the first
+
+Run through the notebook itself (`nbclient`, not a reimplementation), **11
+cells, zero cell errors**. Executed copy in `data/train-run-2026-10-07.ipynb`;
+the tracked notebook stays output-free because `test_the_notebook_ships_no_outputs`
+requires it.
+
+```
+OMNIAGENT_DATASET      = data/dataset-2026-10-07.jsonl   (117 examples)
+OMNIAGENT_OUTPUT_NAME  = omniagent-qwen2.5-1.5b-v2
+OMNIAGENT_OLLAMA_NAME  = omniagent-v2
+HF_HUB_OFFLINE=1       the base model was already cached (3.2 GB of blobs)
+```
+
+| | shipped (2026-10-02) | **v2 (2026-10-07)** |
+|---|---|---|
+| examples | 109 | 117 |
+| epochs | 3 | 3 |
+| final loss | 0.4839 | **0.4586** |
+| gguf | 3.09 GB f16 | 3.09 GB f16 |
+| ollama tag | `omniagent` | `omniagent-v2` |
+
+**The lower loss is not evidence that v2 is better.** The two runs trained on
+different datasets, so their losses are computed over different data and are
+not comparable as a quality measure. What decides it is `holdout_eval` on both
+tags, which is the only instrument here that compares models on the same
+questions.
+
+**`omniagent` is untouched**, and that took four changes to the notebook
+first — see `2561ffb`. Every path derived from `OUTPUT_NAME`, plus the
+`OLLAMA_NAME` tag the demo is pinned to, plus the shared trainer `output_dir`
+and the single `models/Modelfile`. A run with the old defaults three days
+before the demo would have overwritten the model that was rehearsed 25/25.
+
+### HOLDOUT_EVAL: v2 against the shipped model
+
+<!-- PENDING: both tags running, ~1100 s for the pair. -->
+
 ## Traps already paid for once
 
 - **Ollama does not autostart**, but it may already be up — check first:
@@ -484,6 +522,11 @@ from the old run log. Both are now facts with sources rather than labels.
 - **A recursive `grep` from Bash scans `.venv` and blows the 120 s limit.**
   Name the paths, or use the Grep tool.
 - **`git add -A` sweeps in whatever else is in the tree.**
+- **Capturing a notebook's output on Windows needs `PYTHONIOENCODING=utf-8`.**
+  A training cell prints a progress bar, and `cp1252` cannot encode its block
+  characters, so a runner that re-prints cell outputs dies with
+  `UnicodeEncodeError` **after** the notebook has finished successfully. The
+  run was fine; the report of it was not.
 - **Always redirect an eval to `data/`** — it prints and keeps nothing. `data/`
   is gitignored, so those records stay local.
 - **`pip install torch --index-url .../cu126 --upgrade` is a no-op** — use
