@@ -607,6 +607,58 @@ on the demo path, and v2 has never been run on that path at all.**
 against `omniagent-v2` is what would justify a swap, and it costs ~10 minutes
 of clock.
 
+## 2026-10-10: demo shipped, and a second collection to close two gaps
+
+**Demo verified on the day and tagged.** Five runs of the five questions
+through `main.py --profile demo` (no `--model`, so the profile produced it):
+**25/25**, 6 tool calls per run, identical answers, zero `data/` paths. With
+the earlier seven runs that is **60/60 for `omniagent-v2` on the demo path**.
+Tag `demo-2026-10-10` pushed, annotation carrying the figures. The repo stays
+**private** — publishing it was offered and declined.
+
+**A second collection, aimed at the two thin tools.** Bank at
+`questions/bank-2026-10-10.txt` (`2c909d5`), 50 questions in 42 sessions,
+teacher `qwen2.5-coder:7b`, 0 failed, 32.8 min. 36 exported of 50; 14 dropped
+as 7 tool errors, 3 budget-exhausted, 3 repeated-action, 1 format violation.
+
+Merged with the 2026-10-07 collection, which is allowed here because all three
+things the no-pooling rule protects are identical: same teacher, same prompt
+fingerprint `36397f37…`, same workspace rule.
+
+| tool | 117 | +36 | **merged 153** |
+|---|---|---|---|
+| calculate | 82 | — | 82 |
+| **list_directory** | 12 | +18 | **30** |
+| **search_text** | 8 | +20 | **28** |
+| file_info | 22 | — | 22 |
+| get_current_time | 15 | — | 15 |
+| read_file | 3 | — | 3 |
+
+`validate_dataset` verdict **OK**. Published to
+`G:\OmniAgent\datasets6-10-10-merged\` with the two raw logs, the bank
+and the bundle doc; `--verify-only` reports **verified**.
+
+### `read_file` cannot be fixed with more questions
+
+Measured, not assumed: `MAX_INTACT_READ_CHARS` is **2,400**, and only **6 of
+52** tracked files render under it. Of those, `.gitignore` and
+`.github/workflows/ci.yml` are dot-prefixed so the sandbox refuses them, and
+`tests/test_holdout_questions.py` is sealed during evaluation. **Three files
+remain readable** — `tests/__init__.py`, `requirements.txt`,
+`omniagent.toml` — which is exactly the three `read_file` examples in the
+data. More questions would return more errors and `export_dataset` drops those
+turns. Fixing it needs readable material (a small corpus) or a different cap,
+not a bigger bank.
+
+### The teacher was chosen on measurement and on the hardware
+
+`gemma4:12b` timed at **178 s per session against 30 s** for
+`qwen2.5-coder:7b` — six times slower, with no quality difference visible on
+the three-question probe, which was arithmetic-only and could not have shown
+one. And 7.6 GB on a 4 GB RTX 3050 Laptop in an MSI GF63 Thin means hours of
+sustained spill to RAM on a chassis that cannot shed it. Dropped on both
+counts.
+
 ## Traps already paid for once
 
 - **Ollama does not autostart**, but it may already be up — check first:
