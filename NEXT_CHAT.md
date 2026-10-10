@@ -635,7 +635,7 @@ fingerprint `36397f37…`, same workspace rule.
 | read_file | 3 | — | 3 |
 
 `validate_dataset` verdict **OK**. Published to
-`G:\OmniAgent\datasets6-10-10-merged\` with the two raw logs, the bank
+`G:/OmniAgent/datasets/2026-10-10-merged/` with the two raw logs, the bank
 and the bundle doc; `--verify-only` reports **verified**.
 
 ### `read_file` cannot be fixed with more questions
@@ -684,8 +684,14 @@ counts.
   while it runs. Never start two — they fight over the 4 GB card.
 - **Ollama at temperature 0 is not deterministic for long trajectories.** Read
   `steps` as a range. Short clean trajectories are stable to the step.
-- **A quoted bash heredoc still eats `\n` and `\\` in Python source.** Use
-  Write/Edit, or `chr(10)`. Hit in every session so far.
+- **A quoted bash heredoc still eats backslashes in Python source, and the
+  worst case is silent.** `\n` and `\\` are the known ones, but **any `\`
+  followed by a digit becomes an octal escape**: a Windows path written as
+  `G:\datasets\2026-10-10` came out as `datasets` plus U+0082 plus `6-10-10`,
+  with only a `SyntaxWarning: invalid escape sequence` to show for it, and the
+  commit went through. **Use Write/Edit for anything containing a backslash,
+  and write Windows paths with forward slashes in prose.** Hit three times on
+  2026-10-10 alone, after being written down here twice.
 - **`sed` patterns containing `\n` match nothing silently**, so a mutation
   check can "pass" without having mutated anything. Verify the mutation took —
   assert the target string is present before replacing it.
