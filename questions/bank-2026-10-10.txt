@@ -1,0 +1,63 @@
+# Collection bank, 2026-10-10. Targets search_text and list_directory.
+#
+# Why these two: the 117-example dataset of 2026-10-07 has calculate 82,
+# file_info 22, get_current_time 15, list_directory 12, search_text 8,
+# read_file 3. read_file is not addressed here on purpose -- only 3 of 52
+# tracked files render under MAX_INTACT_READ_CHARS (2,400), so a read_file
+# question returns an error and export_dataset drops the turn. More questions
+# cannot fix a shortage of readable material.
+#
+# A plain line is a one-question session. A JSON array is one multi-turn
+# session. Follow-ups are full sentences: an elliptical one ("And sandbox.py?")
+# is measured to pick read_file and copy a number out of the conversation.
+#
+# Nothing here may repeat a held-out question; collect_dataset and both eval
+# scripts raise if it does.
+
+# --- search_text ----------------------------------------------------------
+Where is the word "retry" used in agent.py?
+Which file defines MAX_INTACT_READ_CHARS?
+Find where SYSTEM_PROMPT_TEMPLATE is defined.
+Does the word "sandbox" appear in main.py?
+Where is cap_observation called from?
+Which files mention bitsandbytes?
+Find the string "Final Answer" in tools.py.
+Is there any mention of "pydantic" in config.py?
+Where does the code log agent.turn.start?
+Which file contains the function describe_tools?
+Find where ProvenanceError is raised.
+Does tools.py mention "factorial"?
+Where is MAX_SEARCH_MATCHES set?
+Which files refer to "qlora"?
+Where is HEDGES defined?
+Does observability.py mention "json"?
+Which file sets TRANSCRIPTS_DIRNAME?
+Find every place the word "mutation" appears in the documentation.
+Where is the retry backoff configured?
+Does sandbox.py mention the word "symlink"?
+
+# --- list_directory -------------------------------------------------------
+Which files are in the scripts directory?
+How many Python files are at the top level of this project?
+What is inside the notebooks directory?
+Are there any .toml files at the top level?
+What are the entries in the docs directory?
+Which directories exist at the top level of this project?
+How many files are in the tests directory?
+What is in the models directory?
+Is there a notebooks directory in this project?
+What are the Python files in the scripts directory?
+How many entries does the top level of this project have?
+Which files in the tests directory start with test_?
+Does the project have a requirements file at the top level?
+What is in the questions directory?
+
+# --- multi-turn, full-sentence follow-ups ---------------------------------
+["List the contents of the scripts directory.", "How many of the files in the scripts directory are Python files?"]
+["Where does agent.py use the word \"backoff\"?", "Does the word \"backoff\" also appear in tools.py?"]
+["List the contents of the notebooks directory.", "What is the name of the notebook in the notebooks directory?"]
+["Which file defines MAX_READ_CHARS?", "What value is MAX_READ_CHARS set to in that file?"]
+["List the files in the docs directory.", "Is there a demo script among the files in the docs directory?"]
+["Does main.py mention the word sandbox?", "Does config.py mention the word sandbox as well?"]
+["Which folders are at the top level of this project?", "Which of those top-level folders contains the tests?"]
+["Find the string \"Observation:\" in tools.py.", "Is the string \"Observation:\" also present in agent.py?"]
