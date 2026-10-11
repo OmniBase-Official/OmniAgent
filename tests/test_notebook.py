@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import ast
 import json
+import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -273,3 +275,29 @@ def test_the_notebook_and_its_generator_agree(notebook: dict[str, Any]) -> None:
                 missing.append(f"{why}: {snippet!r} absent from {where}")
 
     assert missing == [], "generator and notebook disagree -- " + "; ".join(missing)
+
+
+# --------------------------------------------------------------------------- #
+# the README's animated demo
+# --------------------------------------------------------------------------- #
+
+
+def test_the_demo_svg_is_safe_and_self_contained() -> None:
+    """It is embedded in a public README, so it fetches nothing and runs nothing.
+
+    GitHub strips <script> from an SVG served through <img>, and an external
+    reference would make the README depend on someone else's host staying up.
+    """
+    svg = (Path(__file__).resolve().parent.parent / "docs" / "demo1.svg").read_text("utf-8")
+
+    ET.fromstring(svg)  # noqa: S314 - our own generated file, and the point is that it parses
+    assert "<script" not in svg.lower()
+    assert re.search(r"xlink:href|<image|<use\b|@import|url\(", svg) is None
+
+
+def test_the_demo_svg_shows_the_measured_answers() -> None:
+    """If the cast drifts from what the agent actually says, the README lies."""
+    svg = (Path(__file__).resolve().parent.parent / "docs" / "demo1.svg").read_text("utf-8")
+
+    for shown in ("144 multiplied by 12 equals 1728", "is 1000", "122 lines", "omniagent-v2"):
+        assert shown in svg, f"{shown!r} missing from the cast"

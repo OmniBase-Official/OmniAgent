@@ -62,6 +62,9 @@ ANSWER_KEY: tuple[str, ...] = (
     "omniagent.egg-info",
     "omniagent.toml",
     "scripts/eval_workspace.py",
+    # Holds the demo questions, which are held-out questions too. Fifth file
+    # written this week to carry the key in; the invariant caught every one.
+    "scripts/make_demo_svg.py",
     "scripts/holdout_eval.py",
     "scripts/session_eval.py",
     "tests/test_collect_dataset.py",

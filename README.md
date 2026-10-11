@@ -6,6 +6,14 @@ No LangChain. No LlamaIndex. No cloud API. The agent talks to a model running on
 your own machine through [Ollama](https://ollama.com), using the `openai` client
 library pointed at `http://localhost:11434/v1`. Nothing leaves localhost.
 
+<img src="docs/demo1.svg" alt="Cloning OmniAgent and asking it five questions: it multiplies, carries the result into a follow-up, then is refused by read_file, told to use file_info, and takes the hint." width="860">
+
+That cast is a snapshot of a real session (`main.py --profile demo`, model
+`omniagent-v2`), not a mock-up — including the moment `read_file` refuses a
+file too long to return, the error names the tool that can answer, and the
+agent switches to it. Regenerate it with
+`python scripts/make_demo_svg.py`.
+
 ---
 
 ## Why it exists

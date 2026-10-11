@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="824" viewBox="0 0 860 824" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13" role="img" aria-label="OmniAgent demo: clone, install, and five measured questions">
+<style>
+text { opacity: 0; white-space: pre }
+@keyframes r { 0% { opacity: 0 } 2.045% { opacity: 1 } 100% { opacity: 1 } }
+.l0 { animation: r 22.0s steps(1) infinite; animation-delay: 0.00s; }
+.l1 { animation: r 22.0s steps(1) infinite; animation-delay: 0.45s; }
+.l2 { animation: r 22.0s steps(1) infinite; animation-delay: 0.90s; }
+.l3 { animation: r 22.0s steps(1) infinite; animation-delay: 1.35s; }
+.l4 { animation: r 22.0s steps(1) infinite; animation-delay: 1.80s; }
+.l5 { animation: r 22.0s steps(1) infinite; animation-delay: 2.25s; }
+.l6 { animation: r 22.0s steps(1) infinite; animation-delay: 2.70s; }
+.l7 { animation: r 22.0s steps(1) infinite; animation-delay: 3.15s; }
+.l8 { animation: r 22.0s steps(1) infinite; animation-delay: 3.60s; }
+.l9 { animation: r 22.0s steps(1) infinite; animation-delay: 4.05s; }
+.l10 { animation: r 22.0s steps(1) infinite; animation-delay: 4.50s; }
+.l11 { animation: r 22.0s steps(1) infinite; animation-delay: 4.95s; }
+.l12 { animation: r 22.0s steps(1) infinite; animation-delay: 5.40s; }
+.l13 { animation: r 22.0s steps(1) infinite; animation-delay: 5.85s; }
+.l14 { animation: r 22.0s steps(1) infinite; animation-delay: 6.30s; }
+.l15 { animation: r 22.0s steps(1) infinite; animation-delay: 6.75s; }
+.l16 { animation: r 22.0s steps(1) infinite; animation-delay: 7.20s; }
+.l17 { animation: r 22.0s steps(1) infinite; animation-delay: 7.65s; }
+.l18 { animation: r 22.0s steps(1) infinite; animation-delay: 8.10s; }
+.l19 { animation: r 22.0s steps(1) infinite; animation-delay: 8.55s; }
+.l20 { animation: r 22.0s steps(1) infinite; animation-delay: 9.00s; }
+.l21 { animation: r 22.0s steps(1) infinite; animation-delay: 9.45s; }
+.l22 { animation: r 22.0s steps(1) infinite; animation-delay: 9.90s; }
+.l23 { animation: r 22.0s steps(1) infinite; animation-delay: 10.35s; }
+.l24 { animation: r 22.0s steps(1) infinite; animation-delay: 10.80s; }
+.l25 { animation: r 22.0s steps(1) infinite; animation-delay: 11.25s; }
+.l26 { animation: r 22.0s steps(1) infinite; animation-delay: 11.70s; }
+.l27 { animation: r 22.0s steps(1) infinite; animation-delay: 12.15s; }
+.l28 { animation: r 22.0s steps(1) infinite; animation-delay: 12.60s; }
+.l29 { animation: r 22.0s steps(1) infinite; animation-delay: 13.05s; }
+.l30 { animation: r 22.0s steps(1) infinite; animation-delay: 13.50s; }
+.l31 { animation: r 22.0s steps(1) infinite; animation-delay: 13.95s; }
+.l32 { animation: r 22.0s steps(1) infinite; animation-delay: 14.40s; }
+.l33 { animation: r 22.0s steps(1) infinite; animation-delay: 14.85s; }
+.l34 { animation: r 22.0s steps(1) infinite; animation-delay: 15.30s; }
+.l35 { animation: r 22.0s steps(1) infinite; animation-delay: 15.75s; }
+.l36 { animation: r 22.0s steps(1) infinite; animation-delay: 16.20s; }
+.l37 { animation: r 22.0s steps(1) infinite; animation-delay: 16.65s; }
+.l38 { animation: r 22.0s steps(1) infinite; animation-delay: 17.10s; }
+.l39 { animation: r 22.0s steps(1) infinite; animation-delay: 17.55s; }
+</style>
+<rect width="860" height="824" rx="8" fill="#0d1117"/>
+<circle cx="20" cy="18" r="5" fill="#ff5f56"/><circle cx="38" cy="18" r="5" fill="#ffbd2e"/><circle cx="56" cy="18" r="5" fill="#27c93f"/>
+<text x="76" y="23" fill="#6e7681" font-size="12" style="opacity:1">OmniAgent — local-only, no framework</text>
+<text class="l0" x="18" y="44" fill="#7ee787">$ git clone https://github.com/mntoyg/OmniAgent.git</text>
+<text class="l1" x="18" y="63" fill="#7ee787">$ cd OmniAgent &amp;&amp; python -m venv .venv &amp;&amp; .venv\Scripts\activate</text>
+<text class="l2" x="18" y="82" fill="#7ee787">$ pip install -e .</text>
+<text class="l3" x="18" y="101" fill="#7ee787">$ ollama pull qwen2.5-coder:7b</text>
+<text class="l4" x="18" y="120" fill="#7ee787">$ python main.py --profile demo</text>
+<text class="l6" x="18" y="158" fill="#6e7681">  local-only ReAct agent  -  no cloud, no framework</text>
+<text class="l7" x="18" y="177" fill="#6e7681">    endpoint : http://localhost:11434/v1</text>
+<text class="l8" x="18" y="196" fill="#6e7681">    model    : omniagent-v2</text>
+<text class="l10" x="18" y="234" fill="#79c0ff">You &gt; What is 144 * 12?</text>
+<text class="l11" x="18" y="253" fill="#6e7681">  [step 1]</text>
+<text class="l12" x="18" y="272" fill="#c9d1d9">  Thought      : To solve this, I need the calculator tool.</text>
+<text class="l13" x="18" y="291" fill="#d2a8ff">  Action       : calculate</text>
+<text class="l14" x="18" y="310" fill="#d2a8ff">  Action Input : 144 * 12</text>
+<text class="l15" x="18" y="329" fill="#a5d6ff">  Observation  : 144 * 12 = 1728</text>
+<text class="l16" x="18" y="348" fill="#ffd866">OmniAgent: 144 multiplied by 12 equals 1728.</text>
+<text class="l18" x="18" y="386" fill="#79c0ff">You &gt; Now subtract 728 from that.</text>
+<text class="l19" x="18" y="405" fill="#6e7681">  [step 1]</text>
+<text class="l20" x="18" y="424" fill="#d2a8ff">  Action       : calculate</text>
+<text class="l21" x="18" y="443" fill="#d2a8ff">  Action Input : 144 * 12 - 728</text>
+<text class="l22" x="18" y="462" fill="#a5d6ff">  Observation  : 144 * 12 - 728 = 1000</text>
+<text class="l23" x="18" y="481" fill="#ffd866">OmniAgent: The result of subtracting 728 from 144 multiplied by 12 is 1000.</text>
+<text class="l25" x="18" y="519" fill="#79c0ff">You &gt; How many lines does tests/fakes.py have?</text>
+<text class="l26" x="18" y="538" fill="#6e7681">  [step 1]</text>
+<text class="l27" x="18" y="557" fill="#d2a8ff">  Action       : read_file</text>
+<text class="l28" x="18" y="576" fill="#ffa198">  Observation  : Error: tests/fakes.py is 3,670 characters, too long to</text>
+<text class="l29" x="18" y="595" fill="#ffa198">                 return in full. Use file_info for its size, first line</text>
+<text class="l30" x="18" y="614" fill="#ffa198">                 and last line, or search_text to find something inside.</text>
+<text class="l31" x="18" y="633" fill="#6e7681">  [step 2]</text>
+<text class="l32" x="18" y="652" fill="#c9d1d9">  Thought      : Since read_file cannot show me how many lines a long file</text>
+<text class="l33" x="18" y="671" fill="#c9d1d9">                 has, I will use file_info instead.</text>
+<text class="l34" x="18" y="690" fill="#d2a8ff">  Action       : file_info</text>
+<text class="l35" x="18" y="709" fill="#a5d6ff">  Observation  : tests/fakes.py: 122 lines, 3,670 bytes</text>
+<text class="l36" x="18" y="728" fill="#ffd866">OmniAgent: tests/fakes.py has 122 lines.</text>
+<text class="l38" x="18" y="766" fill="#6e7681"># the sandbox refused a read it could not answer, named the tool that</text>
+<text class="l39" x="18" y="785" fill="#6e7681"># could, and the agent took the hint. 60/60 over twelve measured runs.</text>
+</svg>
