@@ -71,7 +71,7 @@ and say which you recommend and why.
 
 # PART 2 — Where the project stands
 
-**604 tests**, mypy strict clean across 37 files, ruff clean. HEAD `105224b`
+**612 tests**, mypy strict clean across 39 files, ruff clean. HEAD `351da6b`
 plus this file. Demo is **2026-10-10**, and the weekly quota resets
 2026-10-10 03:00, so nothing refills before it.
 
@@ -658,6 +658,60 @@ the three-question probe, which was arithmetic-only and could not have shown
 one. And 7.6 GB on a 4 GB RTX 3050 Laptop in an MSI GF63 Thin means hours of
 sustained spill to RAM on a chassis that cannot shed it. Dropped on both
 counts.
+
+## 2026-10-11: Task 2 done, and the generator lesson
+
+**The notebook is generated.** `2561ffb` put the run scoping in
+`notebooks/train_omniagent_lora.ipynb`, but `scripts/build_notebook.py` writes
+that file, which Task 2 of the plan said from the start. I ran the generator
+with `--help`, which it does not accept and so simply regenerated, and four
+tests went red at once with the previous day's work inside them. Restored from
+a scratchpad copy (not `git restore` alone), then moved all four changes into
+the generator where they survive regeneration.
+
+`test_the_notebook_and_its_generator_agree` is the guard that was missing: it
+asserts each guarantee's exact text appears in **both** files. Mutation-checked
+both ways -- reverting the generator alone turns it red, reverting the notebook
+alone turns it red plus three others.
+
+**Task 2 complete** (`ee0c0e6`). `scripts/run_dir.py`: `new_run_dir` names a
+run for the second it started in and counts `-2`, `-3` on collision;
+`write_manifest` refuses a manifest missing `base_model`, `examples` or
+`strategy` and names every missing field. The manifest cell writes
+`models/runs/<timestamp>/manifest.json`, copies the adapter beside it, and
+keeps the flat path as a copy so old readers keep working. Seven tests, all
+watched failing against a stub; three mutations each caught by one test.
+
+Two deliberate deviations: the plan's test snippet used a naive datetime
+(ruff DTZ001 refuses it), and the trainer's `output_dir` stays at
+`models/runs/<OUTPUT_NAME>` rather than the timestamp directory, because
+checkpoints and the run record are written at different points in the
+notebook. **Unifying them is worth doing and is not done.**
+
+**Task 3 can now proceed** -- its Consumes block has its producer.
+
+### Public-readiness audit (V1) -- clean except the licence, now fixed
+
+| check | result |
+|---|---|
+| tracked files over 1 MB | **none** -- the two 3 GB GGUFs are untracked, so a clone stays light |
+| `.env` / `.pem` / `.key` / credential filenames ever committed | **none** |
+| secret-shaped strings in the tree | all fixtures that test the secret scanner or prove `api_key` never reaches a log |
+| README for an outsider | 724 lines: Ollama, pull a model, venv, `pip install -e .`, `python main.py` |
+| LICENSE | was **missing** while `pyproject.toml` claimed MIT -- added in `351da6b` |
+
+**The repository is still private.** Making it public is a separate decision,
+not taken. One question remains open for it: `NEXT_CHAT.md` is tracked and is
+an internal record of every failure and retraction. I think it should stay --
+it is the evidence that the figures were measured rather than claimed -- but
+that is the owner's call.
+
+### Next: V2, the video script
+
+The user wants to record a how-to video and then open the repository so others
+can clone it. V1 is done. V2 is the demo order and the exact commands to type
+on screen; `docs/demo-script.md` already holds a measured five-question
+sequence that works on the demo path, 60/60 over twelve runs.
 
 ## Traps already paid for once
 
