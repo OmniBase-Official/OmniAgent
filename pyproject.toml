@@ -70,6 +70,9 @@ files = [
     # Writes the record of every training run, so a wrong type here loses a
     # manifest rather than printing a wrong number.
     "scripts/run_dir.py",
+    # Decides which model the agent loads, so a wrong type here promotes an
+    # unevaluated run.
+    "scripts/promote_model.py",
     "scripts/holdout_eval.py",
     "scripts/session_eval.py",
     "tests",
