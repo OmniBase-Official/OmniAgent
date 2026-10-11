@@ -700,8 +700,12 @@ notebook. **Unifying them is worth doing and is not done.**
 | README for an outsider | 724 lines: Ollama, pull a model, venv, `pip install -e .`, `python main.py` |
 | LICENSE | was **missing** while `pyproject.toml` claimed MIT -- added in `351da6b` |
 
-**The repository is still private.** Making it public is a separate decision,
-not taken. One question remains open for it: `NEXT_CHAT.md` is tracked and is
+**The repository is public** as of 2026-10-11, with `NEXT_CHAT.md` included on
+the owner's decision. `gh repo view` confirms visibility PUBLIC, licence MIT
+detected, clone size **571 KB** — the two 3 GB GGUFs stay untracked as the
+audit predicted. Description and topics set so the landing page says what the
+project is. Not fully reversible: forks and caches are outside anyone's
+control from here. One question remains open for it: `NEXT_CHAT.md` is tracked and is
 an internal record of every failure and retraction. I think it should stay --
 it is the evidence that the figures were measured rather than claimed -- but
 that is the owner's call.
