@@ -730,6 +730,22 @@ workflow was rehearsed locally in a throwaway virtualenv holding only
 ## Coding time
 
 <!--START_SECTION:waka-->
+
+```txt
+From: 17 May 2026 - To: 10 October 2026
+
+Python        46 hrs 11 mins        █████████░░░░░░░░░░░░░░░░   36.35 %
+Markdown      40 hrs 47 mins        ████████░░░░░░░░░░░░░░░░░   32.09 %
+Other         10 hrs 31 mins        ██░░░░░░░░░░░░░░░░░░░░░░░   08.28 %
+Bash          7 hrs 49 mins         █▓░░░░░░░░░░░░░░░░░░░░░░░   06.16 %
+TypeScript    5 hrs 19 mins         █░░░░░░░░░░░░░░░░░░░░░░░░   04.19 %
+YAML          3 hrs 50 mins         ▓░░░░░░░░░░░░░░░░░░░░░░░░   03.02 %
+Text          3 hrs 14 mins         ▓░░░░░░░░░░░░░░░░░░░░░░░░   02.55 %
+TOML          1 hr 50 mins          ▒░░░░░░░░░░░░░░░░░░░░░░░░   01.45 %
+PowerShell    1 hr 15 mins          ▒░░░░░░░░░░░░░░░░░░░░░░░░   00.99 %
+JSON          1 hr 3 mins           ▒░░░░░░░░░░░░░░░░░░░░░░░░   00.83 %
+```
+
 <!--END_SECTION:waka-->
 
 The [WakaTime workflow](.github/workflows/waka-readme.yml) updates this section
