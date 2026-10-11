@@ -62,6 +62,7 @@ of whatever you put in `BASE_MODEL` before you train, not after.
     md("## 1. Settings"),
     code(
         '''
+import os
 from pathlib import Path
 
 # Apache-2.0, and small enough for a 4 GB card in 4-bit. Check the licence if
@@ -69,10 +70,22 @@ from pathlib import Path
 BASE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
 PROJECT = Path.cwd().parent if Path.cwd().name == "notebooks" else Path.cwd()
-DATASET = PROJECT / "data" / "dataset.jsonl"   # written by export_dataset.py
 OUTPUT_DIR = PROJECT / "models"
-OUTPUT_NAME = "omniagent-qwen2.5-1.5b"
-OLLAMA_NAME = "omniagent"
+
+# The defaults are what built the model registered as `omniagent`, kept so this
+# notebook stays the record of how that was made. Every path below derives from
+# OUTPUT_NAME, and the demo is pinned to the OLLAMA_NAME tag, so a run that must
+# not overwrite either sets these in the environment instead of editing the
+# cell:
+#
+#   OMNIAGENT_DATASET=data/dataset-merged-2026-10-10.jsonl
+#   OMNIAGENT_OUTPUT_NAME=omniagent-qwen2.5-1.5b-v3
+#   OMNIAGENT_OLLAMA_NAME=omniagent-v3
+DATASET = Path(os.environ.get("OMNIAGENT_DATASET", "")) or PROJECT / "data" / "dataset.jsonl"
+if not DATASET.is_absolute():
+    DATASET = PROJECT / DATASET
+OUTPUT_NAME = os.environ.get("OMNIAGENT_OUTPUT_NAME", "omniagent-qwen2.5-1.5b")
+OLLAMA_NAME = os.environ.get("OMNIAGENT_OLLAMA_NAME", "omniagent")
 
 # Ollama defaults to a 4096-token context regardless of what the model
 # supports. OmniAgent's system prompt is ~900 tokens before any tool output,
@@ -205,7 +218,7 @@ if FOUR_BIT:
 trainer = SFTTrainer(
     model=model,
     args=SFTConfig(
-        output_dir=str(OUTPUT_DIR / "runs"),
+        output_dir=str(OUTPUT_DIR / "runs" / OUTPUT_NAME),
         num_train_epochs=EPOCHS,
         per_device_train_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRAD_ACCUM,
@@ -406,12 +419,12 @@ PARAMETER num_ctx {NUM_CTX}
 PARAMETER stop "<|im_end|>"
 PARAMETER stop "Observation:"
 """
-modelfile_path = OUTPUT_DIR / "Modelfile"
+modelfile_path = OUTPUT_DIR / f"Modelfile-{OUTPUT_NAME}"
 modelfile_path.write_text(modelfile, encoding="utf-8")
 print(modelfile)
 
 subprocess.run(
-    ["ollama", "create", OLLAMA_NAME, "-f", "Modelfile"],
+    ["ollama", "create", OLLAMA_NAME, "-f", modelfile_path.name],
     cwd=OUTPUT_DIR,
     check=True,
 )
