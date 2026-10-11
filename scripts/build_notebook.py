@@ -391,9 +391,27 @@ manifest = {
     "num_ctx": NUM_CTX,
     "gguf_sha256": sha256_of(gguf_path),
 }
-manifest_path = OUTPUT_DIR / f"{OUTPUT_NAME}-manifest.json"
-manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-print(json.dumps(manifest, indent=2))
+# Each run keeps its own directory, because one manifest file for every run
+# meant each training erased the record of the one before it. run_dir refuses
+# a manifest missing base_model, examples or strategy.
+import shutil
+import sys
+
+sys.path.insert(0, str(PROJECT / "scripts"))
+from run_dir import new_run_dir, write_manifest
+
+run = new_run_dir(OUTPUT_DIR / "runs", datetime.now(timezone.utc))
+manifest_path = write_manifest(run, manifest)
+if adapter_dir.is_dir():
+    shutil.copytree(adapter_dir, run / "adapter", dirs_exist_ok=True)
+
+# The flat path stays, as a copy of the newest, so anything reading it keeps
+# working. The copy carries the run name, so it can say where it came from.
+flat = OUTPUT_DIR / f"{OUTPUT_NAME}-manifest.json"
+flat.write_text(manifest_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+print(manifest_path.read_text(encoding="utf-8"))
+print(f"run directory: {run}")
 '''
     ),
     md(

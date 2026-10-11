@@ -67,6 +67,9 @@ files = [
     # are checked like the agent is. They were outside this list until the
     # scoring they share was pulled into scripts/eval_scoring.py.
     "scripts/eval_scoring.py",
+    # Writes the record of every training run, so a wrong type here loses a
+    # manifest rather than printing a wrong number.
+    "scripts/run_dir.py",
     "scripts/holdout_eval.py",
     "scripts/session_eval.py",
     "tests",
