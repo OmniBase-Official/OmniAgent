@@ -727,6 +727,17 @@ workflow was rehearsed locally in a throwaway virtualenv holding only
 - `openai` and `pydantic` — see [`pyproject.toml`](pyproject.toml)
   (`requirements.txt` is kept as a mirror for `pip install -r`)
 
+## Coding time
+
+<!--START_SECTION:waka-->
+<!--END_SECTION:waka-->
+
+The [WakaTime workflow](.github/workflows/waka-readme.yml) updates this section
+daily at 00:00 UTC (07:00 in Thailand), or when triggered manually from GitHub
+Actions. Add your WakaTime API key as the repository Actions secret
+`WAKATIME_API_KEY` before running it. It displays account-wide, all-time coding
+statistics for up to ten languages.
+
 ## License
 
 MIT.
