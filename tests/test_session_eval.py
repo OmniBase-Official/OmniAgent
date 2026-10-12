@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from itertools import pairwise
 
 from eval_scoring import Score, Verdict
+from eval_workspace import sealed_workspace
 from session_eval import (
     WALK,
     Outcome,
@@ -364,15 +365,16 @@ def test_every_walk_question_checks_something_about_the_answer() -> None:
     assert unchecked == [], unchecked
 
 
-def test_the_expectations_the_walk_depends_on_are_still_in_the_tree() -> None:
-    """Two expectations are facts about this repository, not about the model.
-
-    If agent.py stops containing "agent.budget.exhausted", or data/ stops
-    containing collect-run.log, those questions become unanswerable and the
-    score falls without the agent having changed. This says so out loud rather
-    than letting it look like a regression.
-    """
+def test_the_walk_expectations_match_source_and_a_transcript_listing(tmp_path: Path) -> None:
+    """Check source facts and a reproducible listing, without private run logs."""
     root = Path(__file__).resolve().parent.parent
+    budget = next(question for question in WALK if question.prefer_tool == "search_text")
+    listing = next(question for question in WALK if question.prefer_tool == "list_directory")
 
-    assert "agent.budget.exhausted" in (root / "agent.py").read_text(encoding="utf-8")
-    assert (root / "data" / "collect-run.log").exists()
+    assert budget.expect is not None
+    assert budget.expect in (root / "agent.py").read_text(encoding="utf-8")
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "collect-run.log").write_text("synthetic run log\n", encoding="utf-8")
+    assert listing.expect is not None
+    assert listing.expect in "\n".join(sealed_workspace(tmp_path).list_dir("data"))

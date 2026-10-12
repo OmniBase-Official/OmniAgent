@@ -144,6 +144,16 @@ def sealed() -> Workspace:
     return sealed_workspace(PROJECT)
 
 
+@pytest.fixture
+def transcripts(tmp_path: Path) -> Workspace:
+    """Exercise local transcripts without depending on ignored run artifacts."""
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "collect-run.log").write_text("synthetic run log\n", encoding="utf-8")
+    (data / "holdout-expects.txt").write_text(LEAKED_SENTENCE + "\n", encoding="utf-8")
+    return sealed_workspace(tmp_path)
+
+
 def test_no_reachable_file_holds_a_held_out_question(sealed: Workspace) -> None:
     """The property the whole seal exists for.
 
@@ -212,15 +222,16 @@ def test_the_questions_own_subjects_stay_readable(sealed: Workspace) -> None:
         assert sealed.resolve(subject).is_file(), f"{subject} became unreadable"
 
 
-def test_search_text_no_longer_finds_the_leaked_answer(sealed: Workspace) -> None:
-    """The observed leak, reproduced against the real tree rather than a fixture."""
+def test_search_text_no_longer_finds_the_leaked_answer(transcripts: Workspace) -> None:
+    """Reproduce the observed leak with a synthetic transcript and the real tools."""
     original = get_workspace()
-    set_workspace(Workspace.at(PROJECT))
+    set_workspace(Workspace.at(transcripts.root))
     try:
         leaky = search_text(LEAKED_SENTENCE, "data")
-        assert "holdout" in leaky, "the unsealed tree no longer reproduces the leak"
+        assert "holdout" in leaky
+        assert LEAKED_SENTENCE in leaky
 
-        set_workspace(sealed)
+        set_workspace(transcripts)
         observation = search_text(LEAKED_SENTENCE, "data")
     finally:
         set_workspace(original)
@@ -242,7 +253,7 @@ def test_a_fully_sealed_directory_is_not_named_in_a_listing(sealed: Workspace) -
     assert "agent.py" in observation
 
 
-def test_the_transcripts_directory_is_listable_but_not_readable(sealed: Workspace) -> None:
+def test_the_transcripts_directory_is_listable_but_not_readable(transcripts: Workspace) -> None:
     """What option A bought, asserted on the three tools separately.
 
     Sealing `data/` outright closed the leak and took the question with it.
@@ -250,7 +261,7 @@ def test_the_transcripts_directory_is_listable_but_not_readable(sealed: Workspac
     "What is inside the data directory?", and nothing inside opens.
     """
     original = get_workspace()
-    set_workspace(sealed)
+    set_workspace(transcripts)
     try:
         listing = list_directory("data")
         read = read_file("data/holdout-expects.txt")
@@ -269,13 +280,31 @@ def test_the_transcripts_directory_is_listable_but_not_readable(sealed: Workspac
     # root case by walking it with pruning instead.
 
 
-def test_every_sealed_path_exists(sealed: Workspace) -> None:
-    """A typo in either list would seal nothing and say nothing."""
+def test_every_sealed_source_path_exists(sealed: Workspace) -> None:
+    """Catch misspelled source paths; ignored local artifacts need not exist."""
+    optional_artifacts = {"models", "data", "omniagent.egg-info"}
     missing = [
-        relative for relative in (*ANSWER_KEY, *LISTING_ONLY) if not (PROJECT / relative).exists()
+        relative
+        for relative in (*ANSWER_KEY, *LISTING_ONLY)
+        if relative not in optional_artifacts and not (PROJECT / relative).exists()
     ]
 
     assert missing == [], f"a sealed path is not there: {missing}"
+
+
+@pytest.mark.parametrize("directory", ["models", "data", "omniagent.egg-info"])
+def test_local_artifacts_created_after_sealing_stay_unreadable(
+    tmp_path: Path, directory: str
+) -> None:
+    workspace = sealed_workspace(tmp_path)
+    relative = f"{directory}/transcript.txt"
+    with pytest.raises(SandboxError, match="not readable by the agent"):
+        workspace.resolve(relative)
+
+    (tmp_path / directory).mkdir()
+    (tmp_path / relative).write_text(LEAKED_SENTENCE, encoding="utf-8")
+    with pytest.raises(SandboxError, match="not readable by the agent"):
+        workspace.read_text(relative)
 
 
 def test_a_run_log_can_be_sealed_as_well(tmp_path: Path) -> None:
