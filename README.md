@@ -732,18 +732,18 @@ workflow was rehearsed locally in a throwaway virtualenv holding only
 <!--START_SECTION:waka-->
 
 ```txt
-From: 17 May 2026 - To: 16 October 2026
+From: 17 May 2026 - To: 17 October 2026
 
-Python            56 hrs 36 mins        █████████▒░░░░░░░░░░░░░░░   37.20 %
-Markdown          48 hrs 56 mins        ████████░░░░░░░░░░░░░░░░░   32.17 %
-Other             10 hrs 49 mins        █▓░░░░░░░░░░░░░░░░░░░░░░░   07.11 %
-Bash              8 hrs 35 mins         █▒░░░░░░░░░░░░░░░░░░░░░░░   05.64 %
-TypeScript        7 hrs                 █░░░░░░░░░░░░░░░░░░░░░░░░   04.61 %
-Text              4 hrs 18 mins         ▓░░░░░░░░░░░░░░░░░░░░░░░░   02.83 %
-YAML              3 hrs 53 mins         ▓░░░░░░░░░░░░░░░░░░░░░░░░   02.55 %
-TOML              1 hr 52 mins          ▒░░░░░░░░░░░░░░░░░░░░░░░░   01.23 %
-C++               1 hr 19 mins          ▒░░░░░░░░░░░░░░░░░░░░░░░░   00.87 %
-JSON              1 hr 16 mins          ▒░░░░░░░░░░░░░░░░░░░░░░░░   00.83 %
+Python            57 hrs 32 mins        █████████▒░░░░░░░░░░░░░░░   36.99 %
+Markdown          49 hrs 45 mins        ████████░░░░░░░░░░░░░░░░░   31.98 %
+Other             10 hrs 51 mins        █▓░░░░░░░░░░░░░░░░░░░░░░░   06.98 %
+Bash              8 hrs 46 mins         █▒░░░░░░░░░░░░░░░░░░░░░░░   05.64 %
+TypeScript        8 hrs 14 mins         █▒░░░░░░░░░░░░░░░░░░░░░░░   05.30 %
+Text              4 hrs 19 mins         ▓░░░░░░░░░░░░░░░░░░░░░░░░   02.78 %
+YAML              3 hrs 53 mins         ▓░░░░░░░░░░░░░░░░░░░░░░░░   02.50 %
+TOML              1 hr 52 mins          ▒░░░░░░░░░░░░░░░░░░░░░░░░   01.21 %
+JSON              1 hr 27 mins          ▒░░░░░░░░░░░░░░░░░░░░░░░░   00.94 %
+C++               1 hr 19 mins          ▒░░░░░░░░░░░░░░░░░░░░░░░░   00.85 %
 ```
 
 <!--END_SECTION:waka-->
