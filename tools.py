@@ -546,23 +546,31 @@ def _searchable_files(workspace: Workspace, start: Path) -> list[Path]:
     already pays for: ask the workspace, and prune on its refusal rather than
     on a second copy of ``sandbox.py``'s rules, which would drift.
     """
+    import os  # noqa: PLC0415 - scoped to the filesystem walk
+
     found: list[tuple[Path, Path]] = []
     stack = [start]
     while stack:
+        directory = stack.pop()
         try:
-            children = list(stack.pop().iterdir())
+            with os.scandir(directory) as entries:
+                children = list(entries)
         except OSError:
             continue  # vanished or unreadable, which rglob would also skip
-        for child in children:
+        for entry in children:
+            child = Path(entry.path)
             try:
                 resolved = workspace.resolve(workspace.display(child))
             except SandboxError:
                 continue  # hidden, denied or escaping: prune the whole branch
-            if child.is_dir():
-                if not child.is_symlink():
-                    stack.append(child)  # rglob does not follow one either
-            elif child.is_file() and resolved.stat().st_size <= workspace.max_file_bytes:
-                found.append((child, resolved))
+            try:
+                if entry.is_dir():
+                    if not entry.is_symlink():
+                        stack.append(child)
+                elif entry.is_file() and entry.stat().st_size <= workspace.max_file_bytes:
+                    found.append((child, resolved))
+            except OSError:
+                continue  # vanished or unreadable during the walk
 
     # Sorted on the walked path, not the resolved one, because that is the key
     # the global ``sorted(rglob("*"))`` used. MAX_SEARCH_FILES and
