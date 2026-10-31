@@ -220,3 +220,31 @@ your Stage 2 recommendation and whether you shipped it; the byte-identical
 hashes for both workspaces; Ma-Mg each with what went red and which guard
 caught it; the three gate results with the test count explained; the commit
 hashes; and anything you refuse to claim. -->
+### Execution and capability
+
+- `stat.FILE_ATTRIBUTE_REPARSE_POINT` is present on this Windows Python build. The junction fixture confirmed the reparse flag is set while `DirEntry.is_symlink()` is false. `mklink /J` was denied in the restricted run; the full Stage 2 suite passed when run with local fixture permissions.
+- External directory junction (Ma), external directory symlink (Mb), and external file symlink (Mc) were refused by the baseline and candidate. The Md mutant disabled the reparse-point guard; Ma then exposed the outside marker, as required. Denied path (Me), hidden directory (Mf), and oversized file (Mg) remained refused. Internal file-symlink match behavior and no-recursion into an internal directory symlink were also checked.
+- The original 2026-10-26 workload at `6fbdced` cannot be reconstructed from the committed record. The fixture used here is explicitly synthetic: 4,677 files and 3 directories, chosen to reproduce 4,681 plain / 685 sealed resolve calls and 50 / 7 matches. Its output sizes differ from the historic 7,332 / 732 characters, so its timings do not establish the historical `~0.6 s` gate.
+
+### Three-pass synthetic timing
+
+Each implementation ran plain three times first, then sealed three times, on the same fixture and interpreter. Times are seconds. The runs were sequential, so page-cache warmth and machine load affect cross-implementation timing. Treat the timings as synthetic evidence, not a recreation of the historic measurement.
+
+The Stage 1 timing snapshot contains no links (as confirmed by its fixture manifest); its DirEntry calls match ordinary-file behavior in the Stage 1 commit. Link behavior was checked separately by the security regression cases.
+
+| Version | Plain `resolve` seconds (median) | Plain wall seconds (median) | Sealed `resolve` seconds (median) | Sealed wall seconds (median) | Calls plain / sealed |
+| --- | --- | --- | --- | --- | --- |
+| Baseline | 13.937 / 20.424 / 19.056 (19.056) | 16.201 / 23.758 / 22.160 (22.160) | 2.223 / 2.181 / 2.299 (2.223) | 2.693 / 2.631 / 2.755 (2.693) | 4,681 / 685 |
+| Stage 1 | 14.658 / 15.828 / 15.640 (15.640) | 15.064 / 16.261 / 16.071 (16.071) | 2.466 / 2.433 / 2.219 (2.433) | 2.639 / 2.610 / 2.375 (2.610) | 4,681 / 685 |
+| Stage 2 | 0.003342 / 0.002632 / 0.002304 (0.002632) | 0.432 / 0.432 / 0.426 (0.432) | 0.002107 / 0.001924 / 0.001910 (0.001924) | 0.171 / 0.166 / 0.164 (0.166) | 1 / 1 |
+
+Output was byte-identical across all three versions: plain SHA-256 `1837a09223bf1634172e6c99584aba1348981c155d9d0b166b3e895b607d15b9` (2,287 bytes, 51 lines); sealed SHA-256 `9779fd8f42fa459fe752f9329b96c8def550e0681859324b784c1009aec9553d` (328 bytes, 8 lines). Stage 1's synthetic plain median remains above `~0.6 s`; Stage 2 was implemented on the synthetic evidence, with no claim that the old workload threshold has been reproduced.
+
+### Gates and commits
+
+- Stage 1: Ruff clean; mypy clean across 44 source files; full suite **648 passed**.
+- Stage 2: Ruff clean; mypy clean across 44 source files; full suite **656 passed**. The focused Stage 2 suite had 117 passes; mutation matrix reported 8 passes and 3 deselections.
+- Stage 1 commit: `af56ff3` (`perf(search_text): take what the directory read already knows`).
+- Stage 2 commit: `3f65e86` (`perf(search_text): resolve only what can point elsewhere`).
+
+Both commits are on local branch `codex/brief11-stages-20261031`; it is not merged or pushed. The historical workload and the historical timing gate remain unverified.
