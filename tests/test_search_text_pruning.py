@@ -10,6 +10,9 @@ resolution under a branch that was refused at its root.
 
 from __future__ import annotations
 
+import os
+import stat
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -199,18 +202,198 @@ def test_a_refused_branch_is_not_resolved(
         crowded_dot.resolve(".junk")
 
     asked: list[str] = []
-    original = Workspace.resolve
+    admitted: list[str] = []
+    original_resolve = Workspace.resolve
+    original_admit = Workspace.admit_resolved_child
 
-    def recording(self: Workspace, candidate: str) -> Path:
+    def recording_resolve(self: Workspace, candidate: str) -> Path:
         asked.append(candidate)
-        return original(self, candidate)
+        return original_resolve(self, candidate)
 
-    monkeypatch.setattr(Workspace, "resolve", recording)
+    def recording_admit(self: Workspace, parent: Path, name: str) -> Path:
+        admitted.append(self.display(parent / name))
+        return original_admit(self, parent, name)
+
+    monkeypatch.setattr(Workspace, "resolve", recording_resolve)
+    monkeypatch.setattr(Workspace, "admit_resolved_child", recording_admit)
 
     result = search_text(NEEDLE)
 
     assert "visible.txt" in result
-    beneath = [candidate for candidate in asked if candidate.startswith(".junk/")]
-    assert beneath == [], f"{len(beneath)} paths resolved under a refused branch"
-    assert ".junk" in asked, "the branch itself has to be refused, not skipped by name"
-    assert len(asked) < 10, f"only the admitted tree should be resolved, not {len(asked)} paths"
+    beneath = [candidate for candidate in admitted if candidate.startswith(".junk/")]
+    assert beneath == [], f"{len(beneath)} paths examined under a refused branch"
+    assert ".junk" in admitted, "the branch itself must be refused at its root"
+    assert asked == ["."], f"only the search root should require resolve, got {asked}"
+    assert len(admitted) < 10, (
+        f"only the admitted tree should be checked, got {len(admitted)} entries"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Stage 2: only reparse points pay for a full resolve
+# --------------------------------------------------------------------------- #
+
+
+def _search_from(
+    root: Path,
+    query: str,
+    *,
+    denied: Path | None = None,
+    max_bytes: int = MAX_FILE_BYTES,
+) -> str:
+    old = get_workspace()
+    denied_paths = frozenset({denied.resolve()}) if denied is not None else frozenset()
+    set_workspace(Workspace.at(root, denied_paths=denied_paths, max_file_bytes=max_bytes))
+    try:
+        return search_text(query, ".")
+    finally:
+        set_workspace(old)
+
+
+def test_search_text_prunes_windows_junction_to_external_directory(tmp_path: Path) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows junction test requires mklink /J")
+    root = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    marker = "b11-junction-outside-only"
+    (outside / "junction-secret.txt").write_text(marker, encoding="utf-8")
+    junction = root / "junction"
+    created = subprocess.run(  # noqa: S603 - fixed local mklink command, pytest-owned paths
+        [os.environ["COMSPEC"], "/c", "mklink", "/J", str(junction), str(outside)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert created.returncode == 0, created.stdout + created.stderr
+    try:
+        with os.scandir(root) as entries:
+            entry = next(entries)
+            attrs = entry.stat(follow_symlinks=False).st_file_attributes
+            assert attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            assert entry.is_dir(follow_symlinks=False)
+            assert not entry.is_symlink(), "fixture must be a junction, not a symlink"
+        result = _search_from(root, marker)
+        assert result.startswith("No match")
+    finally:
+        # rmdir removes the junction itself and never traverses its target.
+        removed = subprocess.run(  # noqa: S603 - fixed local rmdir command, pytest-owned path
+            [os.environ["COMSPEC"], "/c", "rmdir", str(junction)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert removed.returncode == 0, removed.stdout + removed.stderr
+
+
+def test_search_text_prunes_external_symlink_directory(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    marker = "b11-symlink-directory-outside-only"
+    (outside / "secret.txt").write_text(marker, encoding="utf-8")
+    link = root / "linked-directory"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink unavailable: {exc}")
+    try:
+        result = _search_from(root, marker)
+        assert result.startswith("No match")
+    finally:
+        link.unlink(missing_ok=True)
+
+
+def test_search_text_prunes_external_symlink_file(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    marker = "b11-symlink-file-outside-only"
+    outside.write_text(marker, encoding="utf-8")
+    link = root / "linked-file.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"file symlink unavailable: {exc}")
+    try:
+        result = _search_from(root, marker)
+        assert result.startswith("No match")
+    finally:
+        link.unlink(missing_ok=True)
+
+
+def test_search_text_still_refuses_a_denied_directory(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    denied = root / "private"
+    denied.mkdir(parents=True)
+    marker = "b11-denied-only"
+    (denied / "secret.txt").write_text(marker, encoding="utf-8")
+    result = _search_from(root, marker, denied=denied)
+    assert result.startswith("No match")
+
+
+def test_search_text_still_prunes_a_hidden_directory(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    hidden = root / ".hidden"
+    hidden.mkdir(parents=True)
+    marker = "b11-hidden-only"
+    (hidden / "secret.txt").write_text(marker, encoding="utf-8")
+    result = _search_from(root, marker)
+    assert result.startswith("No match")
+
+
+def test_search_text_still_excludes_an_oversized_file(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    marker = "b11-oversized-only"
+    (root / "oversized.txt").write_text(marker + "x" * 64, encoding="utf-8")
+    result = _search_from(root, marker, max_bytes=32)
+    assert result.startswith("No match")
+
+
+
+def test_search_text_keeps_an_in_workspace_file_symlink_match(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    marker = "b11-inside-file-link"
+    target = root / "target.txt"
+    target.write_text(marker, encoding="utf-8")
+    link = root / "alias.txt"
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"file symlink unavailable: {exc}")
+    try:
+        result = _search_from(root, marker)
+        assert result == (
+            "2 matches for 'b11-inside-file-link':\n"
+            "target.txt:1: b11-inside-file-link\n"
+            "target.txt:1: b11-inside-file-link"
+        )
+    finally:
+        link.unlink(missing_ok=True)
+
+
+def test_search_text_does_not_recurse_into_an_in_workspace_directory_symlink(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace"
+    target_dir = root / "target-dir"
+    target_dir.mkdir(parents=True)
+    marker = "b11-inside-directory-link"
+    (target_dir / "target.txt").write_text(marker, encoding="utf-8")
+    link = root / "alias-dir"
+    try:
+        link.symlink_to(target_dir, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink unavailable: {exc}")
+    try:
+        result = _search_from(root, marker)
+        assert result == (
+            "1 match for 'b11-inside-directory-link':\n"
+            "target-dir/target.txt:1: b11-inside-directory-link"
+        )
+    finally:
+        link.unlink(missing_ok=True)
