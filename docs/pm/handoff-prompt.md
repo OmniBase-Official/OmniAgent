@@ -117,11 +117,17 @@ brief depends on it. Codex also cannot run a WSL/Linux build.
 - **A test asserting "this is refused" proves nothing if several independent
   guards would refuse it.**
 
-# State as of 2026-10-26, after brief 10
+# State as of 2026-11-02, after brief 12
 
-HEAD `43aba72`. **642 tests**, ruff clean, mypy strict clean over **44** files.
-**Ten briefs done**, in `docs/pm/`. Plan `2026-10-06-train-and-deploy` closed,
-Tasks 1–4.
+HEAD `2390568`. **648 tests**, mypy strict clean over **44** files. `ruff` is
+**red in this checkout** — 2 errors, both in `.brief11-worktree/tools.py`, an
+abandoned worktree inside the repository; `main`'s own code is clean.
+**Eleven briefs issued, twelve written**; brief 11 is executed but **unmerged
+and unpushed**, on local branch `codex/brief11-stages-20261031`. A
+`secure_search.py` line of work exists on two pushed branches with **no brief
+and no Result**. The inventory is
+`docs/pm/audit-2026-11-02-where-the-work-is.md`, re-derived from git rather
+than from any report. Plan `2026-10-06-train-and-deploy` closed, Tasks 1–4.
 
 - **Baseline: `omniagent-v2` scores 13/18 four times and 14/18 six times over
   ten runs** (2026-10-26, HEAD `43aba72`). Tool pick 6/7, follow-up 5/5,
