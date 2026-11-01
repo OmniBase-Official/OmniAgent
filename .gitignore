@@ -47,3 +47,13 @@ omniagent-core/build*/
 # Nothing in this repository produces these; they are ignored so `git add -A`
 # cannot sweep ~1 MB of someone else's scan output into a commit.
 .tmp-omnipatch-*/
+
+# Agent scratch and leftover worktrees that live inside the checkout: pytest
+# basetemps and investigation fixtures, written here because sandboxed
+# sessions cannot use the AppData temp directory. Ignored so that
+# "git status" can gate a measurement, per the rule added after the void run
+# of 2026-10-26, and so that ruff -- which respects .gitignore -- stops
+# reporting an abandoned worktree as this project failing its own gate.
+.scratch/
+.brief11-worktree/
+.codex-worktrees/
