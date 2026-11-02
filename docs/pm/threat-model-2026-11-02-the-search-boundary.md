@@ -147,3 +147,23 @@ the plausible one and it is defended by one check whose only test is mine, run
 by hand, in a scratchpad. It belongs in `tests/` as a permanent fixture, so
 the next person to touch that walk cannot remove the guard and stay green.
 That is a small brief, and it is worth more than either branch.
+
+---
+
+## The owner's ruling — 2026-11-02
+
+**Recommendation accepted. `secure_search.py` is not merged.** The two
+branches stay as they are: `origin/codex/search-text-race-safety-20261101-workspace`
+and `origin/codex/posix-device-race-20261101`. Nothing is deleted and nothing
+is ported.
+
+The cost if this is wrong: attacker class 4 becomes real without us noticing,
+and the window between admitting an entry and reading it stays open. **The
+conditions that would make it wrong are written in criteria 1 and 2 above, and
+they are checkable** — the agent gaining a tool that writes, or the agent
+running anywhere other than one person's machine. Whoever next adds a write
+tool to `tools.py` should read this document before they do.
+
+The engineer-hour goes instead to `docs/pm/brief-13-the-junction-refusal-becomes-a-test.md`:
+attacker class 3 is the plausible one, it is defended by a single check, and
+that check's only test today is a manager running `mklink /J` by hand.

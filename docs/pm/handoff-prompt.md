@@ -117,18 +117,23 @@ brief depends on it. Codex also cannot run a WSL/Linux build.
 - **A test asserting "this is refused" proves nothing if several independent
   guards would refuse it.**
 
-# State as of 2026-11-02, after brief 12
+# State as of 2026-11-02, after brief 11 merged
 
-HEAD `2390568`. **648 tests**, mypy strict clean over **44** files. `ruff` is
-**red in this checkout** — 2 errors, both in `.brief11-worktree/tools.py`, an
-abandoned worktree inside the repository; `main`'s own code is clean.
-**Eleven briefs issued, twelve written**; brief 11 is executed but **unmerged
-and unpushed**, on local branch `codex/brief11-stages-20261031`. A
-`secure_search.py` line of work exists on two pushed branches with **no brief
-and no Result**. The inventory is
-`docs/pm/audit-2026-11-02-where-the-work-is.md`, re-derived from git rather
-than from any report. Plan `2026-10-06-train-and-deploy` closed, Tasks 1–4.
+HEAD `af7daa9`. **656 tests**, ruff clean, mypy strict clean over **44** files,
+tree clean. **Twelve briefs done, brief 13 written and queued.** Brief 11 is
+merged and verified on the real tree; brief 12 landed and verifies. Plan
+`2026-10-06-train-and-deploy` closed, Tasks 1–4.
 
+- **`search_text` from `.` is now 0.52 s plain and 0.45 s sealed**, with
+  `Workspace.resolve` called **once** instead of 4,690 and 688, output
+  byte-identical by hash. Brief 11, verified 2026-11-02.
+- **`secure_search.py` is ruled not merged** — the owner's decision of
+  2026-11-02 on `docs/pm/threat-model-2026-11-02-the-search-boundary.md`. Two
+  branches kept as reference, nothing ported. The conditions that would
+  reverse it are criteria 1 and 2 of that document.
+- **The ten-run baseline is stale and is being re-measured.** Brief 11 changed
+  the walk the agent's `search_text` uses, so 13–14/18 was measured on
+  different code. Do not quote it against anything until the new figure lands.
 - **Baseline: `omniagent-v2` scores 13/18 four times and 14/18 six times over
   ten runs** (2026-10-26, HEAD `43aba72`). Tool pick 6/7, follow-up 5/5,
   honesty 1/1, **54 steps in every run**. ~~11/16, zero variance,
@@ -185,18 +190,25 @@ visible and is item 1 below.
    step count. Unattributed. Five of those six passes carry a wrong number
    (391 where the files differ by 390; one says 513 where `file_info` says
    512), and the instrument records them as `ANSWER OK`.
-3. **`sandbox.resolve()` is what keeps `search_text` above a second** — 4,660
-   calls costing 1.13 s, 74% of what remains. Needs `sandbox.py`, which every
-   brief so far has forbidden.
-4. **`data/holdout-runs.jsonl` records the commit but not whether the tree was
-   clean.** It currently holds one void run pooled with ten good ones. Same
-   failure `session_eval.commit()` was written to prevent, one level deeper.
+3. **The reparse-point guard has no test.** It is the only thing stopping a
+   hostile tree from being walked out of, and its only test today is the
+   manager running `mklink /J` by hand. **Brief 13 is written and queued.**
+4. ~~`sandbox.resolve()` keeps `search_text` above a second~~ — **closed by
+   brief 11**, verified on the real tree: 4,690 calls to one, about 5× faster,
+   byte-identical output. ~~`holdout-runs.jsonl` has no cleanliness field~~ —
+   **closed by brief 12**, whose `--report` drops all 209 existing records and
+   says so.
 5. **`_lines` and `file_info` do not agree by construction** — 2 vs 1 on a bare
    CR and on a Unicode line separator. No current file is affected.
 6. **`NEXT_CHAT.md` is 1,101 lines** and wants splitting. Yours.
-7. **Something external writes `.tmp-omnipatch-*` into the tree** — ~1 MB of
-   Bandit output, gitignored in `34b65f2` but **not identified**. A tool that
-   can write here can write anything here.
+7. **Something external writes into the tree, and it is still not identified.**
+   `.tmp-omnipatch-*` was ~1 MB of another project's pytest basetemps and
+   Bandit output, with this repository's absolute path recorded inside it.
+   Since then: a stray trailing space and a removed final newline in
+   `scripts/smoke_train.py` on 2026-10-27, in a file no brief authorised, now
+   in `stash@{0}`. `.scratch/` holds `op7-*` fixtures from 2026-10-28, so this
+   was investigated while the Claude chair was away and **the result is not in
+   `docs/`.** A tool that can write here can write anything here.
 8. **Two model failures are irreducible without a new fine-tune**: the agent
    asks the calculator to add one to a line count it was just given, and
    resolves a pronoun to the step-two result. The +1 showed up again in brief
