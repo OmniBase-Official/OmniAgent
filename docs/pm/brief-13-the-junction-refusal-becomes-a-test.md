@@ -167,3 +167,70 @@ not; which test file you chose and why; what the new tests add to the suite's
 runtime; Ma and Mb with the hash of tools.py before and after; the three gate
 results with the count explained; the commit hashes; and anything you refuse
 to claim. -->
+
+### Execution record
+
+- The prompt named `af7daa9` as starting HEAD. The actual clean `main` checkout
+  was at `4cc404b3a08a4cb901d2c80ab9a15d011085e41f`, a descendant containing the
+  intervening PM commits. Work proceeded from that actual HEAD without resetting
+  or changing branches. The test commit is based on it.
+- Added `tests/test_link_refusals.py`. A separate file keeps platform-specific
+  link creation and the refusal assertions together. Both cases call the public
+  `tools.search_text` API with `Workspace.at(root)`; neither calls the private
+  walk. The fixture is created by pytest in an external scratch location, never
+  under the repository. The process `TEMP` was pointed there because the
+  default sandbox `AppData` temp location refused pytest's temp-directory
+  creation.
+- On this Windows run, the mandatory junction was created successfully with
+  PowerShell `New-Item -ItemType Junction`; no administrator privilege was
+  missing. The external symlink also built successfully, so no symlink
+  privilege was missing in this run. The Windows junction test has no skip path.
+  On Windows, the symlink test only skips `ERROR_PRIVILEGE_NOT_HELD` (WinError
+  1314), naming `SeCreateSymbolicLinkPrivilege` and Developer Mode in the reason.
+  POSIX was not run here; there the symlink test is unconditional and fails if
+  creation fails.
+- The baseline fixture starts with one ordinary in-workspace file that does
+  not contain the outside marker. It asserts no match and exactly
+  `(1 files searched)`, then positively asserts that `inside/ordinary.txt` is
+  searched. This prevents a broken or empty walk from satisfying the refusal
+  assertion. The same test then performs Mb by writing the outside marker into
+  that inside file: the result must name `inside/ordinary.txt`, never
+  `jump/secret.txt`, and an absent query must still report one searched file.
+- New-test runtime was approximately **0.63 seconds** of test call time on this
+  Windows run: **0.62s** for the junction case and **0.01s** for the symlink
+  case. The focused pytest invocation reported 2 passed in 0.84s. No model run
+  was performed.
+
+### Mutation checks
+
+- `tools.py` SHA256 before mutation: `B7DB4215E40F171591D723502FFA6C306DE41127BDB736DD9D0E476541B51F9F`.
+- **Ma:** Using an external scratch backup, the reparse-point admission condition
+  was temporarily forced off. The committed junction test went red and showed
+  the leak: `jump/secret.txt:1: outside-marker-...`. `tools.py` was restored by
+  copying the saved scratch file back. SHA256 after restoration:
+  `B7DB4215E40F171591D723502FFA6C306DE41127BDB736DD9D0E476541B51F9F`.
+- **Mb:** The committed test writes the same marker into the inside file and
+  verifies its match is attributed to `inside/ordinary.txt`, with no match from
+  the external alias and one file searched. This passed for both link fixtures.
+  `tools.py` SHA256 before and after Mb remained
+  `B7DB4215E40F171591D723502FFA6C306DE41127BDB736DD9D0E476541B51F9F`.
+- No production source was changed or committed; `sandbox.py` and `tools.py`
+  have no remaining diff. `secure_search.py` was not imported or used.
+
+### Gates
+
+- `.venv\Scripts\python.exe -m ruff check .` — passed, `All checks passed!`.
+- `.venv\Scripts\python.exe -m mypy` — passed, `Success: no issues found in 45
+  source files` (baseline was 44 before adding the test module).
+- `.venv\Scripts\python.exe -m pytest` — **658 passed in 29.43s**. The two
+  executed tests are the Windows junction and external-symlink cases; both
+  passed without skips. This is 656 baseline tests plus the two new tests.
+
+### Commits
+
+- Test: `ed8e20bed5301e84a8f01a90501ba31e7a988f46` —
+  `test: a hostile tree cannot walk out of the workspace`.
+- Report: this report commit; its hash is recorded in the delivery summary.
+
+This run verifies the Windows fixtures and gates only; it does not claim a POSIX
+run or broader filesystem/threat-model coverage.
