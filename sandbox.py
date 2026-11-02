@@ -137,6 +137,34 @@ class Workspace:
             raise SandboxError("that file looks like a credential and is not readable")
         return resolved
 
+    def admit_resolved_child(self, parent: Path, name: str) -> Path:
+        """Apply workspace refusals to one child of an admitted directory.
+
+        ``parent`` must already be resolved and inside this workspace, and
+        ``name`` must be a single directory-entry name proven not to be a
+        reparse point by the caller. Under that contract the child's lexical
+        path is its resolved path, so containment does not need another
+        ``Path.resolve()`` call.
+        """
+        if not self._inside(parent):
+            raise SandboxError(
+                f"path is outside the workspace ({self.root}); "
+                "only files under it can be read"
+            )
+        if not name or name in {".", ".."} or Path(name).name != name:
+            raise SandboxError("invalid directory entry name")
+
+        child = parent / name
+        if self._is_denied(child):
+            raise SandboxError("that file is not readable by the agent")
+        if self._is_hidden(child):
+            raise SandboxError(
+                "hidden files and directories (anything starting with '.') are not readable"
+            )
+        if child.name.lower() in DENIED_NAMES or child.suffix.lower() in DENIED_SUFFIXES:
+            raise SandboxError("that file looks like a credential and is not readable")
+        return child
+
     def _inside(self, resolved: Path) -> bool:
         return resolved == self.root or resolved.is_relative_to(self.root)
 

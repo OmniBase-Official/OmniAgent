@@ -536,7 +536,7 @@ def list_directory(path: str = ".") -> str:
     return f"{shown}:\n" + "\n".join(f"  {entry}" for entry in entries)
 
 
-def _searchable_files(workspace: Workspace, start: Path) -> list[Path]:
+def _searchable_files(workspace: Workspace, start: Path) -> list[Path]:  # noqa: PLR0912 - separate guard for each entry type and refusal
     """Files under `start` the workspace admits, pruned branch by branch.
 
     Resolving every path under a hidden directory and discarding it afterwards
@@ -546,23 +546,51 @@ def _searchable_files(workspace: Workspace, start: Path) -> list[Path]:
     already pays for: ask the workspace, and prune on its refusal rather than
     on a second copy of ``sandbox.py``'s rules, which would drift.
     """
+    import os  # noqa: PLC0415 - scoped to the filesystem walk
+    import stat  # noqa: PLC0415 - Windows reparse-point attributes
+
     found: list[tuple[Path, Path]] = []
-    stack = [start]
+    stack = [(start, start)]
     while stack:
+        walked_directory, resolved_directory = stack.pop()
         try:
-            children = list(stack.pop().iterdir())
+            with os.scandir(walked_directory) as entries:
+                children = list(entries)
         except OSError:
-            continue  # vanished or unreadable, which rglob would also skip
-        for child in children:
+            continue
+        for entry in children:
+            child = Path(entry.path)
             try:
-                resolved = workspace.resolve(workspace.display(child))
+                metadata = entry.stat(follow_symlinks=False)
+                if os.name == "nt":
+                    is_reparse_point = bool(
+                        metadata.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                    )
+                else:
+                    is_reparse_point = entry.is_symlink()
+
+                if is_reparse_point:
+                    resolved = workspace.resolve(workspace.display(child))
+                else:
+                    resolved = workspace.admit_resolved_child(resolved_directory, entry.name)
+
+                if entry.is_dir(follow_symlinks=False):
+                    if not entry.is_symlink():
+                        stack.append((child, resolved))
+                else:
+                    is_file = (
+                        entry.is_file()
+                        if is_reparse_point
+                        else entry.is_file(follow_symlinks=False)
+                    )
+                    size = entry.stat().st_size if is_reparse_point else metadata.st_size
+                    if is_file and size <= workspace.max_file_bytes:
+                        found.append((child, resolved))
             except SandboxError:
                 continue  # hidden, denied or escaping: prune the whole branch
-            if child.is_dir():
-                if not child.is_symlink():
-                    stack.append(child)  # rglob does not follow one either
-            elif child.is_file() and resolved.stat().st_size <= workspace.max_file_bytes:
-                found.append((child, resolved))
+            except OSError:
+                continue  # vanished or unreadable during the walk
+
 
     # Sorted on the walked path, not the resolved one, because that is the key
     # the global ``sorted(rglob("*"))`` used. MAX_SEARCH_FILES and
