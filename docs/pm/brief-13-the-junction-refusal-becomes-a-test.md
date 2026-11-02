@@ -234,3 +234,65 @@ to claim. -->
 
 This run verifies the Windows fixtures and gates only; it does not claim a POSIX
 run or broader filesystem/threat-model coverage.
+
+---
+
+## PM verification of brief 13 — 2026-11-02, HEAD `e37fdb6`
+
+**No defects found, and the engineer did two things better than the brief
+asked.** Re-derived rather than read.
+
+| Claim | Re-checked by the manager |
+| --- | --- |
+| three gates | ruff clean · mypy clean over **45** files · **658 passed** |
+| no production change | `git diff 4cc404b..e37fdb6 -- tools.py sandbox.py agent.py scripts/` is **empty** |
+| no skips on this machine | 658 passed, nothing skipped; the symlink fixture builds here |
+| runtime cost | **0.39 s** for both tests — junction 0.38 s, symlink 0.01 s |
+| `tools.py` hash | `b7db4215e40f171591d7` before my mutation and after my restore |
+
+**Ma, run by me against the committed test:** with the reparse-point condition
+forced off in a scratchpad copy, `test_search_prunes_a_windows_junction`
+**failed**, printing the leak itself —
+`1 match ... jump/secret.txt:1: outside-marker-...`. Restored by copying the
+file back, never `git checkout --`; both tests green again.
+
+### Better than the brief asked, twice
+
+- **Mb is built into the committed test rather than left as a one-off
+  mutation.** The test writes the marker into the inside file and asserts the
+  match is attributed to `inside/ordinary.txt:2`, with no match from the
+  alias and one file searched. The brief treated Mb as something to run once;
+  the engineer made it permanent.
+- **The junction fixture fails rather than skips**, with the PowerShell output
+  in the assertion message, and the symlink fixture skips only on
+  `WinError 1314` with the privilege named. That is exactly the line the brief
+  drew, and `pytest.fail` catches every other error instead of skipping past
+  it.
+
+The previous workspace is also restored in a `finally`, so the test cannot
+leak workspace state into the rest of the suite. Nobody asked for that either.
+
+### What Ma revealed that neither the brief nor the Result states
+
+**Only the junction test is load-bearing.** Under Ma the junction test failed
+and **the symlink test passed.** The reason is in the walk: with the
+reparse-point condition gone, every entry takes the cheap path, and
+`entry.is_dir(follow_symlinks=False)` is **False** for a symlink but **True**
+for a junction. So a symlink falls through to the file branch, where
+`entry.is_file(follow_symlinks=False)` is also False, and it is dropped by
+accident. A junction is classified as an ordinary directory and gets walked.
+
+Two consequences, and the second one matters:
+
+1. The brief's insistence that the junction test be **unconditional on
+   Windows** was load-bearing rather than fussy. It is the only test that
+   fails if the guard is deleted.
+2. **By reading the code — not by measurement, and I have no Linux here to
+   measure on — the same deletion would leave a POSIX-only suite green**,
+   because there the classification drops every symlink on its own. The
+   `omniagent-core` gate runs on `ubuntu-24.04`. A reviewer who tested this
+   guard only in CI would conclude it was untested-but-fine.
+
+That is worth an entry in the open list rather than a patch here: the guard's
+Windows case has a test, its POSIX case has no test that would notice its
+removal, and nothing about that is visible from the suite's green.
