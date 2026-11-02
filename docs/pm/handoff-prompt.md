@@ -190,9 +190,26 @@ visible and is item 1 below.
    step count. Unattributed. Five of those six passes carry a wrong number
    (391 where the files differ by 390; one says 513 where `file_info` says
    512), and the instrument records them as `ANSWER OK`.
-3. **The reparse-point guard has no test.** It is the only thing stopping a
-   hostile tree from being walked out of, and its only test today is the
-   manager running `mklink /J` by hand. **Brief 13 is written and queued.**
+3. ~~The reparse-point guard has no test~~ — **closed by brief 13**, verified
+   2026-11-02: 658 passed, 0.39 s, and with the guard removed the committed
+   junction test fails and prints the leak. **But only the junction test is
+   load-bearing.** Under that mutation the symlink test stays green, because
+   `is_dir(follow_symlinks=False)` is False for a symlink and True for a
+   junction, so symlinks are dropped by the classification on their own. By
+   reading the code — not measured, there is no Linux here — **a POSIX-only
+   suite would stay green if the guard were deleted**, and the
+   `omniagent-core` gate runs on `ubuntu-24.04`. The guard's POSIX case has no
+   test that would notice its removal.
+3a. **Two managers and two engineers share one checkout, and it has voided
+   three measurements.** 2026-10-26: an engineer landed two commits three
+   minutes before a run started, so it measured the new question bank instead
+   of the old one. 2026-11-02: brief 13's two commits landed at 07:16:57 and
+   07:19:53 while runs 1 to 3 of ten were in flight, so the set spans two tree
+   states and is void; I stopped the loop rather than spend 25 more minutes on
+   a figure nobody could re-derive. **A new file in the tree is not neutral**
+   — adding one fixture file to `eval-fixture/` moved a question's step count
+   from 3 to 2. The protocol fix is the owner's call and is in the reply of
+   2026-11-02.
 4. ~~`sandbox.resolve()` keeps `search_text` above a second~~ — **closed by
    brief 11**, verified on the real tree: 4,690 calls to one, about 5× faster,
    byte-identical output. ~~`holdout-runs.jsonl` has no cleanliness field~~ —
@@ -234,6 +251,10 @@ The full list is at the end of `NEXT_CHAT.md`. The ones that bite hardest:
   the candidate. Reverse the order and run again.
 - **A brief's figures go stale.** Brief 03 sat three days and its baseline
   moved by 2,068 paths. Re-measure before re-issuing.
+- **Never measure while an engineer is working in the same checkout.** Three
+  measurements have been voided this way. Check `git status` **and** `git log`
+  before a run and again after it, and throw the run away if either moved —
+  and say so to the owner before starting, so engineers can be held.
 - **A single-question probe does not reproduce the evaluation's conditions.**
   The same question took 9 steps asked alone and 6 inside the run. I built a
   whole prediction (P6) on that 9 and it was wrong. A probe answers "does this
