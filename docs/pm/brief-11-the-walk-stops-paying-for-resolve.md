@@ -324,3 +324,20 @@ the re-derivation of it.**
 
 That is the right shape, and it is worth saying plainly: this is the design
 the brief asked for, done more carefully than the brief specified.
+
+### The prediction for the re-measured baseline, written before the run
+
+Brief 11 changed the walk the agent's `search_text` uses, so the ten-run
+baseline of 13–14/18 was measured on different code and has to be taken again.
+Written at `858bc81`, clean tree, before any run:
+
+1. **The score distribution does not move.** 13/18 and 14/18 in roughly the
+   same proportion, with question 19 the only one that varies. The output is
+   byte-identical by hash on both workspaces, so the model sees the same
+   observations; if the score moves, byte-identical output was **not** enough
+   to hold behaviour fixed, and that is a finding worth more than the baseline.
+2. **The step count stays at 54**, identical in every run, for the same reason.
+3. **The wall clock barely moves — I expect 185–215 s.** `search_text` is a
+   small part of a 200 s run and the saving is under three seconds per call.
+   Anyone expecting a 5× faster evaluation out of a 5× faster walk is reading
+   the wrong denominator.
