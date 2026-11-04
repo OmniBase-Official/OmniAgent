@@ -2,6 +2,14 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+# Build artifacts. Ignoring them is necessary and not sufficient: the
+# tests/test_eval_workspace.py invariant walks the tree by the sandbox's
+# admission rules, which prune hidden and denied paths rather than
+# gitignored ones, so a stray build/lib/agent.py still fails it as a second
+# reachable carrier. tests/test_wheel_completeness.py builds from a staged
+# copy outside the checkout so neither directory is created here at all.
+build/
+dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
