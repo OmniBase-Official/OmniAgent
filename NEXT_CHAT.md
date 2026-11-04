@@ -33,8 +33,16 @@ comment, declare which HEAD you took over at, and **never manage a brief you
 executed**. Whichever of the two prompts a session regenerates, it puts its
 name, the date and the HEAD at the top; keep both in step with this block.
 
-The repository is **public**, MIT. `main` is at `43aba72`. **642 tests**, ruff
-clean, mypy strict clean over **44** files. Three gates still:
+**Since 2026-11-03 there is an owner-approved contract and it governs
+everything in this file: `docs/pm/agentic-mvp-contract-2026-11-03.md`.** It
+reframes the project from "evaluate the fine-tune" to "ship a local-first
+repository assistant MVP against frozen security gates", and it says **do not
+use a frozen or legacy cohort as the new baseline** — so the figures below are
+measurements of the old instrument and **none of them is the MVP's baseline**.
+Read the contract, then `docs/pm/handoff-prompt.md`, before anything here.
+
+The repository is **public**, MIT. `main` is at `61dbc62`. **658 tests**, ruff
+clean, mypy strict clean over **45** files. Three gates still:
 `.venv\Scripts\python.exe -m ruff check .`, `-m mypy`, `-m pytest` — full path,
 **never your own `-q`**.
 
@@ -68,11 +76,17 @@ Each brief has a paste-ready twin at `docs/pm/brief-NN-codex-prompt.md` or
 | 08 | `eval-fixture/` built; the replacement question is **10/10 over ten runs** |
 | 09 | both deterministic wrong answers traced to the model's own priors |
 | 10 | no question is scored on nothing — open items 1 and 2 both closed |
+| 11 | the walk stops paying for `resolve()` — 4,690 calls to **1**, ~5× faster, output byte-identical by hash |
+| 12 | a record that refuses to pool — `--report` drops all 209 existing records and says so |
+| 13 | the junction refusal has a test — and only the junction test is load-bearing |
+| 14 | the endpoint cannot leave loopback (contract gate 1) — **in flight** |
+| 15 | one category with a real oracle (contract section 7 step 3) — **in flight** |
 
 Plan `2026-10-06-train-and-deploy` is **closed**, Tasks 1–4.
 
-**Current baseline: `omniagent-v2` scores 13/18 four times and 14/18 six
-times over ten runs, 2026-10-26 at `43aba72`** — 6/7 tool pick, 5/5
+**Superseded as a baseline by the contract, kept as a measurement.
+`omniagent-v2` scored 13/18 four times and 14/18 six times over ten runs,
+2026-10-26 at `43aba72`** — 6/7 tool pick, 5/5
 follow-up, 1/1 honest, 54 steps every run. ~~11/16, zero variance,
 2026-10-24~~ is struck as a *baseline* and not as a measurement: brief 10
 made two questions checkable and replaced a third. It **did** reproduce —
