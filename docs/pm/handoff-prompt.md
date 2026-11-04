@@ -177,13 +177,16 @@ coverage of that tool at all. It does now.
 nothing: 19 questions, 18 checkable. The derailment it was hiding is now
 visible and is item 1 below.
 
-1. **The agent's ability to compare two files is measured by nothing.** The
-   answer axis checks that a filename appears, and every answer names both
-   files, so a reversed answer scores right. Closing it costs more than it is
-   worth by every route examined — forbidding the loser's name fails correct
-   answers, demanding a bare filename destroys the question (3 runs of 3), and
-   phrase matching grades characters. **This is a decision about what the
-   instrument is for, and it is the owner's.**
+1. ~~The agent's ability to compare two files is measured by nothing~~ —
+   **superseded, not fixed.** The answer axis checks that a filename appears
+   and every answer names both files, so a reversed answer scores right; every
+   route to closing it cost more than it was worth. The owner-approved
+   contract of 2026-11-03 replaces the whole instrument: synthetic fixtures, a
+   frozen oracle per task, and "exact expected value derived independently
+   from the fixture" instead of a substring. **A comparison question is
+   designed with an oracle under that contract, not patched under this one.**
+   The option C probe (a closed choice) was never run and is now moot.
+   **Brief 15 freezes the oracle mechanism and the trial record.**
 2. **The derailment is not deterministic and we only just found out.** The
    comparison follow-up answered the question 1 time in 10 on 2026-10-24 and
    **6 times in 10** on 2026-10-26, with an unchanged text and an unchanged

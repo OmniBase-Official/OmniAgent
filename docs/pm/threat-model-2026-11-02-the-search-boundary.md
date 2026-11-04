@@ -167,3 +167,30 @@ tool to `tools.py` should read this document before they do.
 The engineer-hour goes instead to `docs/pm/brief-13-the-junction-refusal-becomes-a-test.md`:
 attacker class 3 is the plausible one, it is defended by a single check, and
 that check's only test today is a manager running `mklink /J` by hand.
+
+---
+
+## The ruling holds, and the contract is what holds it — 2026-11-04
+
+On 2026-11-02 the owner ruled `secure_search.py` not merged. On 2026-11-03 the
+owner approved
+[the agentic MVP contract](agentic-mvp-contract-2026-11-03.md), which says:
+
+> Concurrent untrusted writers are outside the current threat model and
+> **require a new owner decision before the deployment model changes.**
+
+On 2026-11-04 a third variant of `secure_search.py` was found in flight in a
+worktree — 1,069 lines, uncommitted, bundled with a comparison-question test.
+The owner's answer that it was intentional and the contract's exclusion of
+concurrent writers pointed in opposite directions, so the conflict went back to
+the owner rather than being resolved here.
+
+**Ruling: the contract governs.** Attacker class 4 stays out of scope. The
+`secure_search.py` work is **parked, not continued and not deleted** — three
+variants now exist (1,016 and 1,199 lines on the two branches, 1,069 in the
+worktree) and none has a brief or a Result. Reopening it needs the new owner
+decision the contract names, and criteria 1 to 5 above answered in writing.
+
+The comparison-question test it was bundled with is a different subject
+entirely: it is an evaluation question, not a boundary question. See the open
+list.
