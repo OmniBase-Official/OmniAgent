@@ -184,3 +184,30 @@ without writing option A's test anyway, in the middle of a rename.
 - **Whether the move can be made behaviour-free across the evaluation.** The
   `build/` failure above is evidence that it cannot be assumed, and the proof
   is the move's brief to produce, not this document's.
+
+---
+
+## The owner's ruling — 2026-11-04, recorded by the project manager
+
+**Option C accepted.** Ship the missing module now, do the package move after
+brief 14 and the four `agent.py` defects are merged, and use option A's
+wheel-import test as the instrument that proves the move behaviour-free.
+
+What follows from it, in order, with the owner's decisions marked:
+
+1. **Option A is issued now** as
+   `docs/pm/brief-17-the-wheel-ships-what-it-claims.md` — `pyproject.toml`,
+   `.gitignore` and one new test module, colliding with nothing in flight.
+2. **The CI fix is a separate brief and a separate chair**, because the
+   manager found while verifying this ADR that
+   `.github/workflows/ci.yml:37` installs with `-e` and so **cannot see the
+   defect this ADR is about**, that `:24` is `runs-on: ubuntu-latest` so the
+   Windows junction case never runs anywhere, and that the runner is unpinned
+   against brief 06's lesson. Two of those three are security reasons.
+3. **Option B waits** for brief 14 and the defects brief. Its instrument is
+   brief 17's test, unchanged.
+
+Recorded here by the manager because the decision is the owner's and the
+record belongs with the decision. **The architect may restructure this
+document's status fields as it sees fit** — the ruling is the content, not the
+formatting.
