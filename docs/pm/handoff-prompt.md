@@ -117,12 +117,55 @@ brief depends on it. Codex also cannot run a WSL/Linux build.
 - **A test asserting "this is refused" proves nothing if several independent
   guards would refuse it.**
 
-# State as of 2026-11-02, after brief 11 merged
+# State as of 2026-11-04 — read this part first, the project changed shape
 
-HEAD `af7daa9`. **656 tests**, ruff clean, mypy strict clean over **44** files,
-tree clean. **Twelve briefs done, brief 13 written and queued.** Brief 11 is
-merged and verified on the real tree; brief 12 landed and verifies. Plan
-`2026-10-06-train-and-deploy` closed, Tasks 1–4.
+**There is now an owner-approved contract and it governs everything below:
+`docs/pm/agentic-mvp-contract-2026-11-03.md`.** It reframes the project from
+"evaluate the fine-tune" to "ship a local-first repository assistant MVP
+against a frozen contract". Read it before the open list. It freezes the
+runtime contract, the evaluation design and **six security gates**, cites
+`docs/pm/threat-model-2026-11-02-the-search-boundary.md` as the approved
+threat model, and adopts the rule that came out of three voided measurements:
+do not measure while another engineer is writing in the same checkout.
+
+Three consequences that change what the old figures mean:
+
+- **The 19-question bank is not the contract's evaluation.** The contract
+  builds a new one: synthetic fixtures, a frozen oracle per task, 6 categories
+  × 2 variants × 3 repeats, and metrics reported separately.
+- **"Do not use a frozen/legacy cohort as the new baseline."** So 13–14/18
+  stands as a measurement of the old instrument and **may not be quoted as
+  the MVP's baseline**. That is why the re-measure after brief 11 was
+  abandoned at two runs of ten: the eight remaining runs would have produced a
+  figure the contract forbids using.
+- **No cohort, runtime change or probe is authorized** by the contract. Six
+  gates, a frozen threshold and an owner decision come first.
+
+HEAD `0935fdf` on `main`, pushed. **658 tests**, ruff clean, mypy strict clean
+over **45** files, tree clean. **Thirteen briefs done; 14 and 15 issued
+2026-11-04 and in flight.** Plan `2026-10-06-train-and-deploy` closed,
+Tasks 1–4.
+
+- **Both engineers are working right now.** Brief 14 (security engineer, gate
+  1, endpoint validation) holds `agent.py`, `config.py`,
+  `tests/test_config.py`, `tests/test_endpoint_policy.py`,
+  `tests/test_local_only.py`. Brief 15 (fullstack engineer, the oracle and the
+  trial record on one category) holds a new fixture directory, a new
+  `scripts/` module, a new test module and `tests/test_eval_workspace.py`.
+  **Both branch from `main` at `ec7787a` into their own worktrees and commit
+  to their own branches. The manager merges.**
+- **Four defects the contract names and the briefs deliberately do not fix**,
+  each needing its own brief: `agent.py:36` defaults the model to
+  `qwen2.5:7b` while `omniagent.toml:4` says `qwen2.5-coder:7b`; the client is
+  built with `max_retries=0` while the agent's own default is 2; `verbose`
+  defaults to `True` and prints the reasoning trace; and `agent.py:493` and
+  `:869` print the full `base_url`, which the contract forbids. All four
+  verified by me on 2026-11-04, not taken from the contract.
+- **`secure_search.py` is parked** — three variants exist (1,016 and 1,199
+  lines on two branches, 1,069 uncommitted in a worktree) and **none has a
+  brief or a Result**. The contract puts concurrent writers out of scope and
+  requires a new owner decision to reopen. Ruling recorded 2026-11-04 in the
+  threat model.
 
 - **`search_text` from `.` is now 0.52 s plain and 0.45 s sealed**, with
   `Workspace.resolve` called **once** instead of 4,690 and 688, output
@@ -131,9 +174,13 @@ merged and verified on the real tree; brief 12 landed and verifies. Plan
   2026-11-02 on `docs/pm/threat-model-2026-11-02-the-search-boundary.md`. Two
   branches kept as reference, nothing ported. The conditions that would
   reverse it are criteria 1 and 2 of that document.
-- **The ten-run baseline is stale and is being re-measured.** Brief 11 changed
-  the walk the agent's `search_text` uses, so 13–14/18 was measured on
-  different code. Do not quote it against anything until the new figure lands.
+- **The re-measure after brief 11 was abandoned at 2 runs of 10, on purpose.**
+  Both completed runs (14/18 and 13/18, 54 steps, 181–189 s, clean tree at
+  `f37044d`) put **all 19 questions inside the previous ten-run range on both
+  marks and steps**, which is what they were for: the prediction written
+  before them said byte-identical `search_text` output would hold behaviour
+  fixed, and it did. The other eight were dropped because the contract forbids
+  using a legacy cohort as the MVP baseline.
 - **Baseline: `omniagent-v2` scores 13/18 four times and 14/18 six times over
   ten runs** (2026-10-26, HEAD `43aba72`). Tool pick 6/7, follow-up 5/5,
   honesty 1/1, **54 steps in every run**. ~~11/16, zero variance,
