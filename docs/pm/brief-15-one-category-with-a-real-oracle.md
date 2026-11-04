@@ -1,6 +1,8 @@
 # Brief 15 — one category, with a real oracle
 
-**For the fullstack engineer.** Static throughout. **No model run, and no test
+**For the AI/ML engineer.** Reassigned 2026-11-04: this was written for the
+fullstack engineer before the AI/ML chair existed, and it is section 7 step 3
+of the contract, which is that chair's. Static throughout. **No model run, and no test
 in this brief may contact a model server** — use an injected fake client, the
 way `tests/test_session_eval.py` already does.
 
@@ -34,6 +36,9 @@ instead of answers. Getting this one right is what makes the other five
 cheap; getting it wrong is what the last three months were.
 
 ## What is measured, 2026-11-04, on `ec7787a` (`main`)
+
+**Still current at `87a1297`:** 658 passed, mypy clean over 45 files, ruff
+clean. Branch from `87a1297`, not from `ec7787a`.
 
 - Gates: ruff clean, mypy clean over **45** files, **658 passed**.
 - The old bank lives at `scripts/holdout_eval.py:78`, 19 questions, 18
@@ -171,7 +176,7 @@ of them; if the count moves for a reason that is not yours, say so.
 
 ## Where to work
 
-**Branch from `main` at `ec7787a`, your own worktree, your own branch — never
+**Branch from `main` at `87a1297`, your own worktree, your own branch — never
 `main` itself.** The contract's run rules forbid two writers in one checkout
 and three measurements have been voided by it. The manager merges.
 

@@ -110,8 +110,16 @@ Hand nobody a file another chair is in. As of `59a1bf9`:
 
 - **brief 14, SE** — `agent.py`, `config.py`, `tests/test_config.py`,
   `tests/test_endpoint_policy.py`, `tests/test_local_only.py`.
-- **brief 15, fullstack** — a new fixture directory, a new `scripts/`
-  module, a new test module, `tests/test_eval_workspace.py`.
+- **brief 15, AI/ML** — a new fixture directory, a new `scripts/` module, a
+  new test module, `tests/test_eval_workspace.py`. **Reassigned from the
+  fullstack engineer on 2026-11-04, unstarted**, because it is section 7 step
+  3 of the contract.
+- **brief 17, fullstack** — `pyproject.toml`, `.gitignore`, one new test
+  module. Option A of ADR-0002, issued 2026-11-04.
+- **unassigned** — the CI brief: `ci.yml` installs with `-e` so it cannot see
+  the broken wheel, runs only `ubuntu-latest` so the junction test never runs,
+  and does not pin the runner. Two of the three reasons are security ones, so
+  it belongs to SE behind briefs 14 and 16.
 - **brief 16, SE** — **queued behind 14**, needs `agent.py` and `config.py`.
   Do not issue it until 14 is merged.
 - **parked** — `secure_search.py`, three variants, no brief, no Result.

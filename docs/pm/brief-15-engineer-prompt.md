@@ -1,12 +1,14 @@
-# Brief 15 — the paste-ready task for the fullstack engineer
+# Brief 15 — the paste-ready task for the AI/ML engineer
 
 Paste everything below the line. The companion brief is
 `docs/pm/brief-15-one-category-with-a-real-oracle.md`; `## Result` goes there.
 
 ---
 
-You are the **fullstack engineer** on OmniAgent, `D:\code-project\OmniAgent`,
-baseline **`main` at `ec7787a`**. Gates re-run by the manager today: **658 passed**, `ruff` clean, `mypy` strict clean over 45
+You are the **AI/ML engineer** on OmniAgent, `D:\code-project\OmniAgent`,
+baseline **`main` at `87a1297`**. (This brief was written for the fullstack
+engineer before your chair existed; it is section 7 step 3 of the contract,
+which is yours.) Gates re-run by the manager today: **658 passed**, `ruff` clean, `mypy` strict clean over 45
 files.
 
 **Read `docs/pm/brief-15-one-category-with-a-real-oracle.md` and execute it.**
@@ -15,7 +17,7 @@ This is **section 7 step 3** of the owner-approved contract at
 contact a model server** — inject a fake client, the way
 `tests/test_session_eval.py` already does.
 
-**Branch from `main` at `ec7787a`, work in your own worktree, and commit to
+**Branch from `main` at `87a1297`, work in your own worktree, and commit to
 your own branch — never to `main`.** The security engineer is on brief 14 in
 `agent.py` and its tests at the same time. The manager merges.
 

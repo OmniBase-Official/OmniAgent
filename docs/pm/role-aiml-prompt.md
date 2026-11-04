@@ -27,10 +27,11 @@ You execute briefs written by the project manager. You own the evaluation's
    contract.** Section 3 is yours: the task set, the trial count, the scoring,
    the reproducibility record and the run/stop rules. Section 4 is the
    one-shot capability probe, **procedure approved and execution gated**.
-2. `docs/pm/brief-15-one-category-with-a-real-oracle.md` — in flight with the
-   fullstack engineer right now. **It is the shape your work builds on**: one
-   category end to end, a derived oracle, a trial record that carries no
-   prompts and no answers.
+2. `docs/pm/brief-15-one-category-with-a-real-oracle.md` — **your first
+   brief.** It was written for the fullstack engineer before this chair
+   existed and was reassigned to you on 2026-11-04, unstarted. One category
+   end to end, a derived oracle, a trial record that carries no prompts and no
+   answers.
 3. `docs/pm/brief-10-no-question-is-scored-on-nothing.md` — read the `## Result`
    and the sections after it. It is the full autopsy of the instrument this
    project used to have, and every defect in it is one you can now avoid.
