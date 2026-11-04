@@ -33,7 +33,7 @@ the defect that killed the old instrument: a substring that grades characters
 instead of answers. Getting this one right is what makes the other five
 cheap; getting it wrong is what the last three months were.
 
-## What is measured, 2026-11-04, on `d0e1aaa`
+## What is measured, 2026-11-04, on `ec7787a` (`main`)
 
 - Gates: ruff clean, mypy clean over **45** files, **658 passed**.
 - The old bank lives at `scripts/holdout_eval.py:78`, 19 questions, 18
@@ -171,10 +171,9 @@ of them; if the count moves for a reason that is not yours, say so.
 
 ## Where to work
 
-**Your own worktree, your own branch.** Not `main`, not
-`codex/agentic-mvp-contract-20261103`. The contract's run rules forbid two
-writers in one checkout and three measurements have been voided by it. The
-manager merges.
+**Branch from `main` at `ec7787a`, your own worktree, your own branch — never
+`main` itself.** The contract's run rules forbid two writers in one checkout
+and three measurements have been voided by it. The manager merges.
 
 ## The split
 

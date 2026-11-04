@@ -8,7 +8,7 @@ This is **gate 1** of the owner-approved contract
 and evidence that no request can route to a non-loopback host or proxy." The
 contract is frozen on this; what is missing is the code and the evidence.
 
-## What is measured, 2026-11-04, on `159af29`
+## What is measured, 2026-11-04, on `ec7787a` (`main`)
 
 The contract's claims about the source are **correct, and I checked them
 rather than taking them**:
@@ -25,7 +25,7 @@ And one the contract states as policy that the source currently breaks:
 **`agent.py:493` and `agent.py:869` put `self.config.base_url` into error text
 the user sees.** The contract says "Do not log the full endpoint URL."
 
-Gates on `159af29`: ruff clean, mypy clean over **45** files, **658 passed**.
+Gates on `ec7787a`: ruff clean, mypy clean over **45** files, **658 passed**.
 
 ## Goal
 
@@ -132,9 +132,9 @@ The contract's run rules say: "Do not measure while another engineer is
 writing in the same checkout; use a pinned snapshot/worktree and recheck its
 identity after the run." Three measurements have been voided by exactly that.
 
-**Work in your own worktree and commit to your own branch.** Do not commit to
-`main`, and do not commit to `codex/agentic-mvp-contract-20261103`, which is
-where this brief and the contract live. The manager merges.
+**Branch from `main` at `ec7787a`, work in your own worktree, and commit to
+your own branch — never to `main`.** The contract and this brief are on `main`
+as of 2026-11-04. The manager merges.
 
 ## The split
 

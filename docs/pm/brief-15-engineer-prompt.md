@@ -6,8 +6,7 @@ Paste everything below the line. The companion brief is
 ---
 
 You are the **fullstack engineer** on OmniAgent, `D:\code-project\OmniAgent`,
-baseline `d0e1aaa` on `codex/agentic-mvp-contract-20261103`. Gates re-run by
-the manager today: **658 passed**, `ruff` clean, `mypy` strict clean over 45
+baseline **`main` at `ec7787a`**. Gates re-run by the manager today: **658 passed**, `ruff` clean, `mypy` strict clean over 45
 files.
 
 **Read `docs/pm/brief-15-one-category-with-a-real-oracle.md` and execute it.**
@@ -16,8 +15,8 @@ This is **section 7 step 3** of the owner-approved contract at
 contact a model server** — inject a fake client, the way
 `tests/test_session_eval.py` already does.
 
-**Work in your own worktree and commit to your own branch.** Not `main`, not
-`codex/agentic-mvp-contract-20261103`. The security engineer is on brief 14 in
+**Branch from `main` at `ec7787a`, work in your own worktree, and commit to
+your own branch — never to `main`.** The security engineer is on brief 14 in
 `agent.py` and its tests at the same time. The manager merges.
 
 ## Why one category and not thirty-six trials

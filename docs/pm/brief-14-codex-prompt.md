@@ -7,8 +7,7 @@ there.
 ---
 
 You are the **security engineer** on OmniAgent, `D:\code-project\OmniAgent`,
-baseline `159af29` on `codex/agentic-mvp-contract-20261103`. Gates re-run by
-the manager today: **658 passed**, `ruff` clean, `mypy` strict clean over 45
+baseline **`main` at `ec7787a`**. Gates re-run by the manager today: **658 passed**, `ruff` clean, `mypy` strict clean over 45
 files.
 
 **Read `docs/pm/brief-14-the-endpoint-cannot-leave-loopback.md` and execute
@@ -16,10 +15,11 @@ it.** This is **gate 1** of the owner-approved contract at
 `docs/pm/agentic-mvp-contract-2026-11-03.md`, section 5. **No model run is
 needed, and no test in this brief may open a socket.**
 
-**Work in your own worktree and commit to your own branch.** Not `main`, and
-not `codex/agentic-mvp-contract-20261103` where the contract and this brief
-live. The contract's own run rules forbid two writers in one checkout, and
-three measurements have already been voided by it. The manager merges.
+**Branch from `main` at `ec7787a`, work in your own worktree, and commit to
+your own branch — never to `main`.** The contract and this brief are on `main`
+as of 2026-11-04. The contract's own run rules forbid two writers in one
+checkout, and three measurements have already been voided by it. The manager
+merges.
 
 ## What is already measured
 
