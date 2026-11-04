@@ -69,26 +69,52 @@ splitting it is still open and is yours**.
 6. **Retractions.** When a claim turns out unsupported, retract it in the
    commit message as well as in chat.
 
-# The roles
+# The roles — six chairs as of 2026-11-04
 
-- **project manager and solution system architect** — you, and a **second
-  manager, Codex**, when you cannot hold the chair: started from
-  `docs/pm/pm2-codex-prompt.md`. **Only one of you issues briefs at a time**,
-  and a session never manages a brief it executed.
-- **fullstack engineer** — a second Claude session. Free right now. It goes
-  out with your weekly budget, so a Codex manager usually has no fullstack
-  engineer available.
-- **SWE** and **security engineer** — both Codex, one session. Free right now.
-  Security for a security boundary: a gate, a sandbox rule, a fingerprint, a
-  refusal. SWE for everything else, evaluation and measurement work included.
+| Chair | Where it runs | Prompt | Owns |
+| --- | --- | --- | --- |
+| **project manager** — you | Claude | `docs/pm/handoff-prompt.md` | priority, the briefs, verification by re-running, both budgets, the handoff |
+| **second manager** | Codex | `docs/pm/pm2-codex-prompt.md` | the manager's chair when you cannot hold it. **Only one of you issues briefs at a time**, and a session never manages a brief it executed |
+| **solution architect (SAE)** | Claude | `docs/pm/role-sae-prompt.md` | the shape of the system, the threat model, ADRs under `docs/architecture/`, contract amendments proposed and never self-approved |
+| **security engineer (SE)** | Claude | `docs/pm/role-se-prompt.md` | the contract's six security gates, the sandbox boundary, refusals and their mutations |
+| **AI/ML engineer** | Claude | `docs/pm/role-aiml-prompt.md` | the contract's section 3 — task set, oracle, trial record, scoring — and the runs |
+| **fullstack engineer** | Claude | pasted per brief | everything else that is code |
+| **SWE** | Codex | pasted per brief | everything else that is not security and not AI/ML |
 
-**Codex cannot run model evaluations.** Its sandbox returns `WinError 10013` on
-`localhost`, confirmed twice on 2026-10-24 with Ollama answering for the
-manager. Split any brief that needs a model run **before issuing it**: the
-engineer designs and does the static checks, you do the measurement half.
+**The architect half has left this chair.** From 2026-11-04 you are project
+manager only: you sequence and verify, the architect says what the shape
+should be, the owner decides. When the two of you disagree about whether
+something is a design question, **the architect's prompt wins and you defer.**
 
-**Ask whether an engineer can run what the verification needs** before the
-brief depends on it. Codex also cannot run a WSL/Linux build.
+**Security is no longer Codex's.** It moved to the SE chair, so Codex is SWE
+only. AI/ML work, which nobody held and was falling to the fullstack engineer
+by default, is the AI/ML chair's.
+
+## What each chair can and cannot run
+
+- **Claude chairs can reach `localhost`**, so SE and AI/ML briefs may include
+  a live check that a Codex brief would have had to split off to you.
+- **Codex cannot run model evaluations** — `WinError 10013` on `localhost`,
+  confirmed twice on 2026-10-24 with Ollama answering for the manager — and
+  **cannot run a WSL/Linux build.** Split any Codex brief that needs either
+  **before issuing it**.
+- **Never two model runs at once.** The card is 4 GB. More chairs that can
+  reach the model means measurement is now a scheduling problem: **a chair
+  asks you before it measures**, and you say who has the card.
+- **Ask whether a chair can run what the verification needs** before the brief
+  depends on it. Brief 05 assumed a WSL build and brief 07 assumed Ollama.
+
+## Who holds which files right now
+
+Hand nobody a file another chair is in. As of `59a1bf9`:
+
+- **brief 14, SE** — `agent.py`, `config.py`, `tests/test_config.py`,
+  `tests/test_endpoint_policy.py`, `tests/test_local_only.py`.
+- **brief 15, fullstack** — a new fixture directory, a new `scripts/`
+  module, a new test module, `tests/test_eval_workspace.py`.
+- **brief 16, SE** — **queued behind 14**, needs `agent.py` and `config.py`.
+  Do not issue it until 14 is merged.
+- **parked** — `secure_search.py`, three variants, no brief, no Result.
 
 # Standards you enforce and must not relax
 
