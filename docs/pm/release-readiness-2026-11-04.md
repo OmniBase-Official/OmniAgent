@@ -192,3 +192,106 @@ is a refactor.
 The second way: **doing Block D1 before 14 and B land.** A nine-module rename
 during someone else's work in `agent.py` is the worst merge this repository
 could arrange for itself.
+
+---
+
+# PM verification and the state of the three new chairs — 2026-11-04, `f1f711d`
+
+## Only one of the three chairs has delivered
+
+| Chair | Delivered |
+| --- | --- |
+| **solution architect** | `sae/architecture-record-20261104`, **merged to `main` at `f1f711d`** after verification. 855 lines across six files, **all under `docs/architecture/`, no production code.** It stayed in its lane exactly |
+| **security engineer** | **nothing committed.** No branch, no worktree. Brief 14 has produced no commit |
+| **AI/ML engineer** | **nothing committed.** No branch, no worktree |
+
+Briefs 14, 15 and 16 have between them produced **zero commits**. That is not
+a complaint, it is the state: the queue is written and nothing is moving
+through it yet.
+
+## The architect's findings, re-derived rather than read
+
+**Every one reproduces, and the central one is worse than a style problem.**
+
+| Claim | My result |
+| --- | --- |
+| the wheel ships 8 modules, the repo has 9 | **confirmed** — the built wheel contains `agent, config, export_dataset, main, observability, sandbox, tools, validate_dataset`. `dataset_provenance.py` is missing |
+| `export_dataset.py:32` imports the missing one | **confirmed** — `from dataset_provenance import write_sidecar` |
+| the installed artifact therefore breaks | **confirmed by causing it.** Unpacked the wheel outside the checkout, project root off `sys.path`, imported `export_dataset` under `-I`, and got **`ModuleNotFoundError: No module named 'dataset_provenance'`** |
+| building in the checkout leaves `build/` and breaks the invariant | **confirmed** — `test_the_budget_expectation_is_not_unique_to_its_subject` failed on `build/lib/agent.py` and `build/lib/export_dataset.py`. I removed `build/` and the suite returned to **658 passed** |
+| the module list lives in three places | **confirmed** — `pyproject.toml:46` `py-modules`, `:55` mypy `files`, `:166` ruff `known-first-party` |
+| 20 of 30 test modules, 8 of 11 scripts | **confirmed exactly** |
+| 63 import lines | **not reproduced.** I measure **48** counting only the nine root modules, and **79** if sibling `scripts/` modules count too. 63 is neither. The conclusion is unaffected — a package move rewrites roughly fifty import lines across 28 files — but **nobody should quote 63 until the definition is stated** |
+
+**ADR-0002 is correctly marked Proposed and says it governs nothing until
+approved.** Its options A to D are the owner's to choose, and its
+recommendation — C, ship the missing module now and do the package move after
+brief 14 and block B, with A's wheel-import test as the instrument that proves
+B behaviour-free — is the right shape. **That recommendation is the decision in
+front of you.**
+
+## Three things I found while verifying, that make the defect worse
+
+1. **CI is the reason this could not be seen, and the line is nameable.**
+   `.github/workflows/ci.yml:37` installs with `-e`. An **editable** install
+   puts the checkout on `sys.path`, so `dataset_provenance` resolves and the
+   broken wheel passes. **The gate that was supposed to catch this is the
+   thing hiding it.**
+2. **CI never runs the test that holds the sandbox boundary.** `ci.yml:24` is
+   `runs-on: ubuntu-latest`, so the Windows junction case is skipped by its
+   `skipif`, and the only path-boundary test CI exercises is the symlink one —
+   **which brief 13 proved stays green when the guard is deleted.** CI's green
+   says nothing at all about the reparse-point guard.
+3. **The runner is unpinned.** Brief 06 pinned `ubuntu-24.04` for `core.yml`
+   precisely so a gate could not move under us, and that lesson never reached
+   `main`'s own workflow.
+
+# What makes this a project rather than a notebook
+
+You asked what stops this reading as vibe coding. **The code is not the
+problem** — 658 tests, ruff clean, mypy strict over 45 files, invariants that
+assert properties rather than lists, a search walk five times faster with
+byte-identical output. What reads as a notebook is everything around the code,
+and all of it is measurable:
+
+| Measured today | Why it reads as a notebook |
+| --- | --- |
+| **the artifact is broken and nothing tests the artifact** | a project tests what it ships; this one tests the checkout it was written in |
+| **`version = "0.1.0"`, one tag in the whole history** | sixteen briefs landed and the version never moved. There is no way to say "the one with the fast walk" |
+| **no `CHANGELOG.md`** | the history lives in commit messages and PM briefs. A user cannot see what changed between two states |
+| **no `CONTRIBUTING.md`, no `SECURITY.md`, no `py.typed`** | **the project's standards live in the PM's prompts, not in the repository.** Ten runs not three, mutation checks, the no-`-q` trap, never two model runs at once — a stranger cannot find any of it, and CI enforces none of it |
+| **`NEXT_CHAT.md`, 1,101 lines, at the repository root** | the front door is a working journal, half of it struck through |
+| **`docs/` is 40 files, 19 of them PM briefs and reports** | process outweighs product. There is no user-facing documentation tree |
+| **7 `codex/*` branches, 284 MB of in-tree scratch and worktrees** | nothing is pruned, and `git status` noise is how three measurements were voided |
+| **the numbers came from a model nobody can obtain** | `README.md:227` says pull the base model; every figure was measured on `omniagent-v2` |
+
+## The shortest path from here, in order
+
+1. **Decide ADR-0002.** My recommendation is the architect's: **C**. It is the
+   only option whose first step collides with nothing in flight and whose test
+   becomes the instrument for the second step.
+2. **Option A as one brief, now** — `pyproject.toml`, `.gitignore`, and a test
+   that **builds a wheel outside the checkout and imports every module in
+   it**. That test is the one thing on this list that converts "we think it
+   ships" into "we know it ships". **Fullstack engineer**; ask first if it is
+   offered to Codex, whose sandbox has not been shown to permit a subprocess
+   build.
+3. **Fix CI so it can see what A fixes**: install the built wheel rather than
+   `-e` in at least one job, pin the runner, and add a Windows job — without
+   which the sandbox's load-bearing test never runs anywhere. **Security
+   engineer**, because two of the three reasons are security ones.
+4. **Briefs 14, then 16, then the package move (B).** The order is forced by
+   `agent.py`. **Security engineer**, then **fullstack engineer**.
+5. **Governance as one small brief, not a ceremony**: `CHANGELOG.md` starting
+   today, `CONTRIBUTING.md` stating the gates and the mutation rule where a
+   stranger can read them, `SECURITY.md` saying what `sandbox.py` is and is
+   not, and a version that moves when something lands. **Fullstack engineer.**
+6. **The model question** — **yours**, not an engineer's, because it is a
+   licence and publishing decision.
+7. **The journal leaves the front door.** `NEXT_CHAT.md` split and moved under
+   `docs/pm/`, with the README pointing at user documentation instead.
+   **Mine.**
+
+**What I would not do yet:** the cohort, the probe, or anything in the
+contract's section 3 beyond brief 15. None of it is authorized, and none of it
+changes whether a stranger can install this.
