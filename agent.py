@@ -15,16 +15,19 @@ The loop is deliberately small and readable:
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
 import re
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable
-from typing import Any, cast
+from typing import Any, Final, cast
+from urllib.parse import urlsplit
 
+import httpx
 from openai import APIConnectionError, APIStatusError, OpenAI
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import observability as obs
 from tools import NO_ARG_INPUTS, TOOLS, describe_tools, run_tool, tool_names
@@ -248,6 +251,165 @@ def _assistant(content: str) -> ChatCompletionMessageParam:
     return {"role": "assistant", "content": content}
 
 
+# --------------------------------------------------------------------------- #
+# the endpoint policy -- gate 1 of the agentic MVP contract
+# --------------------------------------------------------------------------- #
+
+#: What an error message says in place of the endpoint. The contract forbids
+#: printing the URL, and both failure sites use this so they cannot drift apart.
+ENDPOINT_DESCRIPTION: Final = "the configured local endpoint"
+
+#: Plain HTTP only. There is no certificate that validates for ``localhost``, so
+#: ``https`` here would mean either a self-signed chain or verification turned
+#: off -- a new trust surface for a hop that never leaves the machine.
+_ALLOWED_SCHEME: Final = "http"
+
+_LOOPBACK_NAME: Final = "localhost"
+
+_POLICY_PREFIX: Final = "base_url must name the local loopback endpoint:"
+
+
+class EndpointPolicyError(ValueError):
+    """The configured endpoint is not the local loopback endpoint.
+
+    A ``ValueError`` on purpose: a pydantic field validator turns one into a
+    ``ValidationError``, and ``config.resolve`` reports that with the layer the
+    value came from, so the user is told which file or variable to fix.
+    """
+
+
+def _host_refusal(host: str) -> str | None:
+    """Why *host* is not loopback, or ``None`` if it is.
+
+    One function for two callers -- the configuration validator and the
+    transport -- because a host rule that exists twice is a host rule that will
+    disagree with itself.
+    """
+    if host == _LOOPBACK_NAME:
+        return None
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return f"the host is {host!r}, which is neither {_LOOPBACK_NAME!r} nor a loopback address"
+
+    if address.is_unspecified:
+        # 0.0.0.0 and :: are bind addresses: they say "every interface this
+        # machine has", which is what a server listens on, not what a client
+        # connects to. Where they do connect at all, the destination is decided
+        # by the operating system rather than by this configuration.
+        return f"{host!r} is a bind address, not a destination"
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        # ``::ffff:127.0.0.1`` really is loopback -- Python says is_loopback is
+        # True -- and it would reach the same server. It is refused anyway: the
+        # contract names two literals, and every extra spelling of the same
+        # destination is one more near-miss for a reader or a later string
+        # comparison to get wrong. The cost is that a user who writes it is told
+        # to write 127.0.0.1 instead.
+        return f"{host!r} is IPv4-mapped loopback; write the IPv4 literal instead"
+    if not address.is_loopback:
+        return f"{host!r} is not a loopback address"
+    return None
+
+
+def validate_loopback_url(url: str) -> str:
+    """Return *url* unchanged if it is the local loopback endpoint; raise if not.
+
+    Checked where the value is configured, not where it is used. A config object
+    that holds a foreign endpoint until something tries it will eventually be
+    used by a path that forgot to look, and the contract's claim is that no
+    request *can* route off loopback.
+
+    The message never repeats the URL. ``http://user:pw@localhost`` would
+    otherwise copy a credential into an error string; the host and the reason
+    are all a user needs in order to fix it.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError as exc:
+        raise EndpointPolicyError(f"{_POLICY_PREFIX} it cannot be parsed as a URL") from exc
+
+    if parts.scheme != _ALLOWED_SCHEME:
+        raise EndpointPolicyError(
+            f"{_POLICY_PREFIX} the scheme must be {_ALLOWED_SCHEME!r}, not {parts.scheme!r}"
+        )
+    if parts.username is not None or parts.password is not None:
+        raise EndpointPolicyError(f"{_POLICY_PREFIX} it carries user information")
+    if parts.query:
+        raise EndpointPolicyError(f"{_POLICY_PREFIX} it carries a query string")
+    if parts.fragment:
+        raise EndpointPolicyError(f"{_POLICY_PREFIX} it carries a fragment")
+    try:
+        _ = parts.port
+    except ValueError as exc:
+        raise EndpointPolicyError(f"{_POLICY_PREFIX} its port is not a number") from exc
+
+    host = parts.hostname
+    if not host:
+        raise EndpointPolicyError(f"{_POLICY_PREFIX} it names no host")
+    refusal = _host_refusal(host)
+    if refusal is not None:
+        raise EndpointPolicyError(f"{_POLICY_PREFIX} {refusal}")
+    return url
+
+
+class LoopbackOnlyTransport(httpx.BaseTransport):
+    """The last thing a request passes through before a socket is opened.
+
+    The configuration validator refuses a foreign endpoint, but a redirect hop
+    is a URL the configuration never saw. Every request -- first hop or later --
+    is re-checked here, so "no request can leave loopback" does not depend on
+    remembering to validate at each call site.
+    """
+
+    def __init__(self, inner: httpx.BaseTransport) -> None:
+        self._inner = inner
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.scheme != _ALLOWED_SCHEME:
+            raise EndpointPolicyError(
+                f"refused before connecting: the scheme must be "
+                f"{_ALLOWED_SCHEME!r}, not {request.url.scheme!r}"
+            )
+        refusal = _host_refusal(request.url.host)
+        if refusal is not None:
+            raise EndpointPolicyError(f"refused before connecting: {refusal}")
+        return self._inner.handle_request(request)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def build_local_http_client(
+    timeout: float, transport: httpx.BaseTransport | None = None
+) -> httpx.Client:
+    """An HTTP client that cannot be proxied and cannot be redirected off host.
+
+    Two guards, and it is worth recording which one does the work. httpx reads
+    ``HTTP_PROXY``/``HTTPS_PROXY``/``ALL_PROXY`` only when it builds its own
+    transport -- ``allow_env_proxies = trust_env and transport is None``,
+    ``httpx/_client.py:685`` -- so passing the policy transport below is what
+    keeps an environment proxy from mounting ahead of it. Measured: with the
+    three variables set and the transport dropped, httpx mounts three proxy
+    patterns and the endpoint routes through one of them; with the transport
+    passed it mounts none, even when ``trust_env`` is true.
+
+    ``trust_env=False`` is therefore the second, independent guard rather than
+    the first: it keeps ``.netrc`` and the SSL environment out as well, and it
+    is what would still refuse a proxy if this function ever stopped passing a
+    transport.
+
+    :param transport: the inner transport. Only tests pass one; production
+        leaves it out and gets the real one.
+    """
+    inner = transport if transport is not None else httpx.HTTPTransport()
+    return httpx.Client(
+        timeout=timeout,
+        follow_redirects=False,
+        trust_env=False,
+        transport=LoopbackOnlyTransport(inner),
+    )
+
+
 class AgentConfig(BaseModel):
     """Runtime configuration for a single agent instance."""
 
@@ -297,6 +459,32 @@ class AgentConfig(BaseModel):
             "measures about 1,400 tokens, so 600 keeps one observation a minority "
             "voice. The window is not the binding constraint -- share of prompt is."
         ),
+    )
+
+    @field_validator("base_url")
+    @classmethod
+    def _base_url_is_loopback(cls, value: str) -> str:
+        """Refuse a non-loopback endpoint here, where the value is set."""
+        return validate_loopback_url(value)
+
+
+def build_openai_client(
+    config: AgentConfig, transport: httpx.BaseTransport | None = None
+) -> OpenAI:
+    """The client the agent talks to the model with.
+
+    Four things are decided here and nowhere else: the endpoint (already
+    validated by :class:`AgentConfig`), no SDK-level retries, no proxy, and no
+    redirect off host.
+
+    :param transport: the inner transport. Only tests pass one.
+    """
+    return OpenAI(
+        base_url=config.base_url,
+        api_key=config.api_key,
+        timeout=config.timeout,
+        max_retries=0,
+        http_client=build_local_http_client(config.timeout, transport=transport),
     )
 
 
@@ -436,12 +624,7 @@ class ReActAgent:
         """
         self.config = config or AgentConfig()
         self._print = printer
-        self.client = client or OpenAI(
-            base_url=self.config.base_url,
-            api_key=self.config.api_key,
-            timeout=self.config.timeout,
-            max_retries=0,
-        )
+        self.client = client or build_openai_client(self.config)
         self.system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             tools=describe_tools(), tool_names=tool_names()
         )
@@ -490,7 +673,7 @@ class ReActAgent:
                 exc_info=True,
             )
             raise AgentError(
-                f"Cannot reach a local model server at {self.config.base_url}. "
+                f"Cannot reach a local model server at {ENDPOINT_DESCRIPTION}. "
                 "Is Ollama running? Start it with 'ollama serve'."
             ) from exc
         except APIStatusError as exc:
@@ -866,7 +1049,7 @@ class ReActAgent:
                 exc_info=True,
             )
             raise AgentError(
-                f"Lost the connection to {self.config.base_url} after {attempt} "
+                f"Lost the connection to {ENDPOINT_DESCRIPTION} after {attempt} "
                 f"attempt{'s' if attempt > 1 else ''}. Is Ollama still running?"
             ) from exc
 

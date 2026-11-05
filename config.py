@@ -30,9 +30,15 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from agent import DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL, AgentConfig
+from agent import (
+    DEFAULT_API_KEY,
+    DEFAULT_BASE_URL,
+    DEFAULT_MODEL,
+    AgentConfig,
+    validate_loopback_url,
+)
 
 #: Looked for in the working directory when --config is not given.
 DEFAULT_CONFIG_NAME: Final = "omniagent.toml"
@@ -68,6 +74,19 @@ class Settings(BaseModel):
     log_level: str = Field(default="INFO")
     log_console: bool = Field(default=False)
     verbose: bool = Field(default=True)
+
+    @field_validator("base_url")
+    @classmethod
+    def _base_url_is_loopback(cls, value: str) -> str:
+        """Refuse a non-loopback endpoint in the layer the user supplies it in.
+
+        ``AgentConfig`` validates it as well, but that happens in
+        :meth:`agent_config`, which is called after ``resolve`` has returned.
+        Validating here means a bad endpoint in the TOML, an environment
+        variable or a flag is reported with the layer it came from, before any
+        of it reaches an agent.
+        """
+        return validate_loopback_url(value)
 
     def agent_config(self) -> AgentConfig:
         """The subset the agent itself cares about."""
