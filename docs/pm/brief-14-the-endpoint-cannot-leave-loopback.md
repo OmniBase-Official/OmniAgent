@@ -10,6 +10,10 @@ contract is frozen on this; what is missing is the code and the evidence.
 
 ## What is measured, 2026-11-04, on `ec7787a` (`main`)
 
+**Re-confirmed 2026-11-05 at `320d411`.** Everything between the two commits
+is documents only; no source file changed, so every figure below still holds
+exactly. **Branch from `320d411`.**
+
 The contract's claims about the source are **correct, and I checked them
 rather than taking them**:
 
@@ -132,7 +136,7 @@ The contract's run rules say: "Do not measure while another engineer is
 writing in the same checkout; use a pinned snapshot/worktree and recheck its
 identity after the run." Three measurements have been voided by exactly that.
 
-**Branch from `main` at `ec7787a`, work in your own worktree, and commit to
+**Branch from `main` at `320d411`, work in your own worktree, and commit to
 your own branch — never to `main`.** The contract and this brief are on `main`
 as of 2026-11-04. The manager merges.
 
