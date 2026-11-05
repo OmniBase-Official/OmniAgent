@@ -1,5 +1,9 @@
 # Brief 14 — the paste-ready task for the security engineer
 
+*Renamed from `brief-14-codex-prompt.md` on 2026-11-05. Security moved off
+Codex to its own chair on `ae5cd95`, and the old filename made the chair that
+now holds security filter this file out as somebody else's. Two days.*
+
 Paste everything below the line. The companion brief is
 `docs/pm/brief-14-the-endpoint-cannot-leave-loopback.md`; `## Result` goes
 there.

@@ -79,8 +79,9 @@ Thai to me, English in the repository.
 
 ```
 Your brief is docs/pm/brief-14-the-endpoint-cannot-leave-loopback.md. Read it
-and execute it. The paste-ready version is docs/pm/brief-14-codex-prompt.md --
-the filename says codex and the chair is now yours; ignore the name. Read
+and execute it. The paste-ready version is docs/pm/brief-14-se-prompt.md.
+(It was called brief-14-codex-prompt.md until 2026-11-05; the name is why
+this brief sat unread for two days.) Read
 docs/pm/role-se-prompt.md first if you have not.
 
 The problem: gate 1 of the contract. agent.py:34 defaults to a loopback

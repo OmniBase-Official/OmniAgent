@@ -31,8 +31,13 @@ and stop rather than redesigning it quietly.
    classes, two defended. **Read the five acceptance criteria before you
    propose any hardening**; they are what a change to the search boundary has
    to answer.
-3. Your brief, named by the manager. `## Result` goes at the bottom of it,
-   committed.
+3. **Your brief.** The manager names it when it hands you the chair. **If no
+   brief was named, do not assume there is none** — read the newest
+   `docs/pm/assignments-*.md`, which lists every chair's current assignment,
+   and then `docs/pm/brief-*.md` by *what is written at the top of the file*,
+   never by the filename. A brief addressed to you can be sitting in a file
+   named for the chair that used to hold your work; that cost two days on
+   2026-11-04. `## Result` goes at the bottom of your brief, committed.
 4. `git log --oneline -20`.
 
 ## What is already true, so you do not rediscover it

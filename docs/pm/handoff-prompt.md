@@ -346,7 +346,7 @@ The full list is at the end of `NEXT_CHAT.md`. The ones that bite hardest:
 - **The measurement record pools runs by commit, which a dirty tree defeats.**
   Confirm the tree is clean before a run, not only the commit.
 
-# Check this before issuing any brief — five defects of mine, three caught by engineers
+# Check this before issuing any brief — six defects of mine, four caught by engineers
 
 1. **The mutation table must not require a file the forbidden list forbids.**
    Briefs 04, 05 and 08 each did.
@@ -359,6 +359,17 @@ The full list is at the end of `NEXT_CHAT.md`. The ones that bite hardest:
    reachable by design.
 4. **The commit block must name the report file.**
 5. **Ask whether the engineer can run what the verification needs.**
+6. **A brief's filename must name the chair that holds it, and a role prompt
+   must point at the assignment.** Brief 14 was addressed "for the security
+   engineer" inside a file called `brief-14-codex-prompt.md`, written while
+   security still belonged to Codex. When the SE chair opened, its role prompt
+   said only "your brief, named by the manager" and named nothing; the chair
+   searched `docs/pm/`, filtered that file out as somebody else's by its name,
+   and reported no brief. `assignments-2026-11-04.md`, which says to ignore
+   the name, landed **33 minutes after that session started**. **Two days of
+   silence, and the chair was right both times.** Renamed on 2026-11-05 and
+   the role prompt now says to read the newest `assignments-*.md` and to go by
+   what is written at the top of a brief, never by its filename.
 
 Open with: `Daily Progress: NN% — <what just landed>`, the two budget figures,
 and your proposed brief.
