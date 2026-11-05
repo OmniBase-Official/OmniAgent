@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from eval_scoring import Question
 from eval_workspace import ANSWER_KEY, LISTING_ONLY, sealed_workspace
+from grounding_cohort import SEALED_FROM_TRIALS, TASKS, accepted_answer
 from holdout_eval import SEARCH_MARKER, SEARCH_SUBJECT, SESSIONS_UNDER_TEST
 from session_eval import WALK
 
@@ -351,3 +352,113 @@ def test_a_run_log_can_be_sealed_as_well(tmp_path: Path) -> None:
 
     with pytest.raises(SandboxError, match="not readable by the agent"):
         workspace.resolve("data/session-runs.jsonl")
+
+
+# --------------------------------------------------------------------------- #
+# the invariant, extended over the evidence-grounding fixture
+# --------------------------------------------------------------------------- #
+#
+# The questions above are the old bank's, sealed through ANSWER_KEY. The
+# evidence-grounding category seals two further paths -- the module holding its
+# task texts and the test module exercising them -- through
+# ``sealed_workspace``'s own ``also_deny`` hatch, because ANSWER_KEY lives in
+# the one file three briefs have had to route around.
+#
+# ``SEALED_FROM_TRIALS`` is imported rather than restated here, so what a trial
+# seals and what this test checks cannot drift apart. If they could, a green
+# test would say nothing about the run.
+
+
+@pytest.fixture
+def grounding_sealed() -> Workspace:
+    """Exactly the workspace a grounding trial runs against."""
+    return sealed_workspace(PROJECT, also_deny=SEALED_FROM_TRIALS)
+
+
+def test_each_grounding_answer_has_exactly_one_reachable_carrier(
+    grounding_sealed: Workspace,
+) -> None:
+    """Mb's test. The answer may only be readable from the ledger it is about.
+
+    Not "no reachable file holds it": the fixture is the subject, so its own
+    ledger must hold it -- that is what makes the answer derivable from
+    evidence rather than guessable. What must not exist is a *second* carrier.
+    The seal has moved a leak instead of closing it once before, and this is
+    the shape of check that caught it.
+    """
+    carriers: dict[str, list[str]] = {}
+    for task in TASKS:
+        expected = accepted_answer(task)
+        found = sorted(
+            grounding_sealed.display(path)
+            for path in reachable_files(grounding_sealed)
+            if expected in path.read_text("utf-8", errors="ignore")
+        )
+        carriers[task.task_id] = found
+
+    assert carriers == {task.task_id: [task.subject] for task in TASKS}
+
+
+def test_no_reachable_file_holds_a_grounding_task_prompt(
+    grounding_sealed: Workspace,
+) -> None:
+    """A file holding the question has no reason to be readable during a run.
+
+    Searched over whitespace-normalised text, because a prompt wrapped across
+    two source lines or two lines of prose is the same leak and the contiguous
+    search does not see it. Measured on this tree: the old bank's question
+    "What is inside the data directory?" is wrapped across
+    ``tests/test_shipped_config.py:88``, which is reachable, and
+    ``search_text`` returns that line -- while
+    ``test_no_reachable_file_holds_a_held_out_question`` above passes. That
+    hole is reported, not fixed here; the old texts are not this category's.
+
+    What this check cannot do, also measured: find a prompt inside the module
+    that defines it. Python's implicit concatenation leaves quote characters
+    between the fragments, which normalisation does not remove. So this is the
+    second line of defence, and
+    ``test_the_category_seals_exactly_the_two_files_that_define_it`` is the
+    load-bearing one.
+    """
+    prompts = {" ".join(task.prompt.split()) for task in TASKS}
+    leaking: dict[str, list[str]] = {}
+    for path in reachable_files(grounding_sealed):
+        flattened = " ".join(path.read_text("utf-8", errors="ignore").split())
+        found = sorted(prompt for prompt in prompts if prompt in flattened)
+        if found:
+            leaking[grounding_sealed.display(path)] = found
+
+    assert leaking == {}, f"these reachable files hold a task prompt: {leaking}"
+
+
+def test_the_grounding_fixture_holds_only_the_files_the_oracle_reads() -> None:
+    """The fixture's inventory, pinned the way eval-fixture's is.
+
+    Something writing an extra file into the one directory the agent reads is
+    the failure this guards. A human adding one deliberately updates this test
+    and, with it, the fixture hash in every record.
+    """
+    files = {
+        path.relative_to(PROJECT).as_posix()
+        for path in (PROJECT / "grounding-cohort").rglob("*")
+        if path.is_file()
+    }
+
+    assert files == {
+        "grounding-cohort/README.txt",
+        "grounding-cohort/ledger-alpha.txt",
+        "grounding-cohort/ledger-beta.txt",
+    }
+
+
+def test_the_grounding_answers_are_distinctive_enough_for_the_older_invariant() -> None:
+    """Measured, not assumed.
+
+    ``held_out_expectations()`` above drops anything shorter than twelve
+    characters, and a mutation in brief 10 showed an expectation under that
+    length is not checked at all. If these answers ever go short, the check
+    above still covers them but the older one would not, so the fact is pinned
+    here rather than left to be rediscovered.
+    """
+    for task in TASKS:
+        assert len(accepted_answer(task)) >= _DISTINCTIVE

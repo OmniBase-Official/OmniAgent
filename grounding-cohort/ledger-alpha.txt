@@ -1,0 +1,12 @@
+Synthetic custody ledger A. Invented values only.
+
+record-id     custodian-token        state
+asset-7731    vermilion-quail-18     active
+asset-7732    cobalt-marmot-62       archived
+asset-7733    sienna-ibex-05         quarantined
+asset-7734    amber-pangolin-77      active
+asset-7735    indigo-tapir-31        archived
+asset-7736    russet-gannet-90       active
+
+Exactly one record in this ledger is quarantined. The others are active or
+archived.
