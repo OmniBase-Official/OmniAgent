@@ -56,32 +56,62 @@ NOT_DISTRIBUTED = frozenset({"setup.py", "conftest.py"})
 
 #: Imports ``sys.argv[3]`` with ``sys.argv[1]`` (the unpacked wheel) and
 #: ``sys.argv[4:]`` (the dependency directories) on ``sys.path``, then fails
-#: if anything that got loaded resolved out of ``sys.argv[2]``, the checkout.
+#: if anything that got loaded resolved out of ``sys.argv[2]``, the source
+#: root, from somewhere it was not handed.
+#:
 #: Run under ``-I -S``: ``-I`` drops the cwd, the user site and the
 #: environment, and ``-S`` stops ``site`` from processing the ``.pth`` file
 #: that installs an editable-install finder pointing at the source tree.
+#:
+#: "Under the source root, and not under a directory it was given" is the
+#: boundary, rather than a list of the source files it knows about. The list
+#: would be the stale-list defect this whole module exists to catch, one more
+#: level up, and it would have to be rewritten the day the layout changes.
+#: The cost is that the two allowed sets have to be exactly right -- which is
+#: why they have tests of their own at the bottom of this file.
 IMPORT_CHILD = """\
 import importlib
 import sys
 from pathlib import Path
 
 unpacked, project_root, module_name = sys.argv[1], sys.argv[2], sys.argv[3]
-sys.path[:0] = [unpacked, *sys.argv[4:]]
+dependency_paths = sys.argv[4:]
+sys.path[:0] = [unpacked, *dependency_paths]
 
 importlib.import_module(module_name)
 
-root = Path(project_root).resolve()
+
+def _resolve(raw):
+    try:
+        return Path(raw).resolve()
+    except OSError:
+        return None
+
+
+root = _resolve(project_root)
+
+# Everything the child was handed on purpose. The virtualenv normally lives
+# at <root>/.venv, so the dependency directories are inside the source root
+# and a module resolving out of one of them is an installed wheel finding its
+# dependencies, not a leak. The unpacked wheel can be inside the root too,
+# whenever pytest's basetemp is (.gitignore records that sandboxed sessions
+# put it in .scratch/). Resolved here because sysconfig can hand back a
+# non-canonical path while module paths are already canonical.
+allowed = [path for path in (_resolve(unpacked), *map(_resolve, dependency_paths)) if path]
+
 leaked = []
 for module in list(sys.modules.values()):
     origin = getattr(module, "__file__", None)
     if not origin:
         continue
-    try:
-        resolved = Path(origin).resolve()
-    except OSError:
+    resolved = _resolve(origin)
+    if resolved is None:
         continue
-    if resolved == root or root in resolved.parents:
-        leaked.append(f"{module.__name__} <- {resolved}")
+    if root is None or (resolved != root and root not in resolved.parents):
+        continue
+    if any(resolved == path or path in resolved.parents for path in allowed):
+        continue
+    leaked.append(f"{module.__name__} <- {resolved}")
 
 if leaked:
     sys.stderr.write("RESOLVED FROM THE CHECKOUT: " + ", ".join(sorted(leaked)) + "\\n")
@@ -199,8 +229,21 @@ def _modules_in_tree() -> tuple[str, ...]:
     return tuple(sorted(found))
 
 
-def _import_from_wheel(module_name: str, unpacked: Path) -> subprocess.CompletedProcess[str]:
-    """Import one module in a fresh interpreter that cannot see the checkout."""
+def _run_import_child(
+    module_name: str,
+    unpacked: Path,
+    source_root: Path,
+    dependency_paths: list[str],
+) -> subprocess.CompletedProcess[str]:
+    """Run ``IMPORT_CHILD`` against roots the caller chooses.
+
+    Every argument the child decides anything with comes through here, so the
+    canary's boundary can be driven over a constructed tree rather than only
+    over the real checkout. That matters: the real checkout keeps its
+    virtualenv inside ``PROJECT_ROOT``, a git worktree does not, and the one
+    bug this test module has shipped was invisible from a worktree for exactly
+    that reason.
+    """
     return subprocess.run(  # noqa: S603 - fixed interpreter, pytest-owned paths
         [
             sys.executable,
@@ -209,14 +252,19 @@ def _import_from_wheel(module_name: str, unpacked: Path) -> subprocess.Completed
             "-c",
             IMPORT_CHILD,
             str(unpacked),
-            str(PROJECT_ROOT),
+            str(source_root),
             module_name,
-            *_dependency_paths(),
+            *dependency_paths,
         ],
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def _import_from_wheel(module_name: str, unpacked: Path) -> subprocess.CompletedProcess[str]:
+    """Import one module in a fresh interpreter that cannot see the checkout."""
+    return _run_import_child(module_name, unpacked, PROJECT_ROOT, _dependency_paths())
 
 
 @pytest.fixture(scope="session")
@@ -359,3 +407,119 @@ def test_the_build_leaves_the_checkout_alone(built_wheel: BuiltWheel) -> None:
         "the repository root changed across the build: "
         f"{sorted(set(root_after) - set(built_wheel.root_before))} appeared"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The canary's own tests.
+#
+# The leak check above is the part of this module that decides whether an
+# import proved anything, and it shipped with the wrong boundary: it flagged
+# everything under the source root, and the virtualenv lives at
+# ``<root>/.venv``, so every third-party module a wheel module imports counted
+# as a leak. It passed here and failed on main, because a git worktree has no
+# virtualenv inside it -- the end-to-end tests above cannot reproduce that
+# from where this branch was written, and did not.
+#
+# So the boundary gets driven directly, over a tree built for the purpose: a
+# source root with a dependency directory inside it, an unpacked wheel inside
+# it, and a module hidden somewhere else inside it. No wheel, no build, a
+# fifth of a second, and it reproduces anywhere.
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class CanaryTree:
+    """A source root shaped like the real one: venv and all, inside itself."""
+
+    root: Path
+    unpacked: Path
+    dependencies: Path
+
+
+@pytest.fixture
+def canary_tree(tmp_path: Path) -> CanaryTree:
+    """A source root whose dependency directory and wheel are both inside it."""
+    root = tmp_path / "source-root"
+    unpacked = root / "unpacked-wheel"
+    dependencies = root / ".venv" / "Lib" / "site-packages"
+    smuggled = root / "somewhere-else"
+    for directory in (unpacked, dependencies, smuggled):
+        directory.mkdir(parents=True)
+
+    (dependencies / "pretend_dependency.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (unpacked / "lonely.py").write_text("import json  # stdlib only\n", encoding="utf-8")
+    (smuggled / "smuggled.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (unpacked / "reaches_into_the_tree.py").write_text(
+        "import sys\n"
+        f"sys.path.insert(0, r{str(smuggled)!r})\n"
+        "import smuggled\n",
+        encoding="utf-8",
+    )
+
+    return CanaryTree(root=root, unpacked=unpacked, dependencies=dependencies)
+
+
+def test_the_canary_ignores_the_dependency_directories_it_was_handed(
+    canary_tree: CanaryTree,
+) -> None:
+    """``<root>/.venv/Lib/site-packages`` is under the root and is not a leak.
+
+    This is the bug. ``pydantic`` resolving out of the project's own
+    virtualenv is how an installed wheel is supposed to find its
+    dependencies, and the child is handed those directories itself.
+    """
+    done = _run_import_child(
+        "pretend_dependency",
+        canary_tree.unpacked,
+        canary_tree.root,
+        [str(canary_tree.dependencies)],
+    )
+
+    assert done.returncode == 0, (
+        "the canary flagged a module from a dependency directory it was handed "
+        f"itself:\n{done.stderr}"
+    )
+
+
+def test_the_canary_ignores_the_unpacked_wheel_even_inside_the_source_root(
+    canary_tree: CanaryTree,
+) -> None:
+    """The artifact under test is never the leak, wherever it was unpacked.
+
+    ``tmp_path`` is outside the repository on this machine, but .gitignore
+    records that sandboxed sessions put pytest's basetemp in ``.scratch/``
+    inside the checkout. There the unpacked wheel is under the source root,
+    and the same wrong boundary would call every module in it a leak.
+    """
+    done = _run_import_child(
+        "lonely",
+        canary_tree.unpacked,
+        canary_tree.root,
+        [str(canary_tree.dependencies)],
+    )
+
+    assert done.returncode == 0, (
+        f"the canary flagged a module from the wheel it was testing:\n{done.stderr}"
+    )
+
+
+def test_the_canary_fires_on_a_module_pulled_in_from_the_source_tree(
+    canary_tree: CanaryTree,
+) -> None:
+    """And the fix must not blind it: this is what it is for.
+
+    ``reaches_into_the_tree`` comes out of the unpacked wheel and pulls in a
+    module from elsewhere under the source root -- which is what the editable
+    install's finder does to a child run under ``-I`` without ``-S``. Green
+    before the boundary was fixed and green after; that is the point.
+    """
+    done = _run_import_child(
+        "reaches_into_the_tree",
+        canary_tree.unpacked,
+        canary_tree.root,
+        [str(canary_tree.dependencies)],
+    )
+
+    assert done.returncode != 0, "the canary missed a module from the source tree"
+    assert "RESOLVED FROM THE CHECKOUT" in done.stderr, done.stderr
+    assert "smuggled" in done.stderr, done.stderr
