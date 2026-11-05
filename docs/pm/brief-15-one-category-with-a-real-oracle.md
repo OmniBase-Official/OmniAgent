@@ -218,3 +218,307 @@ trials as six rows; Ma-Me each with the test that went red, and for Mb whether
 the invariant covered your fixture at all; the three gate results with the
 count explained; the branch and commit hashes; that dispatcher enforcement of
 the allowlist is not done and not yours; and anything you refuse to claim. -->
+
+### Result — AI/ML engineer, 2026-11-05
+
+Branched from `main` at `87a1297` as the brief names. `main` had already moved
+three commits past it (`e041f8d`, `cf7178a`, `c72938e`, all `docs/pm/`), so the
+baseline is the commit the brief froze and not `HEAD`. Worktree
+`D:\code-project\OmniAgent-aiml-brief15`, branch
+`aiml/brief15-evidence-grounding-20261105`, code at **`a083b74`**.
+
+No model was run. No cohort, no probe, no service contact of any kind. The
+whole thing runs on an injected fake client, and one of the tests proves that
+by replacing `agent.OpenAI` with a function that raises.
+
+**The prediction I wrote before the mutations, quoted as written:** *"Ma, Mc,
+Md and Me will go red on the first try. Mb is the one that might not: if my
+expectation is the ledger's own token, the fixture is itself a carrier, so a
+'no reachable file holds the answer' invariant cannot be the right shape and I
+expect to have to assert 'exactly one carrier, and it is the subject' instead.
+Mf — emptying my own seal list — I expect to go red immediately."*
+
+Three of those were right. **Mb went red on the shape I predicted. Mf did not
+go red, and that is the most useful thing in this report.**
+
+#### 1. The fixture, and how its hash is ordered
+
+**`grounding-cohort/`** — named with no "fixture" in it so a glance cannot
+confuse it with `eval-fixture/`, which I neither read nor wrote. Three files:
+`README.txt` stating that every value is invented and that the directory is a
+subject rather than an answer key, and two synthetic ledgers.
+
+`fixture_sha256()` hashes, in this order: every file under the directory
+recursively, sorted by its POSIX path relative to the directory; each
+contributes its **relative path**, a NUL, its **text**, a NUL. The path is in
+the digest so an added, removed or renamed file moves it — three separate
+tests, one per case.
+
+**The text is hashed with newlines normalised to `\n`, not as the bytes on
+disk, and that is a trade-off rather than an oversight.** This repository sets
+`core.autocrlf=true` and has **no `.gitattributes`**, so the same commit is
+CRLF here and LF on a Linux checkout; a byte hash would report fixture drift
+that is only a checkout difference. Git printed the warning itself while I
+staged the files ("LF will be replaced by CRLF the next time Git touches it"),
+so this is measured, not anticipated: after `rm -rf grounding-cohort &&
+git checkout -- grounding-cohort` the files on disk hold CRLF and
+`fixture_sha256()` returns
+`f13f6e68db1393947652ebe5fad33ce800e46fdab38cc7ae570cffd4224cbb8a` — byte-identical
+to the digest in the six rows below.
+
+**What the digest therefore does not see: an edit that only rewrites line
+endings.** Everything else moves it. I am stating that rather than claiming
+immutability I did not build.
+
+#### 2. How the oracle derives its value
+
+Each task names a ledger, a **key column** and the value it holds, and an
+**answer column**. The oracle parses the ledger — the header is the first line
+whose first token is `record-id`, the rows run to the first blank line, prose
+above and below is ignored — finds the rows matching the key, and returns the
+answer column of the single match.
+
+It **raises** on zero matches and on two, naming the count. `sorted(...)[0]`
+quietly picking one is how an oracle starts lying, and brief 10 already logged
+that fragility in `_search_subject`. It also raises if either column is missing,
+so renaming a column in the fixture fails loudly instead of scoring nothing.
+
+No accepted value is written down anywhere. A test reads both of this
+category's source files and asserts that neither contains any of them.
+
+**The grading is two axes, never combined here:** the accepted value appears in
+the answer, and **no other row from the same ledger appears**. That second axis
+is the whole lesson of the old comparison question — a substring expectation
+graded a reversed answer correct for ten runs because the answer named both
+files. Three tests pin it: a grounded answer, an answer naming the accepted
+value *and* another row, and an answer naming only another row.
+
+#### 3. The extended invariant, and what it now reaches
+
+`tests/test_eval_workspace.py` gained four tests over a workspace built as
+`sealed_workspace(PROJECT, also_deny=SEALED_FROM_TRIALS)`.
+
+**`scripts/eval_workspace.py` was imported and not edited.** The two paths this
+category must seal — the module holding the task texts and its test module —
+go through `sealed_workspace`'s own `also_deny` parameter rather than into
+`ANSWER_KEY`. `SEALED_FROM_TRIALS` is *imported* by the invariant test rather
+than restated, so what a trial seals and what the test checks cannot drift; if
+they could, a green test would say nothing about the run.
+
+The answer check is **"exactly one reachable carrier, and it is the ledger the
+task is about"**, not "no reachable file holds it". The fixture is the subject,
+so its own ledger must hold the answer — that is what makes the answer
+derivable from evidence. What must not exist is a second carrier.
+
+Reachable-file counts, measured: **51 → 56** to the old invariant's workspace,
+and the five added files are exactly mine (three fixture files, the module, the
+test module). **During a grounding trial the count is 54**, because the module
+and its test are denied.
+
+Also pinned: the fixture's inventory (three files, the way `eval-fixture/`'s is
+pinned), and that both accepted values are **14 and 15 characters**, above the
+`_DISTINCTIVE = 12` cut — so the older invariant's length filter, which brief
+10's Mc showed drops shorter expectations unchecked, would cover them too.
+
+#### 4. The record
+
+27 fields, asserted as one exact dictionary so a missing field cannot pass as
+an absent one:
+
+`cohort_id` · `trial_id` · `task_id` · `variant` · `repeat` · `arm` ·
+`category` · `commit` · **`tree_clean`** · `fixture_sha256` ·
+`protocol_sha256` · `model_tag` · `model_digest` · `runtime_version` ·
+`endpoint` · `temperature` · `max_steps` · `timeout_seconds` · `max_retries` ·
+`allowlist` · `tools` · `tool_status` · `steps` · `execution_status` ·
+`answer_grounded` · `answer_names_distractor` · `tools_within_allowlist`
+
+**Absent, and named as absent:** no prompt, no system prompt, no reasoning or
+thought, no raw model reply, no final-answer text, no file contents, no raw
+observation, no raw tool argument, no raw error, **no endpoint URL**, no
+expected value and no distractor. The test checks this over the *serialised*
+record, not its keys, so a forbidden value smuggled inside an allowed field
+fails too; it also asserts the absence of `http`, `localhost` and `11434`.
+
+**None of those is a parameter of the builder**, so none can arrive by
+accident. The endpoint is a classification: `Preflight` refuses anything but
+`"loopback"`, and refuses an empty model digest, a non-zero `max_retries` (the
+agent's own default is **2**) and a non-zero temperature.
+
+Two hashes, kept independent on purpose: `fixture_sha256` freezes what is
+asked *about* and, because the accepted answers are a pure function of the
+fixture, it is already their freeze record; `protocol_sha256` freezes the
+asking — prompts, task identities, allowlists, arm, category and the four
+limits. Keeping them apart is what lets a mismatch say which half drifted.
+Tested: a reworded prompt, a widened allowlist and a changed `max_steps` each
+move the protocol hash, and the protocol hash carries no accepted answer.
+
+`run_cohort` takes its `client` with **no default**, so nothing can reach a
+model server unless a caller hands one over, and **there is no command-line
+entry point** — no cohort is authorized by anything, and an importable `main()`
+would be one keystroke from starting one. It **writes nothing to disk**:
+retention duration and deletion path are still open gates, and defaulting to a
+path inside the repository would pre-empt them. `data/**` was not touched.
+
+#### 5. The six trials, as six rows
+
+Scripted replies on a fake client. **These are not a measurement of any model**
+— they exercise the record and the scoring, nothing more. `fixture_sha256` =
+`f13f6e68…24cbb8a`, `protocol_sha256` = `85e84fb4…835066b8`, `commit` =
+`87a1297`, `tree_clean` = `true`, `endpoint` = `loopback`, `temperature` = 0,
+`max_steps` = 8, `timeout_seconds` = 180, `max_retries` = 0 in every row.
+
+| trial_id | task | variant | repeat | tools | tool_status | steps | status | grounded | names distractor | in allowlist |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `demo-fake/grounding-v1/r1` | grounding-v1 | v1 | 1 | `read_file` | `ok` | 2 | completed | true | false | true |
+| `demo-fake/grounding-v1/r2` | grounding-v1 | v1 | 2 | `read_file` | `ok` | 2 | completed | true | false | true |
+| `demo-fake/grounding-v1/r3` | grounding-v1 | v1 | 3 | `read_file` | `ok` | 2 | completed | true | false | true |
+| `demo-fake/grounding-v2/r1` | grounding-v2 | v2 | 1 | `read_file` | `ok` | 2 | completed | true | false | true |
+| `demo-fake/grounding-v2/r2` | grounding-v2 | v2 | 2 | `read_file` | `ok` | 2 | completed | true | false | true |
+| `demo-fake/grounding-v2/r3` | grounding-v2 | v2 | 3 | `read_file` | `ok` | 2 | completed | true | false | true |
+
+`started=6 completed=6 failed=0 stopped_on=None`. Started, completed and failed
+are counted apart, because a trial that stopped is not a trial that answered
+wrongly — and pooling those two is how a derailment got recorded as "not
+wrong" for ten runs.
+
+The cohort also stops itself: `revision_drift` if the commit moved under it,
+`tree_dirty` if the tree stopped being clean, checked **before and after** the
+run against an injectable observer, and `tool_error` / `agent_error` stop the
+cohort rather than the trial. Three measurements have been lost to a tree
+someone else was writing to; this is that rule in code.
+
+#### 6. The allowlist, and what is not mine
+
+Each task declares its allowed tools as data and the harness checks them
+**evaluator-side**: a call outside the list is recorded as
+`execution_status="policy_violation"` with `tools_within_allowlist=false`,
+counted as failed, and **not retried** — the test asserts the fake received
+exactly two calls, so no replacement attempt was made.
+
+**Dispatcher enforcement of the allowlist is not done, and it is not mine.**
+Verified rather than repeated from the contract: `agent.py:669` calls
+`run_tool(tool_name, step.action_input or "")` with no allowlist parameter, so
+dispatch is registry-wide. **In the policy-violation test the disallowed tool
+really did execute** — I scripted `calculate`, which is pure arithmetic with no
+side effects, precisely so that it could. My test proves the evaluator notices;
+it proves nothing about the dispatcher refusing. That is contract §5 item 2 and
+the security engineer's gate, and the injection/tool-policy category stays
+blocked until it lands.
+
+#### 7. Mutations
+
+Every one restored from a scratchpad copy, never `git checkout --` alone, and
+every source file's SHA-256 re-checked against the pristine copy afterwards.
+
+| # | Mutation | What went red |
+| --- | --- | --- |
+| **Ma** | accepted values hardcoded instead of derived | `test_every_task_derives_its_accepted_answer_from_the_fixture` — the test edits a *copy* of the fixture, so the real fixture was never touched |
+| **Mb** | the derived answer written into a new reachable file at the repository root | `test_each_grounding_answer_has_exactly_one_reachable_carrier`, **naming the extra carrier by path** |
+| **Mc** | the prompt added to the record | `test_the_trial_record_carries_no_prompt_answer_content_or_url` **and** `test_the_trial_record_carries_every_field_the_contract_lists` |
+| **Md** | the three repeats pooled into one row per task | `test_six_trials_are_recorded_individually_never_averaged` — `assert 2 == 6` |
+| **Me** | `tree_clean` dropped from the record | `test_the_trial_record_carries_every_field_the_contract_lists` — "Right contains 1 more item: `{'tree_clean': True}`" |
+
+**On Mb specifically, since the brief asked: the invariant does cover my
+fixture.** It went red, and it named the second carrier rather than just
+failing. The shape had to be "exactly one carrier, and it is the subject"
+rather than "no carrier", because the fixture is the subject; a zero-carrier
+assertion would have been impossible to satisfy and would have told me nothing.
+
+#### 8. Mf — my own extra mutation, which stayed green. Two defects, both mine.
+
+I emptied `SEALED_FROM_TRIALS` to `()` — the harness then runs every trial in a
+workspace where its own task module is readable. **Both of my seal tests stayed
+green.** Reported rather than patched around, then fixed, then re-proved.
+
+- **`test_the_trial_workspace_opens_the_fixture_and_seals_this_category`** only
+  looped over `SEALED_FROM_TRIALS`. An empty tuple iterates zero times, so the
+  assertion was **vacuous**.
+- **`test_no_reachable_file_holds_a_grounding_task_prompt`** searched reachable
+  files for the contiguous prompt. Measured: the prompt is **not present in its
+  own module at all**, because Python's implicit concatenation splits it across
+  two string literals — and **not after whitespace normalisation either**, since
+  the quote characters survive it. So no textual search of the source can ever
+  catch an unsealed module. The test could not do its job.
+
+The fix makes the load-bearing claim **structural**:
+`test_the_category_seals_exactly_the_two_files_that_define_it` asserts
+`set(SEALED_FROM_TRIALS)` equals the files the interpreter actually loaded this
+category from, via `inspect.getfile` and `__file__`, so an empty or wrong list
+fails. The textual check stays as a second line, now over normalised text, for
+the case it can catch — a prompt copied into prose. Re-running Mf afterwards
+turns **two** tests red.
+
+#### 9. A pre-existing hole in the old invariant, measured
+
+Looking for the same weakness in the questions that are not mine, I found a
+live carrier:
+
+- **`tests/test_shipped_config.py:88`** holds the old bank's question text
+  `"What is inside the data directory?"`, wrapped across two source lines.
+- The file is **reachable** through `sealed_workspace(PROJECT)` —
+  `workspace.resolve` succeeds and it is in `reachable_files()`.
+- `test_no_reachable_file_holds_a_held_out_question` **passes**, because it
+  searches for the contiguous string. The occurrence is found only after
+  whitespace normalisation.
+- Through the real tools: `read_file` refuses it on size ("3,525 characters,
+  too long"), but **`search_text("What is inside the data", "tests")` returns
+  the line** — and `search_text` from `.` is the exact call that produced the
+  original leak.
+
+The surrounding docstring also states how the agent failed that question
+("spent all twelve steps and returned 'I ran out of reasoning steps…'"). The
+question's *expected answer* is **not** nearby, so this is key-adjacent prose
+rather than the answer itself — which is still what `held_out_texts()` bans
+"without exception", and for the reason its own docstring gives.
+
+**Not fixed here.** `tests/test_shipped_config.py` is in neither of the
+brief's lists, and changing the old invariant's matching would change what it
+reaches for questions that are not mine. Logged for whoever owns the old bank.
+
+#### 10. Gates
+
+| Gate | Result |
+| --- | --- |
+| `ruff check .` | All checks passed |
+| `mypy` | Success, **46** source files |
+| `pytest` | **694 passed** |
+
+**The count moved for a reason that is mine: 658 → 694, +36 tests** — 32 in
+`tests/test_grounding_cohort.py`, 4 in `tests/test_eval_workspace.py`. mypy
+**45 → 46**: +1, which is `tests/test_grounding_cohort.py`, because `tests` is
+in the configured list.
+
+**One question, and I am not deciding it.** `scripts/grounding_cohort.py` is
+**not type-checked by the configured gate**: `[tool.mypy] files` in
+`pyproject.toml` is an explicit list, and my module is not in it. The comment
+beside `scripts/eval_scoring.py` in that list says why the evaluation scripts
+belong there — *"The evaluation scripts produce the numbers this project
+quotes, so they are checked like the agent is."* Mine is exactly such a script.
+`pyproject.toml` is in neither of the brief's lists, so I asked rather than
+decided. **Evidence that the one-line addition is clean:**
+`python -m mypy scripts/grounding_cohort.py` → *Success: no issues found in 1
+source file*, under the same strict settings.
+
+#### 11. What I did not establish
+
+- **Nothing about any model.** No completion request was sent, by this code or
+  by me. The six rows are the record format exercised on scripted replies;
+  `model_tag` in them is `fake-no-model` and `runtime_version` says so.
+- **Nothing about the other five categories.** The pattern is ready and I did
+  not write them — that was the brief's one instruction about where this could
+  go wrong. Tool selection needs a frozen required *sequence*, which is an axis
+  this record does not yet carry; the other four need their own oracles.
+- **Nothing about the threshold.** Contract §6 assigns "propose a
+  threshold/reporting method before cohort" to this chair; it is not in this
+  brief and is not written.
+- **No claim that the fixture is immutable against a line-ending-only
+  rewrite.** It is not, by design, and §1 says so.
+- **No claim that the dispatcher refuses a disallowed tool.** It does not.
+- **No claim that any of this resists prompt injection.** The fixture's text is
+  untrusted data to the agent and nothing here tests that.
+- **No claim about the old bank's figures.** I did not run it and did not touch
+  it.
+
+**Still the manager's:** merging this; the model digest and Ollama/runtime
+version, which `Preflight` demands and nobody has frozen; the probe; and the
+cohort, if the owner ever authorizes one.
