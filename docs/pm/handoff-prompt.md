@@ -106,7 +106,7 @@ by default, is the AI/ML chair's.
 
 ## Who holds which files right now
 
-Hand nobody a file another chair is in. As of `59a1bf9`:
+Hand nobody a file another chair is in. As of `cf7178a`:
 
 - **brief 14, SE** — `agent.py`, `config.py`, `tests/test_config.py`,
   `tests/test_endpoint_policy.py`, `tests/test_local_only.py`.
@@ -114,8 +114,14 @@ Hand nobody a file another chair is in. As of `59a1bf9`:
   new test module, `tests/test_eval_workspace.py`. **Reassigned from the
   fullstack engineer on 2026-11-04, unstarted**, because it is section 7 step
   3 of the contract.
-- **brief 17, fullstack** — `pyproject.toml`, `.gitignore`, one new test
-  module. Option A of ADR-0002, issued 2026-11-04.
+- **brief 17, fullstack** — `pyproject.toml`, `.gitignore`,
+  `tests/test_wheel_completeness.py`. **Delivered and refused 2026-11-05**;
+  the chair is fixing the canary on the same branch. **`build/` and `dist/`
+  are still not gitignored on `main` and that line lives on this branch**, so
+  do not add it here and create a conflict — anyone who runs `pip wheel .` in
+  the checkout meanwhile will see
+  `test_the_budget_expectation_is_not_unique_to_its_subject` go red for that
+  reason.
 - **unassigned** — the CI brief: `ci.yml` installs with `-e` so it cannot see
   the broken wheel, runs only `ubuntu-latest` so the junction test never runs,
   and does not pin the runner. Two of the three reasons are security ones, so
@@ -175,19 +181,33 @@ Three consequences that change what the old figures mean:
 - **No cohort, runtime change or probe is authorized** by the contract. Six
   gates, a frozen threshold and an owner decision come first.
 
-HEAD `0935fdf` on `main`, pushed. **658 tests**, ruff clean, mypy strict clean
-over **45** files, tree clean. **Thirteen briefs done; 14 and 15 issued
-2026-11-04 and in flight.** Plan `2026-10-06-train-and-deploy` closed,
-Tasks 1–4.
+HEAD `cf7178a` on `main`, pushed. **658 tests**, ruff clean, mypy strict clean
+over **45** files, tree clean. **Thirteen briefs merged; 14, 15, 16 and 17
+written.** Plan `2026-10-06-train-and-deploy` closed, Tasks 1–4.
 
-- **Both engineers are working right now.** Brief 14 (security engineer, gate
-  1, endpoint validation) holds `agent.py`, `config.py`,
-  `tests/test_config.py`, `tests/test_endpoint_policy.py`,
-  `tests/test_local_only.py`. Brief 15 (fullstack engineer, the oracle and the
-  trial record on one category) holds a new fixture directory, a new
-  `scripts/` module, a new test module and `tests/test_eval_workspace.py`.
-  **Both branch from `main` at `ec7787a` into their own worktrees and commit
-  to their own branches. The manager merges.**
+**Nothing has been merged since 2026-11-04.** Read the next three bullets
+before you plan anything — two of them are failures of dispatch, not of
+engineering, and both chairs were right.
+
+- **Brief 17 is delivered and refused.** `brief-17-wheel-completeness`
+  (`ce07d50`) fixes the broken wheel correctly — but its own test is green in
+  the author's worktree and **red on `main`**, because the canary at
+  `tests/test_wheel_completeness.py:73-84` treats anything under the
+  repository root as "the checkout", and `.venv` lives there. One condition
+  fixes it; the test already computes `purelib`/`platlib` at `:112`. See
+  `docs/pm/brief-17-pm-verification-2026-11-05.md`. **Ma, Mb and Mc are
+  unverified** — a red suite makes a mutation unreadable.
+- **Brief 14 never reached its chair, for two days, because of a filename.**
+  Written "for the security engineer" in a file called
+  `brief-14-codex-prompt.md` while security still belonged to Codex; the SE
+  chair filtered it out by name and reported no brief, correctly. Renamed to
+  `brief-14-se-prompt.md` on 2026-11-05, the SE role prompt now says to read
+  the newest `assignments-*.md` and to judge a brief by its heading rather
+  than its filename, and the brief-template checklist has a sixth item saying
+  so. **The chair is ready and the brief is now dispatchable.**
+- **Brief 15 has never been started.** It moved from the fullstack chair to
+  the AI/ML chair on 2026-11-04, unstarted, and that chair has committed
+  nothing.
 - **Four defects the contract names and the briefs deliberately do not fix**,
   each needing its own brief: `agent.py:36` defaults the model to
   `qwen2.5:7b` while `omniagent.toml:4` says `qwen2.5-coder:7b`; the client is
