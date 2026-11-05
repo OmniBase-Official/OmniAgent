@@ -463,3 +463,226 @@ Branch `brief-17-wheel-completeness`, cut from `main` at `108708c`, pushed
 with `git push origin brief-17-wheel-completeness`. Two commits:
 `9b14f6b` (the fix and the test) and this report. Nothing was committed to
 `main` and nothing was pushed to `organization`.
+
+---
+
+## Result — addendum, 2026-11-05: the canary's boundary was wrong
+
+**Same branch `brief-17-wheel-completeness`. Commit `38f0173` plus the commit
+carrying this addendum.** The PM's verification rejected the merge: the leak
+canary in `tests/test_wheel_completeness.py` fired on the project's own
+virtualenv when `PROJECT_ROOT` is the main checkout. **The finding is correct
+and I reproduced it myself before changing anything.**
+
+### What was wrong
+
+`PROJECT_ROOT = Path(__file__).resolve().parent.parent`, and the canary flagged
+any loaded module whose `__file__` resolved under it. `.venv` lives at
+`D:\code-project\OmniAgent\.venv` — *inside* the repository root — and
+
+```
+$ .venv\Scripts\python.exe -c "import sysconfig; print(sysconfig.get_path('purelib'))"
+D:\code-project\OmniAgent\.venv\Lib\site-packages
+```
+
+so every dependency an imported wheel module pulls in resolves under the root.
+Driving the branch's own `IMPORT_CHILD` with `project_root` set to the main
+checkout, from outside pytest:
+
+```
+project_root handed to the child : D:\code-project\OmniAgent
+dependency directory            : D:\code-project\OmniAgent\.venv\Lib\site-packages   under that root: True
+
+--- agent: EXIT 3
+RESOLVED FROM THE CHECKOUT: annotated_types <- D:\code-project\OmniAgent\.venv\Lib\site-packages\annotated_types\__init__.py, anyio <- ...
+--- config: EXIT 3
+--- dataset_provenance: EXIT 3
+--- export_dataset: EXIT 3
+--- main: EXIT 3
+--- observability: ok
+--- sandbox: ok
+--- tools: EXIT 3
+RESOLVED FROM THE CHECKOUT: annotated_types <- ..., pydantic <- D:\code-project\OmniAgent\.venv\Lib\site-packages\pydantic\__init__.py, ...
+--- validate_dataset: ok
+```
+
+**Six of the nine fire.** `observability`, `sandbox` and `validate_dataset`
+escape only because they import nothing but the standard library — which is
+luck, not coverage.
+
+**Why it passed for me and failed for them, stated plainly because it is the
+interesting part.** I worked in a git worktree, which has no `.venv` inside
+it. The interpreter was still the main checkout's, so site-packages still
+resolved to `D:\code-project\OmniAgent\.venv\…` — just not under *my*
+`PROJECT_ROOT`. The test passed everywhere except the one place it has to run,
+and **the end-to-end tests cannot reproduce this from a worktree at all.**
+That is not a thing I failed to notice; it is a thing that path cannot show
+me. The answer is below, and it is the part of this addendum I would ask to be
+read first.
+
+### Decision 1 — which boundary
+
+**"Under the source root, and not under a directory the child was handed."**
+Not "the module's file is one of the source files we know about."
+
+The stricter rule needs a list of the project's own files. That is the
+stale-list defect this entire module exists to catch, one level up, and it
+would have to be rewritten the day `src/omniagent/` happens — against a test
+whose stated job is to prove that move behaviour-free. I am not willing to put
+a list of source files inside it.
+
+The allowed set is the two things the child is given on purpose:
+
+- **the dependency directories** (`sysconfig` `purelib`/`platlib`, already
+  computed by `_dependency_paths()` and already passed as `sys.argv[4:]`) — a
+  module resolving out of one of them is an installed wheel finding its
+  dependencies, which is the behaviour under test, not a leak;
+- **the unpacked wheel** — because it can be under the source root too. That
+  is **a second instance of the same bug, latent**: `.gitignore` records that
+  sandboxed sessions put pytest's basetemp in `.scratch/` inside the checkout,
+  and there the old boundary would have called every module in the wheel under
+  test a leak. Nobody had hit it yet.
+
+Both halves are resolved in the child before comparing, because `sysconfig`
+can hand back a non-canonical path while module paths are already
+`.resolve()`d — the PM flagged that and they were right.
+
+The honest cost of the cheaper rule: correctness now rests entirely on those
+two sets being exactly right. Which is decision 2.
+
+### Decision 2 — a regression test for the canary
+
+Three, and they do not build a wheel. `_run_import_child()` now takes the
+source root and the dependency paths as arguments; `_import_from_wheel()` is a
+thin wrapper that passes `PROJECT_ROOT` and `_dependency_paths()`. So the
+boundary can be driven over a tree built for the purpose: a source root with a
+dependency directory inside it, an unpacked wheel inside it, and a module
+hidden somewhere else inside it. **About a fifth of a second, and it
+reproduces anywhere** — including in a worktree, which is the whole reason it
+exists.
+
+| Test | Before | After |
+| --- | --- | --- |
+| `test_the_canary_ignores_the_dependency_directories_it_was_handed` | **red** | pass |
+| `test_the_canary_ignores_the_unpacked_wheel_even_inside_the_source_root` | **red** | pass |
+| `test_the_canary_fires_on_a_module_pulled_in_from_the_source_tree` | pass | pass |
+
+The third is green on both sides on purpose: it is the one that fails if the
+fix blinds the canary rather than aiming it.
+
+Failing output before the fix, the brief's own discipline applied to this bug:
+
+```
+E  AssertionError: the canary flagged a module from a dependency directory it was handed itself:
+E    RESOLVED FROM THE CHECKOUT: pretend_dependency <- ...\source-root\.venv\Lib\site-packages\pretend_dependency.py
+E  assert 3 == 0
+
+E  AssertionError: the canary flagged a module from the wheel it was testing:
+E    RESOLVED FROM THE CHECKOUT: lonely <- ...\source-root\unpacked-wheel\lonely.py
+E  assert 3 == 0
+
+FAILED tests/test_wheel_completeness.py::test_the_canary_ignores_the_dependency_directories_it_was_handed
+FAILED tests/test_wheel_completeness.py::test_the_canary_ignores_the_unpacked_wheel_even_inside_the_source_root
+2 failed, 1 passed, 4 deselected in 1.56s
+```
+
+**`test_the_import_child_cannot_reach_the_checkout` did not cover this and
+could not.** It asserts the child *fails* to import the `tests` package, which
+is path isolation. The canary's boundary is a different question and nothing
+asked it. Agreed, and that is why the three above are separate tests rather
+than extra assertions on that one.
+
+### Verified against the real thing, not only the constructed tree
+
+The constructed tree proves the boundary; it does not prove the boundary is the
+one the real checkout needs. So, from outside pytest, driving the fixed
+`IMPORT_CHILD` with `project_root` set to the main checkout:
+
+```
+--- agent: ok          --- export_dataset: ok    --- sandbox: ok
+--- config: ok         --- main: ok              --- tools: ok
+--- dataset_provenance: ok  --- observability: ok  --- validate_dataset: ok
+```
+
+**All nine, where six failed.** And the canary is not blinded — run the same
+child *without* `-S`, so `site` processes the editable install's `.pth` and
+its finder resolves a module out of the checkout, with an empty wheel
+directory so that finder is the only way the import can succeed:
+
+```
+exit 3
+RESOLVED FROM THE CHECKOUT: observability <- D:\code-project\OmniAgent\observability.py
+```
+
+A real leak, out of the real root, still caught — while the virtualenv sitting
+inside that same root is ignored. That is the pair of results the fix had to
+produce.
+
+### The marker: a correction, and the figure that was missing
+
+**The marker was already there** at `ce07d50` — `pyproject.toml:179-181`
+registers it, and `@pytest.mark.wheel` is on all four wheel tests.
+`--strict-markers` is on, so the tests could not have run without it. Adding a
+second would be wrong, and I have not. **What was missing is that my `##
+Result` never mentioned it**, which is a reporting failure on my part, not a
+missing switch: the PM asked for the runtime and I gave the runtime, so the
+only thing they could conclude was that the switch did not exist.
+
+So, the figure that makes it usable — three runs of each, this machine:
+
+| | Run 1 | Run 2 | Run 3 |
+| --- | --- | --- | --- |
+| `pytest` | **665 passed in 16.77s** | 17.29s | 19.04s |
+| `pytest -m "not wheel"` | **661 passed, 4 deselected in 12.39s** | 12.69s | 12.90s |
+
+**`-m "not wheel"` deselects exactly the four wheel-building tests** and costs
+about **4.4–6.1 s** of suite time. It is not 13 s here; the PM measured
+33.12 s for the full suite against my 16.8 s, so their machine is roughly
+twice as slow and the share will be larger there, but the switch is the same
+switch.
+
+**The three new canary tests deliberately carry no marker.** They build
+nothing, they run in about 0.2 s, and they are the tests that catch this class
+of bug — so `-m "not wheel"` keeps them. That is why the deselected run is 661
+and not 658.
+
+### Gates
+
+| Gate | Result |
+| --- | --- |
+| `.venv\Scripts\python.exe -m ruff check .` | `All checks passed!` |
+| `.venv\Scripts\python.exe -m mypy` | `Success: no issues found in 46 source files` |
+| `.venv\Scripts\python.exe -m pytest` | **`665 passed in 16.77s`** |
+
+**662 → 665**, the three new canary tests, nothing else moved. mypy stays at 46
+files. `git status` clean apart from the commit, no `build/` or `dist/`. The
+main checkout was not switched, not committed to, and is still clean on
+`main` at `c72938e`; I worked in a fresh worktree on the existing branch.
+
+### What I refuse to claim, this round
+
+- **That I verified this inside the main checkout.** I did not, and I will not:
+  the PM and another session are working in it. I reproduced the failure and
+  the fix by handing the real child the main checkout's path as its source
+  root, from a worktree. That exercises the real `IMPORT_CHILD`, the real
+  `sysconfig` paths and the real `.venv` location, but it is not a pytest run
+  on `main`. **The merge-and-run is still yours**, and the number to watch is
+  665.
+- **That the end-to-end wheel tests now cover this.** They still cannot, from
+  a worktree. The three canary tests are what cover it, and they cover the
+  boundary rather than the wiring.
+- **That the allowed set is complete for every environment.** It is the
+  unpacked wheel plus `purelib` and `platlib`. A dependency installed somewhere
+  else and inside the source root — a `.pth` pointing elsewhere, a vendored
+  tree, a second venv — would still read as a leak. That is a false alarm, not
+  a false pass, and the three tests make the rule cheap to extend.
+- **That Ma, Mb or Mc were re-run.** They were not; the PM has not verified
+  them and said they will when this lands. The results in the first `## Result`
+  stand as measured on `ce07d50`, whose packaging change this addendum does not
+  touch.
+- **That anything about the packaging fix changed.** It did not. `py-modules`,
+  ruff's `known-first-party`, `.gitignore` and the completeness test are
+  untouched by this commit; the only file it changes is
+  `tests/test_wheel_completeness.py`.
+- **The CI defect and the package move are still not mine**, and still not
+  done.
