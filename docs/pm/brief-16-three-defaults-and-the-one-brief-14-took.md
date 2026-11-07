@@ -202,12 +202,74 @@ it and report; do not touch it.
 
 ## Result
 
-<!-- Engineer: append here. Whether agent.py:493 and :869 still print the URL
-after brief 14; which value you kept as the single default and why; how you
-used the existing layer provenance rather than adding one; the retry
-documentation and where you put it; the CLI flag surface after part 3,
-including what two conflicting flags do; Ma-Me each with the test that went
-red, and for Mb whether anything went red at all; the three gate results
-against the baseline the manager gave you; the branch and commit hashes; and
-anything you refuse to claim, including that the trial record is brief 15's
-and you did not touch it. -->
+**Implemented on `codex/brief16-defaults-20261107`, based on `3c76fd2`** (the
+then-current `origin/main`). No model server was started or contacted.
+
+### Part 1 — model default and provenance
+
+Kept `qwen2.5:7b`, the existing code/help default, and changed only
+`[defaults].model` in `omniagent.toml` to match it. The `[profile.demo]` model
+remains `omniagent-v2` and `max_steps` remains 8. `resolve()` already returns
+the winning layer in its source map; the new tests use that map directly and
+add no second provenance mechanism. The former `agent.py` user-facing error
+paths use the endpoint classification rather than printing the full URL. The
+CLI preflight in `main.py` still displays the validated local endpoint; that
+separate behavior was outside this brief's `agent.py` sites and was not
+changed.
+
+### Part 2 — retry layers
+
+`AgentConfig` and resolved `Settings` now expose `client_max_retries` as the
+literal zero required by the OpenAI SDK layer. `build_openai_client()` passes
+that field to the SDK. `max_retries` remains the separate application retry
+count (default 2); setting it does not alter the SDK count. The evaluation
+path continues to pass the validated `Preflight.max_retries` value of zero
+explicitly into `AgentConfig`.
+
+### Part 3 — quiet output
+
+Both `Settings` and `AgentConfig` default `verbose` to false. `--verbose`
+enables the trace, `--quiet` disables it, and argparse rejects using both.
+The explicit `[profile.collect].verbose = false` remains unchanged, as
+required.
+
+### Mutation evidence
+
+All required mutations were applied and restored from saved file bytes. Each
+made its expected test fail:
+
+| Mutation | Test that went red |
+|---|---|
+| Ma — code model default drifted from TOML | `test_shipped_default_model_matches_the_code_default` |
+| Mb — all provenance was forced to `named` | `test_a_profile_beats_the_defaults_section` |
+| Mc — demo model changed to the stock model | `test_demo_profile_pins_the_fine_tune` |
+| Md — `verbose` defaulted to true | `test_verbose_is_disabled_by_default` |
+| Me — the flag conflict guard was removed | `test_verbose_and_quiet_cannot_be_used_together` |
+
+Mb was detected; the tests prove the resolver reports the actual source layer.
+
+### Gates and scope
+
+At the clean base, the full suite passed **791 tests**. On the final
+three-commit implementation snapshot:
+
+- `ruff check .` — passed.
+- `mypy` — passed, 48 source files.
+- `pytest` — **798 passed in 85.06 s**.
+- `git diff --check` — passed before the result record was added.
+
+The Windows junction and wheel-build tests needed their temporary paths
+confined to `.scratch`; junction fixture creation required the approved test
+execution permission. No live model probe or cohort was run. No trial-record,
+system-prompt, tool-description, or demo-pin changes were made. The existing
+test description in `tests/test_grounding_cohort.py` still says verbose is on;
+that file was explicitly outside this brief's allowed scope, although its
+assertions pass with the new default.
+
+### Implementation commits
+
+- `959df1349951295fc37a25dc8cfb7c86fc70aad9` — `fix(config): align the shipped model default`
+- `312408b960a0658fd7b774937f7304bc18fcde31` — `fix(agent): separate application and client retries`
+- `8a35c5fa3d9a7e4f093ffa90ca96cb393b132bb6` — `feat(cli): add explicit verbose tracing flag`
+
+This is ready for independent SE review. It has not been pushed or merged.
