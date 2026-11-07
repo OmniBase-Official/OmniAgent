@@ -21,7 +21,7 @@ import re
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 from urllib.parse import urlsplit
 
 import httpx
@@ -411,7 +411,12 @@ def build_local_http_client(
 
 
 class AgentConfig(BaseModel):
-    """Runtime configuration for a single agent instance."""
+    """Runtime configuration for a single agent instance.
+
+    ``max_retries`` is the application's retry loop for retryable model
+    failures. ``client_max_retries`` is the OpenAI SDK's HTTP retry layer and
+    is fixed at zero, so each application attempt corresponds to one request.
+    """
 
     model: str = Field(default=DEFAULT_MODEL, description="Ollama model tag.")
     base_url: str = Field(default=DEFAULT_BASE_URL, description="Local OpenAI-compatible endpoint.")
@@ -419,12 +424,15 @@ class AgentConfig(BaseModel):
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     max_steps: int = Field(default=8, ge=1, le=50, description="Max ReAct iterations per question.")
     timeout: float = Field(default=180.0, gt=0, description="Per-request timeout in seconds.")
-    verbose: bool = Field(default=True, description="Stream the reasoning trace to the console.")
+    verbose: bool = Field(default=False, description="Stream the reasoning trace to the console.")
+    client_max_retries: Literal[0] = Field(
+        default=0, description="OpenAI SDK HTTP retries; fixed at zero."
+    )
     max_retries: int = Field(
         default=2,
         ge=0,
         le=10,
-        description="Extra attempts after a transient model-server failure.",
+        description="Application-level extra attempts after a retryable model-server failure.",
     )
     retry_backoff: float = Field(
         default=1.0,
@@ -483,7 +491,7 @@ def build_openai_client(
         base_url=config.base_url,
         api_key=config.api_key,
         timeout=config.timeout,
-        max_retries=0,
+        max_retries=config.client_max_retries,
         http_client=build_local_http_client(config.timeout, transport=transport),
     )
 

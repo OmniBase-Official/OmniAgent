@@ -291,6 +291,23 @@ def test_an_empty_profile_is_allowed(project: Path) -> None:
     assert sources["model"] == "file:defaults"
 
 
+def test_retry_layers_are_visible_and_independent(project: Path) -> None:
+    settings, sources = settings_at(project, cli={"max_retries": 7})
+    agent_config = settings.agent_config()
+
+    assert settings.max_retries == 7
+    assert sources["max_retries"] == "command line"
+    assert settings.client_max_retries == 0
+    assert sources["client_max_retries"] == "built-in"
+    assert agent_config.max_retries == 7
+    assert agent_config.client_max_retries == 0
+
+
+def test_http_retry_setting_is_fixed_at_zero(project: Path) -> None:
+    with pytest.raises(ConfigError, match="client_max_retries"):
+        settings_at(project, cli={"client_max_retries": 1})
+
+
 # --------------------------------------------------------------------------- #
 # types and conversion
 # --------------------------------------------------------------------------- #

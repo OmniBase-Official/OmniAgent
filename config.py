@@ -28,7 +28,7 @@ import os
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
@@ -66,6 +66,9 @@ class Settings(BaseModel):
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     max_steps: int = Field(default=8, ge=1, le=50)
     timeout: float = Field(default=180.0, gt=0)
+    client_max_retries: Literal[0] = Field(
+        default=0, description="OpenAI SDK HTTP retries; fixed at zero."
+    )
     max_retries: int = Field(default=2, ge=0, le=10)
     retry_backoff: float = Field(default=1.0, ge=0.0)
     max_repeated_actions: int = Field(default=2, ge=1, le=10)
@@ -73,7 +76,7 @@ class Settings(BaseModel):
     log_file: Path | None = Field(default=None)
     log_level: str = Field(default="INFO")
     log_console: bool = Field(default=False)
-    verbose: bool = Field(default=True)
+    verbose: bool = Field(default=False)
 
     @field_validator("base_url")
     @classmethod
@@ -97,6 +100,7 @@ class Settings(BaseModel):
             temperature=self.temperature,
             max_steps=self.max_steps,
             timeout=self.timeout,
+            client_max_retries=self.client_max_retries,
             max_retries=self.max_retries,
             retry_backoff=self.retry_backoff,
             max_repeated_actions=self.max_repeated_actions,
