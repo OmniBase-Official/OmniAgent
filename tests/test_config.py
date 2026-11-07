@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 
+import main
+from agent import DEFAULT_MODEL
 from config import (
     DEFAULT_CONFIG_NAME,
     ConfigError,
@@ -56,8 +58,18 @@ def settings_at(
 def test_built_in_defaults_when_there_is_nothing_else(tmp_path: Path) -> None:
     settings, sources = settings_at(tmp_path)
 
+    assert settings.model == DEFAULT_MODEL
+    assert sources["model"] == "built-in"
     assert settings.max_steps == 8
     assert sources["max_steps"] == "built-in"
+
+
+def test_model_help_describes_the_code_default(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main.parse_args(["--help"])
+
+    assert caught.value.code == 0
+    assert f"(default: {DEFAULT_MODEL})" in capsys.readouterr().out
 
 
 def test_the_config_file_is_discovered_in_the_working_directory(project: Path) -> None:
