@@ -381,3 +381,25 @@ def test_the_rendered_table_names_each_source(project: Path) -> None:
     assert "profile:demo" in rendered
     assert "file:defaults" in rendered
     assert "built-in" in rendered
+
+
+def test_verbose_is_disabled_by_default(tmp_path: Path) -> None:
+    settings, _ = settings_at(tmp_path)
+
+    assert settings.verbose is False
+    assert settings.agent_config().verbose is False
+
+
+def test_verbose_cli_flags_override_the_default() -> None:
+    assert main.cli_settings(main.parse_args(["--verbose"]))["verbose"] is True
+    assert main.cli_settings(main.parse_args(["--quiet"]))["verbose"] is False
+
+
+def test_verbose_and_quiet_cannot_be_used_together(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main.parse_args(["--verbose", "--quiet"])
+
+    assert caught.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err

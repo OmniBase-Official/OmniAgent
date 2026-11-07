@@ -295,6 +295,7 @@ python main.py --model qwen2.5-coder:7b --quiet
 | `--max-steps` | `8` | Maximum ReAct iterations per question. |
 | `--temperature` | `0.1` | Sampling temperature. Low values keep the format stable. |
 | `--quiet` | off | Hide the Thought/Action/Observation trace. |
+| `--verbose` | off | Show the Thought/Action/Observation trace; cannot be combined with `--quiet`. |
 | `--ask` | — | Answer one question and exit. |
 | `--log-file` | — | Append structured JSON-lines logs here (env: `OMNIAGENT_LOG_FILE`). |
 | `--log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` (env: `OMNIAGENT_LOG_LEVEL`). |

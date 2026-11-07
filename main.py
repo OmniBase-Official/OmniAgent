@@ -127,11 +127,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Also stream the JSON logs to stderr (stdout keeps the readable trace).",
     )
-    settings.add_argument(
+    trace_flags = settings.add_mutually_exclusive_group()
+    trace_flags.add_argument(
         "--quiet",
         action="store_true",
         default=None,
         help="Hide the Thought/Action/Observation trace.",
+    )
+    trace_flags.add_argument(
+        "--verbose",
+        action="store_true",
+        default=None,
+        help="Show the Thought/Action/Observation trace.",
     )
     return parser.parse_args(argv)
 
@@ -154,7 +161,9 @@ def cli_settings(args: argparse.Namespace) -> dict[str, object]:
         )
         if getattr(args, name) is not None
     }
-    if args.quiet is not None:
+    if args.verbose is not None:
+        supplied["verbose"] = args.verbose
+    elif args.quiet is not None:
         supplied["verbose"] = not args.quiet
     return supplied
 
