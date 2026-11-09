@@ -11,66 +11,72 @@ from typing import Any
 import pytest
 
 import observability as obs
+from tests.log_capture import (
+    configure_memory_sink,
+    reset_capture,
+)
+from tests.log_capture import (
+    read_lines as read_memory_lines,
+)
 
 
 @pytest.fixture(autouse=True)
 def _clean_logging() -> Iterator[None]:
     """Every test starts and ends with no handlers and an empty context."""
-    obs.reset()
+    reset_capture()
     yield
-    obs.reset()
+    reset_capture()
 
 
 def read_lines(path: Path) -> list[dict[str, Any]]:
-    """Parse a JSON-lines log file into dictionaries."""
-    for handler in obs.get_logger().handlers:
-        handler.flush()
-    text = path.read_text(encoding="utf-8").strip()
-    if not text:
-        return []
-    return [json.loads(line) for line in text.splitlines()]
+    """Read the test-only in-memory JSON-lines sink keyed by ``path``."""
+    return read_memory_lines(path)
 
 
 def test_event_writes_one_json_object_per_line(tmp_path: Path) -> None:
     log_file = tmp_path / "omniagent.jsonl"
-    obs.configure(log_file=log_file)
+    configure_memory_sink(log_file)
 
-    obs.event("agent.turn.start", question="What is 2 + 2?")
-    obs.event("agent.turn.end", answer="4")
+    obs.event("agent.turn.start", status="started", question="QUESTION_CANARY")
+    obs.event("agent.turn.end", status="completed", answer="ANSWER_CANARY")
 
     records = read_lines(log_file)
     assert [record["event"] for record in records] == ["agent.turn.start", "agent.turn.end"]
-    assert records[0]["question"] == "What is 2 + 2?"
-    assert records[0]["level"] == "INFO"
-    assert records[0]["logger"] == obs.LOGGER_NAME
-    assert records[0]["ts"].endswith("Z")
+    assert records[0]["status"] == "started"
+    assert records[1]["status"] == "completed"
+    assert records[0]["runtime_version"]
+    assert "QUESTION_CANARY" not in json.dumps(records)
+    assert "ANSWER_CANARY" not in json.dumps(records)
 
 
 def test_message_defaults_to_the_event_name(tmp_path: Path) -> None:
     log_file = tmp_path / "log.jsonl"
-    obs.configure(log_file=log_file)
+    configure_memory_sink(log_file)
 
-    obs.event("agent.step.start")
-    obs.event("agent.step.end", "finished cleanly")
+    obs.event("agent.turn.start", status="started")
+    obs.event("agent.turn.end", "MESSAGE_CANARY", status="completed")
 
     records = read_lines(log_file)
-    assert records[0]["message"] == "agent.step.start"
-    assert records[1]["message"] == "finished cleanly"
+    assert "message" not in records[0]
+    assert "message" not in records[1]
+    assert "MESSAGE_CANARY" not in json.dumps(records)
 
 
 def test_configure_returns_a_session_id_and_binds_it(tmp_path: Path) -> None:
     log_file = tmp_path / "log.jsonl"
-    session_id = obs.configure(log_file=log_file, session_id="fixed-session")
+    session_id = configure_memory_sink(log_file, session_id="fixed-session")
 
     assert session_id == "fixed-session"
-    obs.event("agent.turn.start")
-    assert read_lines(log_file)[0]["session_id"] == "fixed-session"
+    obs.event("agent.turn.start", status="started")
+    record = read_lines(log_file)[0]
+    assert record["event"] == "agent.turn.start"
+    assert "session_id" not in record
 
 
 def test_generated_session_ids_are_unique(tmp_path: Path) -> None:
-    first = obs.configure(log_file=tmp_path / "a.jsonl")
+    first = configure_memory_sink(tmp_path / "a.jsonl")
     obs.reset()
-    second = obs.configure(log_file=tmp_path / "b.jsonl")
+    second = configure_memory_sink(tmp_path / "b.jsonl")
 
     assert first
     assert second
@@ -79,22 +85,26 @@ def test_generated_session_ids_are_unique(tmp_path: Path) -> None:
 
 def test_bind_attaches_and_restores_context(tmp_path: Path) -> None:
     log_file = tmp_path / "log.jsonl"
-    obs.configure(log_file=log_file, session_id="s1")
+    configure_memory_sink(log_file, session_id="s1")
 
-    with obs.bind(turn=1):
-        obs.event("outer")
+    with obs.bind(turn=1, question="BOUND_CANARY"):
+        obs.event("agent.turn.start", status="started")
         with obs.bind(step=2):
-            obs.event("inner")
-        obs.event("after_inner")
-    obs.event("after_outer")
+            obs.event("agent.llm.request", status="requested", step_count=2)
+        obs.event("agent.turn.end", status="completed", step_count=1)
+    obs.event("agent.turn.start", status="started")
 
     outer, inner, after_inner, after_outer = read_lines(log_file)
-    assert outer["turn"] == 1
-    assert "step" not in outer
-    assert (inner["turn"], inner["step"]) == (1, 2)
-    assert "step" not in after_inner
-    assert "turn" not in after_outer
-    assert after_outer["session_id"] == "s1"
+    assert [record["event"] for record in (outer, inner, after_inner, after_outer)] == [
+        "agent.turn.start",
+        "agent.llm.request",
+        "agent.turn.end",
+        "agent.turn.start",
+    ]
+    assert inner["step_count"] == 2
+    assert "turn" not in outer
+    assert "step" not in inner
+    assert "BOUND_CANARY" not in json.dumps([outer, inner, after_inner, after_outer])
 
 
 def test_bind_restores_context_when_the_block_raises() -> None:
@@ -106,21 +116,21 @@ def test_bind_restores_context_when_the_block_raises() -> None:
 
 def test_explicit_field_beats_bound_context(tmp_path: Path) -> None:
     log_file = tmp_path / "log.jsonl"
-    obs.configure(log_file=log_file)
+    configure_memory_sink(log_file)
 
-    with obs.bind(step=1):
-        obs.event("agent.step.start", step=9)
+    with obs.bind(step_count=1):
+        obs.event("agent.turn.start", status="started", step_count=9)
 
-    assert read_lines(log_file)[0]["step"] == 9
+    assert read_lines(log_file)[0]["step_count"] == 9
 
 
 @pytest.mark.parametrize(
     "field",
     ["api_key", "API_KEY", "openai_api_key", "auth_token", "password", "client_secret"],
 )
-def test_credentials_are_redacted(tmp_path: Path, field: str) -> None:
+def test_credentials_are_dropped(tmp_path: Path, field: str) -> None:
     log_file = tmp_path / "log.jsonl"
-    obs.configure(log_file=log_file)
+    configure_memory_sink(log_file)
 
     # Annotated as Any so mypy does not read the dynamic key as a possible
     # collision with event()'s keyword-only level/logger/exc_info parameters.
@@ -128,7 +138,7 @@ def test_credentials_are_redacted(tmp_path: Path, field: str) -> None:
     obs.event("agent.llm.request", **secret_field)
 
     record = read_lines(log_file)[0]
-    assert record[field] == "***redacted***"
+    assert field not in record
     assert "sk-super-secret-value" not in json.dumps(record)
 
 
@@ -141,51 +151,49 @@ def test_token_counters_are_not_mistaken_for_credentials(tmp_path: Path, field: 
     The policy stays default-deny; these names are on an explicit allow-list.
     """
     log_file = tmp_path / "log.jsonl"
-    obs.configure(log_file=log_file)
+    configure_memory_sink(log_file)
 
     counters: dict[str, Any] = {field: 1234}
     obs.event("agent.llm.response", **counters)
 
-    assert read_lines(log_file)[0][field] == 1234
+    assert field not in read_lines(log_file)[0]
 
 
-def test_nested_credentials_are_redacted(tmp_path: Path) -> None:
+def test_nested_credentials_are_dropped(tmp_path: Path) -> None:
     log_file = tmp_path / "log.jsonl"
-    obs.configure(log_file=log_file)
+    configure_memory_sink(log_file)
 
     obs.event("agent.llm.request", config={"model": "qwen2.5:7b", "api_key": "sk-secret"})
 
     record = read_lines(log_file)[0]
-    assert record["config"]["model"] == "qwen2.5:7b"
-    assert record["config"]["api_key"] == "***redacted***"
+    assert "config" not in record
 
 
-def test_long_fields_are_truncated(tmp_path: Path) -> None:
+def test_long_fields_are_dropped(tmp_path: Path) -> None:
     log_file = tmp_path / "log.jsonl"
-    obs.configure(log_file=log_file)
+    configure_memory_sink(log_file)
 
-    obs.event("agent.llm.request", prompt="x" * (obs.MAX_FIELD_LENGTH + 500))
+    obs.event("agent.llm.request", prompt="x" * 2_500)
 
-    prompt = read_lines(log_file)[0]["prompt"]
-    assert prompt.startswith("x" * 100)
-    assert prompt.endswith(f"...(truncated, {obs.MAX_FIELD_LENGTH + 500} chars)")
-    assert len(prompt) < obs.MAX_FIELD_LENGTH + 100
+    record = read_lines(log_file)[0]
+    assert "prompt" not in record
+    assert "x" * 100 not in json.dumps(record)
 
 
 def test_non_serialisable_values_do_not_break_the_line(tmp_path: Path) -> None:
     log_file = tmp_path / "log.jsonl"
-    obs.configure(log_file=log_file)
+    configure_memory_sink(log_file)
 
     obs.event("agent.tool.call", tool=object(), numbers=[1, 2.5, None, True])
 
     record = read_lines(log_file)[0]
-    assert "object object at" in record["tool"]
-    assert record["numbers"] == [1, 2.5, None, True]
+    assert "tool" not in record
+    assert "numbers" not in record
 
 
-def test_exceptions_are_captured(tmp_path: Path) -> None:
+def test_exception_details_are_never_captured(tmp_path: Path) -> None:
     log_file = tmp_path / "log.jsonl"
-    obs.configure(log_file=log_file)
+    configure_memory_sink(log_file)
 
     def explode() -> None:
         raise RuntimeError("tool exploded")
@@ -193,11 +201,17 @@ def test_exceptions_are_captured(tmp_path: Path) -> None:
     try:
         explode()
     except RuntimeError:
-        obs.event("agent.tool.error", level=logging.ERROR, exc_info=True)
+        obs.event(
+            "tool.crashed",
+            level=logging.ERROR,
+            status="error",
+            tool_name="calculate",
+            exc_info=True,
+        )
 
     record = read_lines(log_file)[0]
-    assert record["level"] == "ERROR"
-    assert "RuntimeError: tool exploded" in record["error"]
+    assert record["status"] == "error"
+    assert "error" not in record
 
 
 def test_events_without_an_exception_carry_no_error_field(tmp_path: Path) -> None:
@@ -207,7 +221,7 @@ def test_events_without_an_exception_carry_no_error_field(tmp_path: Path) -> Non
     dropped every ordinary record.
     """
     log_file = tmp_path / "log.jsonl"
-    obs.configure(log_file=log_file)
+    configure_memory_sink(log_file)
 
     obs.event("agent.turn.start", question="hello")
 
@@ -217,43 +231,64 @@ def test_events_without_an_exception_carry_no_error_field(tmp_path: Path) -> Non
 
 def test_level_filters_events_out(tmp_path: Path) -> None:
     log_file = tmp_path / "log.jsonl"
-    obs.configure(level=logging.WARNING, log_file=log_file)
+    configure_memory_sink(log_file, level=logging.WARNING)
 
-    obs.event("agent.debug", level=logging.DEBUG)
-    obs.event("agent.info", level=logging.INFO)
-    obs.event("agent.warning", level=logging.WARNING)
+    obs.event("agent.turn.start", level=logging.DEBUG, status="started")
+    obs.event("agent.turn.start", level=logging.INFO, status="started")
+    obs.event("agent.turn.start", level=logging.WARNING, status="started")
 
-    assert [record["event"] for record in read_lines(log_file)] == ["agent.warning"]
+    assert [record["event"] for record in read_lines(log_file)] == ["agent.turn.start"]
 
 
 def test_configure_is_idempotent(tmp_path: Path) -> None:
     log_file = tmp_path / "log.jsonl"
-    obs.configure(log_file=log_file, session_id="s1")
-    obs.configure(log_file=log_file, session_id="s2")
+    configure_memory_sink(log_file, session_id="s1")
+    configure_memory_sink(log_file, session_id="s2")
 
-    obs.event("agent.turn.start")
+    obs.event("agent.turn.start", status="started")
 
     records = read_lines(log_file)
     assert len(records) == 1, "the second configure() must not add a duplicate handler"
-    assert records[0]["session_id"] == "s1"
+    assert records[0]["event"] == "agent.turn.start"
+    assert "session_id" not in records[0]
 
 
 def test_force_reconfigures(tmp_path: Path) -> None:
     first = tmp_path / "first.jsonl"
     second = tmp_path / "second.jsonl"
-    obs.configure(log_file=first, session_id="s1")
-    obs.configure(log_file=second, session_id="s2", force=True)
+    configure_memory_sink(first, session_id="s1")
+    configure_memory_sink(second, session_id="s2", force=True)
 
-    obs.event("agent.turn.start")
+    obs.event("agent.turn.start", status="started")
 
     assert read_lines(first) == []
-    assert read_lines(second)[0]["session_id"] == "s2"
+    assert read_lines(second)[0]["event"] == "agent.turn.start"
+    assert "session_id" not in read_lines(second)[0]
+
+
+@pytest.mark.parametrize(
+    ("configured", "force"), [(False, False), (True, False), (True, True)]
+)
+def test_configure_rejects_log_file_before_any_path_side_effect(
+    tmp_path: Path, configured: bool, force: bool
+) -> None:
+    if configured:
+        obs.configure()
+    target = tmp_path / "not-created" / "operational.jsonl"
+    handlers_before = tuple(obs.get_logger().handlers)
+
+    with pytest.raises(RuntimeError, match="persistent operational log files are disabled"):
+        obs.configure(log_file=target, force=force)
+
+    assert not target.parent.exists()
+    assert not target.exists()
+    assert tuple(obs.get_logger().handlers) == handlers_before
 
 
 def test_quiet_by_default(capsys: pytest.CaptureFixture[str]) -> None:
     """With no log file and no console flag, nothing reaches the terminal."""
     obs.configure()
-    obs.event("agent.turn.start", question="hello")
+    obs.event("agent.turn.start", status="started", question="hello")
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -263,16 +298,51 @@ def test_quiet_by_default(capsys: pytest.CaptureFixture[str]) -> None:
 def test_console_streams_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
     """stdout belongs to the human-readable trace; JSON goes to stderr."""
     obs.configure(console=True, session_id="s1")
-    obs.event("agent.turn.start", question="hello")
+    obs.event("agent.turn.start", status="started", question="hello")
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert json.loads(captured.err.strip())["question"] == "hello"
+    record = json.loads(captured.err.strip())
+    assert record["event"] == "agent.turn.start"
+    assert record["record_type"] == "operational_telemetry"
+    assert "question" not in record
+
+
+def test_console_sink_does_not_emit_raw_canaries(capsys: pytest.CaptureFixture[str]) -> None:
+    obs.configure(console=True, session_id="console-canary")
+    obs.event(
+        "agent.llm.response",
+        reply="RAW_REPLY_CANARY",
+        question="RAW_PROMPT_CANARY",
+        tool_input="RAW_ARGUMENT_CANARY",
+        observation="RAW_OBSERVATION_CANARY",
+        answer="RAW_ANSWER_CANARY",
+        error="RAW_ERROR_CANARY",
+        status="succeeded",
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert all(
+        canary not in captured.err
+        for canary in (
+            "RAW_REPLY_CANARY",
+            "RAW_PROMPT_CANARY",
+            "RAW_ARGUMENT_CANARY",
+            "RAW_OBSERVATION_CANARY",
+            "RAW_ANSWER_CANARY",
+            "RAW_ERROR_CANARY",
+            "console-canary",
+        )
+    )
+    record = json.loads(captured.err.strip())
+    assert record["record_type"] == "operational_telemetry"
+    assert record["status"] == "succeeded"
 
 
 def test_agent_logs_do_not_propagate_to_the_root_logger(tmp_path: Path) -> None:
     """An embedding application's root handlers must not pick up our records."""
-    obs.configure(log_file=tmp_path / "log.jsonl")
+    configure_memory_sink(tmp_path / "log.jsonl")
     assert obs.get_logger().propagate is False
 
 
@@ -281,14 +351,15 @@ def test_get_logger_returns_children() -> None:
     assert obs.get_logger("tools").name == f"{obs.LOGGER_NAME}.tools"
 
 
-def test_child_logger_events_carry_context(tmp_path: Path) -> None:
+def test_child_logger_events_do_not_persist_context_or_logger_names(tmp_path: Path) -> None:
     log_file = tmp_path / "log.jsonl"
-    obs.configure(log_file=log_file, session_id="s1")
+    configure_memory_sink(log_file, session_id="s1")
 
     with obs.bind(turn=3):
-        obs.event("tool.call", logger=obs.get_logger("tools"), tool="calculate")
+        obs.event("tool.unknown", logger=obs.get_logger("tools"), status="rejected")
 
     record = read_lines(log_file)[0]
-    assert record["logger"] == f"{obs.LOGGER_NAME}.tools"
-    assert record["turn"] == 3
-    assert record["session_id"] == "s1"
+    assert record["event"] == "tool.unknown"
+    assert "logger" not in record
+    assert "turn" not in record
+    assert "session_id" not in record

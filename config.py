@@ -18,8 +18,10 @@ A config file is TOML, read with the standard library -- no new dependency::
 
     [profile.demo]
     model = "qwen2.5-coder:7b"
-    log_file = "data/demo.jsonl"
     max_steps = 10
+
+Persistent ``log_file`` settings are rejected by the CLI until an approved
+retention and deletion policy exists.
 """
 
 from __future__ import annotations

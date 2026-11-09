@@ -65,3 +65,6 @@ omniagent-core/build*/
 .scratch/
 .brief11-worktree/
 .codex-worktrees/
+
+# Local AI handoff and role prompts
+/docs/pm/*-prompt.md

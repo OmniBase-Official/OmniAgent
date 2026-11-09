@@ -17,21 +17,28 @@ together instead of silently moving the figure.
 from __future__ import annotations
 
 import hashlib
+import hmac
+import re
+import secrets
 import subprocess
 import sys
-from collections.abc import Callable
+import tempfile
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 sys.path.insert(0, str(PROJECT / "scripts"))
 
-from eval_workspace import sealed_workspace
+from eval_workspace import FIXTURE_FILES, fixture_only_workspace, validate_fixture
 
 from agent import AgentConfig, AgentError, ReActAgent
 from sandbox import get_workspace, set_workspace
+from tools import FIXED_TOOL_ALLOWLIST
 
 if TYPE_CHECKING:
     from openai import OpenAI
@@ -41,30 +48,51 @@ if TYPE_CHECKING:
 #: the subject of a listing question there.
 FIXTURE = PROJECT / "grounding-cohort"
 
+# Frozen over UTF-8 paths and LF-normalised UTF-8 content, NUL delimited.
+FROZEN_FIXTURE_SHA256 = "f13f6e68db1393947652ebe5fad33ce800e46fdab38cc7ae570cffd4224cbb8a"
+
+
+class FixtureDriftError(RuntimeError):
+    """The staged fixture no longer matches the frozen inventory and bytes."""
+
+
+class TrialRecordSchemaError(ValueError):
+    """A trial record contains metadata outside the approved closed schema."""
+
+
+def staged_fixture_sha256(root: Path) -> str:
+    """Hash exact staged bytes and inventory; staging writes UTF-8 with LF endings."""
+    fixture = root / "grounding-cohort"
+    try:
+        fixture_only_workspace(root, fixture)
+        digest = hashlib.sha256()
+        for name in sorted(FIXTURE_FILES):
+            digest.update(name.encode("utf-8") + b"\0")
+            digest.update((fixture / name).read_bytes() + b"\0")
+        return digest.hexdigest()
+    except (OSError, ValueError) as exc:
+        raise FixtureDriftError("fixture unreadable or invalid") from exc
+
+
+def verify_staged_fixture(root: Path) -> None:
+    if staged_fixture_sha256(root) != FROZEN_FIXTURE_SHA256:
+        raise FixtureDriftError("fixture drift")
+
 
 def fixture_sha256(directory: Path = FIXTURE) -> str:
-    """Hash the fixture's inventory and text, over a defined ordering.
+    """Hash the validated flat inventory and normalized text contents.
 
-    The ordering: every file under ``directory``, recursively, sorted by its
-    POSIX path relative to ``directory``. Each contributes its relative path
-    and then its text, both NUL-terminated so a path ending where the next
-    begins cannot produce the same stream as a different inventory. The path
-    is in the digest so an added, removed or renamed file changes it.
-
-    The text is read with universal newlines and hashed as ``\n``, not as the
-    bytes on disk. This repository sets ``core.autocrlf=true`` and carries no
-    ``.gitattributes``, so the same commit is CRLF here and LF on a Linux
-    checkout; a byte hash would call that fixture drift. The cost is stated
-    rather than hidden: a change that only rewrites line endings does not move
-    this digest. Every other edit does, and the oracle reads the fixture
-    through the same normalised view.
+    Validation happens before opening any fixture file. The frozen inventory
+    is intentionally flat, which keeps the subject boundary auditable and
+    ensures added entries, links, and special files fail closed. Text uses
+    universal newlines so the same commit hashes equally on CRLF and LF
+    checkouts.
     """
+    validate_fixture(directory)
     digest = hashlib.sha256()
-    for path in sorted(
-        (p for p in directory.rglob("*") if p.is_file()),
-        key=lambda p: p.relative_to(directory).as_posix(),
-    ):
-        digest.update(path.relative_to(directory).as_posix().encode("utf-8"))
+    for name in sorted(FIXTURE_FILES):
+        path = directory / name
+        digest.update(name.encode("utf-8"))
         digest.update(b"\0")
         digest.update(path.read_text(encoding="utf-8").encode("utf-8"))
         digest.update(b"\0")
@@ -165,6 +193,7 @@ def _table(path: Path) -> list[dict[str, str]]:
 
 
 def _matching_row(task: Task, root: Path) -> dict[str, str]:
+    validate_fixture(root / FIXTURE.name)
     rows = _table(root / task.subject)
     for column in (task.key_column, task.answer_column):
         if rows and column not in rows[0]:
@@ -191,6 +220,7 @@ def distractors(task: Task, *, root: Path = PROJECT) -> tuple[str, ...]:
     graded a reversed comparison answer as correct for ten runs.
     """
     accepted = accepted_answer(task, root=root)
+    validate_fixture(root / FIXTURE.name)
     return tuple(
         row[task.answer_column]
         for row in _table(root / task.subject)
@@ -215,6 +245,138 @@ POLICY_VIOLATION = "policy_violation"
 STEP_EXHAUSTED = "step_exhausted"
 TOOL_ERROR = "tool_error"
 AGENT_ERROR = "agent_error"
+
+_SAFE_COHORT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
+_SAFE_MODEL_TAG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
+_SAFE_RUNTIME_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .:+/_-]{0,63}\Z")
+_SAFE_COMMIT = re.compile(r"[0-9a-f]{7,40}\Z")
+_SAFE_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_SAFE_MODEL_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_TOOL_STATUSES = frozenset({"ok", "error", "none"})
+_EXECUTION_STATUSES = frozenset(
+    {COMPLETED, POLICY_VIOLATION, STEP_EXHAUSTED, TOOL_ERROR, AGENT_ERROR}
+)
+_MAX_REPEATS = 3
+_MAX_STEPS = 64
+_MAX_TIMEOUT_SECONDS = 3600.0
+_MAX_RECORDED_TOOLS = _MAX_STEPS + 1
+_MAX_TOOL_NAME_LENGTH = 128
+_ACTIVE_RECORD_KEY: ContextVar[bytes | None] = ContextVar(
+    "active_evaluation_record_key", default=None
+)
+
+
+@contextmanager
+def _run_record_context() -> Iterator[None]:
+    token = _ACTIVE_RECORD_KEY.set(secrets.token_bytes(32))
+    try:
+        yield
+    finally:
+        _ACTIVE_RECORD_KEY.reset(token)
+
+
+def _invalid_trial_record() -> NoReturn:
+    """Raise a fixed error that never repeats caller-controlled values."""
+    raise TrialRecordSchemaError("evaluation trial record violates the approved schema")
+
+
+def _matches(pattern: re.Pattern[str], value: object) -> bool:
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def _opaque_identifier(value: str, key: bytes) -> str:
+    """Return a run-scoped pseudonym so caller metadata cannot enter records."""
+    return hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _validate_trial_identity(cohort_id: str, task: Task, repeat: int) -> Task:
+    if not _matches(_SAFE_COHORT_ID, cohort_id):
+        _invalid_trial_record()
+    if type(task) is not Task or type(task.task_id) is not str:
+        _invalid_trial_record()
+    canonical_task = next((item for item in TASKS if item.task_id == task.task_id), None)
+    if canonical_task is None:
+        _invalid_trial_record()
+    if (
+        type(task.variant) is not str
+        or task.variant != canonical_task.variant
+        or type(task.allowlist) is not tuple
+        or any(type(name) is not str for name in task.allowlist)
+        or task.allowlist != canonical_task.allowlist
+    ):
+        _invalid_trial_record()
+    if type(repeat) is not int or not 1 <= repeat <= _MAX_REPEATS:
+        _invalid_trial_record()
+    return canonical_task
+
+
+def _validate_preflight_record(
+    preflight: Preflight, fixture_hash: str, protocol_hash: str
+) -> None:
+    if type(preflight) is not Preflight:
+        _invalid_trial_record()
+    if not _matches(_SAFE_COMMIT, preflight.commit):
+        _invalid_trial_record()
+    if type(preflight.tree_clean) is not bool and preflight.tree_clean != "unknown":
+        _invalid_trial_record()
+    if not _matches(_SAFE_MODEL_TAG, preflight.model_tag):
+        _invalid_trial_record()
+    if not _matches(_SAFE_MODEL_DIGEST, preflight.model_digest):
+        _invalid_trial_record()
+    if type(preflight.endpoint) is not str or preflight.endpoint != LOOPBACK:
+        _invalid_trial_record()
+    if not _matches(_SAFE_RUNTIME_VERSION, preflight.runtime_version):
+        _invalid_trial_record()
+    if (
+        type(preflight.temperature) not in (int, float)
+        or preflight.temperature != 0.0
+        or type(preflight.max_steps) is not int
+        or not 1 <= preflight.max_steps <= _MAX_STEPS
+        or type(preflight.timeout_seconds) not in (int, float)
+        or not 0.0 < preflight.timeout_seconds <= _MAX_TIMEOUT_SECONDS
+        or type(preflight.max_retries) is not int
+        or preflight.max_retries != 0
+    ):
+        _invalid_trial_record()
+    if not _matches(_SAFE_SHA256, fixture_hash) or not _matches(_SAFE_SHA256, protocol_hash):
+        _invalid_trial_record()
+
+
+def _validated_observation(observed: Observed) -> tuple[list[str], list[str]]:
+    if type(observed) is not Observed:
+        _invalid_trial_record()
+    if type(observed.tools) is not tuple or len(observed.tools) > _MAX_RECORDED_TOOLS:
+        _invalid_trial_record()
+    if any(type(name) is not str or len(name) > _MAX_TOOL_NAME_LENGTH for name in observed.tools):
+        _invalid_trial_record()
+    if (
+        type(observed.tool_status) is not tuple
+        or len(observed.tool_status) != len(observed.tools)
+        or any(
+            type(status) is not str or status not in _TOOL_STATUSES
+            for status in observed.tool_status
+        )
+    ):
+        _invalid_trial_record()
+    if (
+        type(observed.execution_status) is not str
+        or observed.execution_status not in _EXECUTION_STATUSES
+        or type(observed.steps) is not int
+        or not 0 <= observed.steps <= _MAX_RECORDED_TOOLS
+        or any(
+            type(flag) is not bool
+            for flag in (
+                observed.answer_grounded,
+                observed.answer_names_distractor,
+                observed.tools_within_allowlist,
+            )
+        )
+    ):
+        _invalid_trial_record()
+    safe_tools = [
+        name if name in FIXED_TOOL_ALLOWLIST else "unknown" for name in observed.tools
+    ]
+    return safe_tools, list(observed.tool_status)
 
 
 @dataclass(frozen=True)
@@ -312,7 +474,6 @@ def protocol_sha256(tasks: tuple[Task, ...], preflight: Preflight) -> str:
 def trial_record(  # noqa: PLR0913 - one parameter per frozen record field, by design
     *,
     cohort_id: str,
-    trial_id: str,
     task: Task,
     repeat: int,
     preflight: Preflight,
@@ -320,18 +481,27 @@ def trial_record(  # noqa: PLR0913 - one parameter per frozen record field, by d
     protocol_hash: str,
     observed: Observed,
 ) -> dict[str, object]:
-    """Build one trial's record. Pure: it reads nothing and writes nothing.
+    """Build one trial's record without exposing caller-controlled identifiers.
 
     Every field is one the contract's reproducibility record lists. Nothing
     here is a prompt, a reply, a reasoning trace, a file's contents, a raw
     observation, a raw tool argument, a raw error or an endpoint URL -- and
     none of those is even a parameter, so none can arrive by accident.
     """
+    record_key = _ACTIVE_RECORD_KEY.get() or secrets.token_bytes(32)
+    canonical_task = _validate_trial_identity(cohort_id, task, repeat)
+    _validate_preflight_record(preflight, fixture_hash, protocol_hash)
+    safe_tools, tool_statuses = _validated_observation(observed)
+
     return {
-        "cohort_id": cohort_id,
-        "trial_id": trial_id,
-        "task_id": task.task_id,
-        "variant": task.variant,
+        "record_type": "evaluation_trial",
+        "cohort_id_hmac_sha256": _opaque_identifier(cohort_id, record_key),
+        "trial_id": (
+            f"{_opaque_identifier(cohort_id, record_key)}"
+            f"/{canonical_task.task_id}/r{repeat}"
+        ),
+        "task_id": canonical_task.task_id,
+        "variant": canonical_task.variant,
         "repeat": repeat,
         "arm": ARM,
         "category": CATEGORY,
@@ -339,37 +509,23 @@ def trial_record(  # noqa: PLR0913 - one parameter per frozen record field, by d
         "tree_clean": preflight.tree_clean,
         "fixture_sha256": fixture_hash,
         "protocol_sha256": protocol_hash,
-        "model_tag": preflight.model_tag,
-        "model_digest": preflight.model_digest,
-        "runtime_version": preflight.runtime_version,
+        "model_tag_hmac_sha256": _opaque_identifier(preflight.model_tag, record_key),
+        "model_digest_hmac_sha256": _opaque_identifier(preflight.model_digest, record_key),
+        "runtime_version_hmac_sha256": _opaque_identifier(preflight.runtime_version, record_key),
         "endpoint": preflight.endpoint,
         "temperature": preflight.temperature,
         "max_steps": preflight.max_steps,
         "timeout_seconds": preflight.timeout_seconds,
         "max_retries": preflight.max_retries,
-        "allowlist": list(task.allowlist),
-        "tools": list(observed.tools),
-        "tool_status": list(observed.tool_status),
+        "allowlist": list(canonical_task.allowlist),
+        "tools": safe_tools,
+        "tool_status": tool_statuses,
         "steps": observed.steps,
         "execution_status": observed.execution_status,
         "answer_grounded": observed.answer_grounded,
         "answer_names_distractor": observed.answer_names_distractor,
         "tools_within_allowlist": observed.tools_within_allowlist,
     }
-
-
-#: Paths this category adds that a trial's workspace must not open: the module
-#: holding the task texts and the rubric, and the test module exercising them.
-#:
-#: They are passed through ``sealed_workspace``'s own ``also_deny`` hatch
-#: rather than added to ``ANSWER_KEY``. That file holds the answer-key seal and
-#: three briefs have had to route around it; this category needs nothing from
-#: it but the function. The invariant test imports this tuple instead of
-#: restating it, so what the run seals and what the test checks cannot drift.
-SEALED_FROM_TRIALS: tuple[Path, ...] = (
-    PROJECT / "scripts" / "grounding_cohort.py",
-    PROJECT / "tests" / "test_grounding_cohort.py",
-)
 
 
 def grade(task: Task, answer: str, *, root: Path = PROJECT) -> tuple[bool, bool]:
@@ -481,7 +637,13 @@ def _execution_status(
 
 def _run_trial(task: Task, *, config: AgentConfig, client: OpenAI, root: Path) -> Observed:
     """One trial: a fresh agent, one turn, and sanitized categories out."""
-    agent = ReActAgent(config=config, client=client, printer=lambda _: None)
+    agent = ReActAgent(
+        config=config,
+        client=client,
+        printer=lambda _: None,
+        allowed_tools=task.allowlist,
+        before_model_request=lambda: verify_staged_fixture(root),
+    )
     try:
         answer = agent.run(task.prompt)
     except AgentError:
@@ -549,23 +711,39 @@ def run_cohort(  # noqa: PLR0913 - preflight, client and the run's own knobs
         timeout=preflight.timeout_seconds,
         max_retries=preflight.max_retries,
     )
-    fixture_hash = fixture_sha256(root / FIXTURE.name)
+    fixture_hash = FROZEN_FIXTURE_SHA256
     protocol_hash = protocol_sha256(tasks, preflight)
     records: list[dict[str, object]] = []
     stopped_on = _revision_mismatch(preflight, observe_revision())
 
     previous = get_workspace()
-    set_workspace(sealed_workspace(root, also_deny=SEALED_FROM_TRIALS))
-    try:
+    started = 0
+    with _run_record_context(), tempfile.TemporaryDirectory(
+        prefix="omniagent-eval-"
+    ) as scratch:
+      staged_root = Path(scratch)
+      staged_fixture = staged_root / FIXTURE.name
+      try:
+        source = root / FIXTURE.name
+        validate_fixture(source)
+        staged_fixture.mkdir()
+        for name in sorted(FIXTURE_FILES):
+            # Normalize checkout line endings before freezing the bytes read by tools.
+            content = (source / name).read_text(encoding="utf-8")
+            (staged_fixture / name).write_bytes(content.encode("utf-8"))
+        verify_staged_fixture(staged_root)
+        set_workspace(fixture_only_workspace(staged_root, staged_fixture))
         for task in tasks:
             for repeat in range(1, repeats + 1):
                 if stopped_on is not None:
                     break
-                observed = _run_trial(task, config=config, client=client, root=root)
+                verify_staged_fixture(staged_root)
+                started += 1
+                observed = _run_trial(task, config=config, client=client, root=staged_root)
+                verify_staged_fixture(staged_root)
                 records.append(
                     trial_record(
                         cohort_id=cohort_id,
-                        trial_id=f"{cohort_id}/{task.task_id}/r{repeat}",
                         task=task,
                         repeat=repeat,
                         preflight=preflight,
@@ -574,13 +752,20 @@ def run_cohort(  # noqa: PLR0913 - preflight, client and the run's own knobs
                         observed=observed,
                     )
                 )
+                verify_staged_fixture(staged_root)
                 # A disallowed call stops that trial and is never retried; an
                 # unexpected tool or server error stops the cohort, which the
                 # run rules list among the conditions that make it incomplete.
                 if observed.execution_status in (TOOL_ERROR, AGENT_ERROR):
                     stopped_on = observed.execution_status
                     break
-    finally:
+        if stopped_on is None:
+            verify_staged_fixture(staged_root)
+      except TrialRecordSchemaError:
+        stopped_on = "invalid_trial_record"
+      except (FixtureDriftError, OSError, ValueError, UnicodeError):
+        stopped_on = "fixture_drift"
+      finally:
         set_workspace(previous)
 
     if stopped_on is None:
@@ -590,8 +775,8 @@ def run_cohort(  # noqa: PLR0913 - preflight, client and the run's own knobs
     return CohortResult(
         records=tuple(records),
         config=config,
-        started=len(records),
+        started=started,
         completed=completed,
-        failed=len(records) - completed,
+        failed=started - completed,
         stopped_on=stopped_on,
     )

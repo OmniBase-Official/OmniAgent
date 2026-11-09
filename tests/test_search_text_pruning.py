@@ -270,7 +270,7 @@ def test_search_text_prunes_windows_junction_to_external_directory(tmp_path: Pat
     try:
         with os.scandir(root) as entries:
             entry = next(entries)
-            attrs = entry.stat(follow_symlinks=False).st_file_attributes
+            attrs = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
             assert attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT
             assert entry.is_dir(follow_symlinks=False)
             assert not entry.is_symlink(), "fixture must be a junction, not a symlink"

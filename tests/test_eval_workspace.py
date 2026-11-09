@@ -10,6 +10,7 @@ and asserts that nothing reachable holds a held-out question's text.
 
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -18,8 +19,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from eval_scoring import Question
-from eval_workspace import ANSWER_KEY, LISTING_ONLY, sealed_workspace
-from grounding_cohort import SEALED_FROM_TRIALS, TASKS, accepted_answer
+from eval_workspace import ANSWER_KEY, LISTING_ONLY, fixture_only_workspace, sealed_workspace
+from grounding_cohort import FIXTURE, TASKS, accepted_answer
 from holdout_eval import SEARCH_MARKER, SEARCH_SUBJECT, SESSIONS_UNDER_TEST
 from session_eval import WALK
 
@@ -60,8 +61,8 @@ EXPECTATION_CARRIERS: dict[str, frozenset[str]] = {
     "agent.budget.exhausted": frozenset(
         {
             "agent.py",  # the question's subject: the fact being measured
-            "README.md",  # the log event documented
-            "export_dataset.py",  # the log event filtered
+            "export_dataset.py",  # the log event is rejected here
+            "observability.py",  # the log event is emitted here
             "tests/test_agent_logging.py",  # the log event asserted
             "tests/test_export_dataset.py",  # the log event in a fixture
         }
@@ -118,7 +119,7 @@ def reachable_files(workspace: Workspace) -> list[Path]:
     ``.venv`` and ``models/`` and discarding it afterwards took 113 seconds.
     """
     found: list[Path] = []
-    stack = [PROJECT]
+    stack = [workspace.root]
     while stack:
         for child in stack.pop().iterdir():
             try:
@@ -358,21 +359,15 @@ def test_a_run_log_can_be_sealed_as_well(tmp_path: Path) -> None:
 # the invariant, extended over the evidence-grounding fixture
 # --------------------------------------------------------------------------- #
 #
-# The questions above are the old bank's, sealed through ANSWER_KEY. The
-# evidence-grounding category seals two further paths -- the module holding its
-# task texts and the test module exercising them -- through
-# ``sealed_workspace``'s own ``also_deny`` hatch, because ANSWER_KEY lives in
-# the one file three briefs have had to route around.
-#
-# ``SEALED_FROM_TRIALS`` is imported rather than restated here, so what a trial
-# seals and what this test checks cannot drift apart. If they could, a green
-# test would say nothing about the run.
+# The older evaluations use the answer-key seal above. The evidence-grounding
+# cohort uses a workspace exposing only its synthetic fixture.
 
 
 @pytest.fixture
-def grounding_sealed() -> Workspace:
+def grounding_sealed(tmp_path: Path) -> Workspace:
     """Exactly the workspace a grounding trial runs against."""
-    return sealed_workspace(PROJECT, also_deny=SEALED_FROM_TRIALS)
+    shutil.copytree(FIXTURE, tmp_path / FIXTURE.name)
+    return fixture_only_workspace(tmp_path, tmp_path / FIXTURE.name)
 
 
 def test_each_grounding_answer_has_exactly_one_reachable_carrier(

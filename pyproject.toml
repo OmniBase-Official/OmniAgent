@@ -19,6 +19,7 @@ dev = [
     "pytest>=8.0",
     "mypy>=1.10",
     "ruff>=0.8",
+    "setuptools>=68",
 ]
 # Only needed to run scripts/smoke_train.py; the agent itself needs none of it.
 # Pinned to the versions the smoke test was proved against.

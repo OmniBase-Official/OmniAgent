@@ -116,7 +116,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--workspace", type=Path, help="Directory the file tools may read inside."
     )
     settings.add_argument(
-        "--log-file", type=Path, help="Append structured JSON-lines logs to this file."
+        "--log-file",
+        type=Path,
+        help="Disabled: persistent logs require an approved retention and deletion policy.",
     )
     settings.add_argument(
         "--log-level", choices=LOG_LEVELS, help="Minimum level for the log (default: INFO)."
@@ -197,11 +199,11 @@ def answer(agent: ReActAgent, question: str) -> int:
     except KeyboardInterrupt:
         # A local 7B model can think for a long time; Ctrl-C during a step
         # should drop back to the prompt, not print a traceback.
-        obs.event("cli.interrupted", level=logging.WARNING, question=question)
+        obs.event("cli.interrupted", level=logging.WARNING, status="interrupted")
         print(Style.dim("\n(cancelled)"))
         return 130
     except AgentError as exc:
-        obs.event("cli.aborted", level=logging.ERROR, reason=str(exc), exc_info=True)
+        obs.event("cli.aborted", level=logging.ERROR, status="aborted")
         print(Style.red(f"\n[!] {exc}"))
         return 1
     print(Style.green("\nOmniAgent: ") + result + "\n")
@@ -260,6 +262,15 @@ def main(argv: list[str] | None = None) -> int:
         print(render(settings, sources))
         return 0
 
+    if settings.log_file is not None:
+        print(
+            Style.red(
+                "[!] persistent operational logging is disabled until a retention "
+                "and deletion policy is approved"
+            )
+        )
+        return 2
+
     # Structured logging must be live before the agent is built, so that even
     # construction and preflight end up in the log.
     session_id = obs.configure(
@@ -287,10 +298,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.profile:
         print(Style.dim(f"    profile  : {args.profile}"))
     print(Style.dim(f"    workspace: {workspace.root}"))
-    if settings.log_file is not None or settings.log_console:
+    if settings.log_console:
         print(Style.dim(f"    session  : {session_id}"))
-        if settings.log_file is not None:
-            print(Style.dim(f"    log      : {settings.log_file}"))
     if not preflight(agent):
         return 1
 
