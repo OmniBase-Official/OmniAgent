@@ -1,10 +1,10 @@
 """Run the whole fine-tuning pipeline on a CPU with a tiny model.
 
-The notebook in ``notebooks/`` is meant for a Colab GPU and a real base model,
-which cannot be exercised here. This script runs the same steps -- validate,
-load, LoRA-train, merge, generate -- small enough to finish on a laptop, so
-that an API change in transformers/trl/peft fails here rather than twenty
-minutes into someone's Colab session.
+The notebook in ``notebooks/`` needs a real GPU and a real base model, which a
+CPU cannot exercise. This script runs the same steps -- validate, load,
+LoRA-train, merge, generate -- with a tiny model, so an API change in
+transformers/trl/peft fails here in seconds instead of twenty minutes into a
+real training run.
 
 It is a smoke test: it proves the pipeline executes, not that the model is any
 good.

@@ -1,15 +1,16 @@
-"""Generate notebooks/train_omniagent_lora.ipynb.
+"""Generate a valid notebook JSON document from the source cells below.
 
-Writing the notebook as a script keeps the JSON valid by construction and lets
-the cell sources be linted like any other file.
+The cell sources are string literals, so ordinary linters do not inspect them.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 
-OUT = Path("notebooks/train_omniagent_lora.ipynb")
+OUT = Path(__file__).resolve().parent.parent / "notebooks" / "train_omniagent_lora.ipynb"
 
 
 def md(text: str) -> dict[str, object]:
@@ -360,7 +361,6 @@ So that the model Ollama loads is provably the model you built."""
     code(
         '''
 import hashlib
-import json
 import platform
 from datetime import datetime, timezone
 
@@ -477,16 +477,36 @@ stock one. A fine-tune that nobody checked is not an improvement."""
     ),
 ]
 
-NOTEBOOK = {
-    "cells": CELLS,
-    "metadata": {
-        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
-        "language_info": {"name": "python", "version": "3.12"},
-    },
-    "nbformat": 4,
-    "nbformat_minor": 5,
-}
+def cell_id(index: int, source: list[str]) -> str:
+    """First 8 hex characters of sha256 of f"{index}:{''.join(source)}"."""
+    value = f"{index}:{''.join(source)}".encode()
+    return hashlib.sha256(value).hexdigest()[:8]
 
-OUT.parent.mkdir(parents=True, exist_ok=True)
-OUT.write_text(json.dumps(NOTEBOOK, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-print(f"wrote {OUT} with {len(CELLS)} cells")
+
+def build_notebook() -> dict[str, object]:
+    """The notebook as a dict, with a deterministic id on every cell. No I/O."""
+    cells = deepcopy(CELLS)
+    for index, cell in enumerate(cells):
+        source = cell["source"]
+        if not isinstance(source, list) or not all(isinstance(line, str) for line in source):
+            raise TypeError("cell source must be a list of strings")
+        cell["id"] = cell_id(index, source)
+
+    return {
+        "cells": cells,
+        "metadata": {
+            "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+            "language_info": {"name": "python", "version": "3.12"},
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+
+
+if __name__ == "__main__":
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    OUT.write_text(
+        json.dumps(build_notebook(), indent=1, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    print(f"wrote {OUT} with {len(CELLS)} cells")

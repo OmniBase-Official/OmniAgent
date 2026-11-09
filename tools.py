@@ -16,9 +16,12 @@ import ast
 import logging
 import math
 import operator
-from collections.abc import Callable
+import os
+import stat
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -29,6 +32,7 @@ from sandbox import (
     MAX_READ_CHARS,
     TRUNCATION_NOTE,
     SandboxError,
+    Workspace,
     get_workspace,
 )
 
@@ -97,7 +101,7 @@ def _eval_node(node: ast.AST) -> float:  # noqa: PLR0912 - one branch per allowe
         return _eval_node(node.body)
 
     if isinstance(node, ast.Constant):
-        if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+        if isinstance(node.value, bool) or not isinstance(node.value, int | float):
             raise CalculationError(f"unsupported literal: {node.value!r}")
         return node.value
 
@@ -291,6 +295,12 @@ TOOLS: dict[str, Tool[Any]] = {
     ),
 }
 
+# Runtime capabilities are closed even if another module mutates the registry.
+# Task-level allowlists may narrow this set, but can never widen it.
+FIXED_TOOL_ALLOWLIST = frozenset(
+    {"calculate", "get_current_time", "read_file", "list_directory", "search_text", "file_info"}
+)
+
 
 class ToolArgumentError(ValueError):
     """Raised when an Action Input cannot be turned into a tool's arguments."""
@@ -401,16 +411,46 @@ def parse_tool_args[ArgsT: ToolArgs](tool: Tool[ArgsT], raw_input: str) -> ArgsT
     )
 
 
-def run_tool(name: str, tool_input: str) -> str:
+def run_tool(
+    name: str,
+    tool_input: str,
+    *,
+    allowed_tools: Collection[str] | None = None,
+) -> str:
     """Dispatch to a tool by name, returning its Observation text."""
-    tool = TOOLS.get(name.strip())
+    normalized_name = name.strip()
+    if normalized_name not in FIXED_TOOL_ALLOWLIST:
+        obs.event(
+            "tool.unknown",
+            logger=_log,
+            level=logging.WARNING,
+            status="rejected",
+        )
+        available = ", ".join(name for name in TOOLS if name in FIXED_TOOL_ALLOWLIST)
+        return (
+            f"Error: there is no tool called {name!r}, and naming one does not create "
+            f"the capability. If no available tool can get the information, then you "
+            f"cannot find it out, and saying so is the answer. Available tools are: "
+            f"{available}."
+        )
+
+    task_allowlist = FIXED_TOOL_ALLOWLIST if allowed_tools is None else allowed_tools
+    if normalized_name not in task_allowlist:
+        obs.event(
+            "tool.unknown",
+            logger=_log,
+            level=logging.WARNING,
+            status="rejected",
+        )
+        return "Error: tool is not allowed for this task."
+
+    tool = TOOLS.get(normalized_name)
     if tool is None:
         obs.event(
             "tool.unknown",
             logger=_log,
             level=logging.WARNING,
-            requested=name,
-            available=list(TOOLS),
+            status="rejected",
         )
         # Saying only "unknown tool" was not enough. Asked for the weather in
         # Bangkok with seven earlier questions in history, the agent invented
@@ -433,9 +473,8 @@ def run_tool(name: str, tool_input: str) -> str:
             "tool.invalid_args",
             logger=_log,
             level=logging.WARNING,
-            tool=tool.name,
-            tool_input=tool_input,
-            reason=str(exc),
+            status="rejected",
+            tool_name=tool.name,
         )
         return f"Error: {exc}"
 
@@ -446,9 +485,8 @@ def run_tool(name: str, tool_input: str) -> str:
             "tool.crashed",
             logger=_log,
             level=logging.ERROR,
-            tool=tool.name,
-            tool_input=tool_input,
-            exc_info=True,
+            status="error",
+            tool_name=tool.name,
         )
         return f"Error: tool {name!r} raised {type(exc).__name__}: {exc}"
 
@@ -534,6 +572,67 @@ def list_directory(path: str = ".") -> str:
     return f"{shown}:\n" + "\n".join(f"  {entry}" for entry in entries)
 
 
+def _searchable_files(workspace: Workspace, start: Path) -> list[Path]:  # noqa: PLR0912 - separate guard for each entry type and refusal
+    """Files under `start` the workspace admits, pruned branch by branch.
+
+    Resolving every path under a hidden directory and discarding it afterwards
+    is 87% of a search from the root.
+
+    The idiom is the one ``tests/test_eval_workspace.py:113 reachable_files``
+    already pays for: ask the workspace, and prune on its refusal rather than
+    on a second copy of ``sandbox.py``'s rules, which would drift.
+    """
+    found: list[tuple[Path, Path]] = []
+    stack = [(start, start)]
+    while stack:
+        walked_directory, resolved_directory = stack.pop()
+        try:
+            with os.scandir(walked_directory) as entries:
+                children = list(entries)
+        except OSError:
+            continue
+        for entry in children:
+            child = Path(entry.path)
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+                if os.name == "nt":
+                    is_reparse_point = bool(
+                        getattr(metadata, "st_file_attributes", 0)
+                        & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                    )
+                else:
+                    is_reparse_point = entry.is_symlink()
+
+                if is_reparse_point:
+                    resolved = workspace.resolve(workspace.display(child))
+                else:
+                    resolved = workspace.admit_resolved_child(resolved_directory, entry.name)
+
+                if entry.is_dir(follow_symlinks=False):
+                    if not entry.is_symlink():
+                        stack.append((child, resolved))
+                else:
+                    is_file = (
+                        entry.is_file()
+                        if is_reparse_point
+                        else entry.is_file(follow_symlinks=False)
+                    )
+                    size = entry.stat().st_size if is_reparse_point else metadata.st_size
+                    if is_file and size <= workspace.max_file_bytes:
+                        found.append((child, resolved))
+            except SandboxError:
+                continue  # hidden, denied or escaping: prune the whole branch
+            except OSError:
+                continue  # vanished or unreadable during the walk
+
+
+    # Sorted on the walked path, not the resolved one, because that is the key
+    # the global ``sorted(rglob("*"))`` used. MAX_SEARCH_FILES and
+    # MAX_SEARCH_MATCHES truncate, so this order decides which matches the
+    # model is shown, and the collected examples were recorded against it.
+    return [resolved for _, resolved in sorted(found)]
+
+
 def search_text(  # noqa: PLR0912 - a guard per thing that can go wrong in a walk
     query: str, path: str = "."
 ) -> str:
@@ -552,22 +651,18 @@ def search_text(  # noqa: PLR0912 - a guard per thing that can go wrong in a wal
     except SandboxError as exc:
         return f"Error: {exc}"
 
-    candidates = [start] if start.is_file() else sorted(start.rglob("*"))
+    if start.is_file():
+        # Admitted by the resolve above; only the byte limit is left to apply.
+        candidates = [start] if start.stat().st_size <= workspace.max_file_bytes else []
+    else:
+        candidates = _searchable_files(workspace, start)
     matches: list[str] = []
     scanned = 0
     lowered = needle.lower()
 
-    for candidate in candidates:
+    for resolved in candidates:
         if len(matches) >= MAX_SEARCH_MATCHES or scanned >= MAX_SEARCH_FILES:
             break
-        if not candidate.is_file():
-            continue
-        try:
-            resolved = workspace.resolve(workspace.display(candidate))
-        except SandboxError:
-            continue  # hidden, denied, or escaping: skip quietly
-        if resolved.stat().st_size > workspace.max_file_bytes:
-            continue
 
         scanned += 1
         try:

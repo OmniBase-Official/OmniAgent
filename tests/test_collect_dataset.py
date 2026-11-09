@@ -24,6 +24,9 @@ from collect_dataset import (
     collection_workspace,
     load_questions,
 )
+from collect_dataset import (
+    main as collect_dataset_main,
+)
 
 from export_dataset import build_examples, collect_turns
 from sandbox import SandboxError
@@ -176,18 +179,13 @@ def test_turns_from_different_sessions_do_not_collide(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_the_collector_scopes_each_session_to_its_own_id() -> None:
-    """Regression, found by exporting a collected log and getting one example.
-
-    Every session builds a fresh agent, and a fresh agent restarts its turn
-    counter at 1. Sharing one session_id therefore keys every session to
-    (session, turn 1), and the exporter merges them into a single conversation
-    whose roles no longer alternate. The loop must bind a distinct session_id.
-    """
+def test_the_disabled_collector_has_no_runtime_logging_loop() -> None:
+    """Dataset collection remains disabled until its privacy gates are approved."""
     script = Path(__file__).resolve().parent.parent / "scripts" / "collect_dataset.py"
     source = script.read_text(encoding="utf-8")
 
-    assert "obs.bind(session_id=" in source, "each session needs its own logging scope"
+    assert "persistent dataset capture is disabled" in source
+    assert "obs.bind(session_id=" not in source
 
 
 def test_merged_sessions_would_be_rejected_by_the_exporter(tmp_path: Path) -> None:
@@ -302,7 +300,8 @@ def test_collection_still_lists_the_transcripts_directory(tmp_path: Path) -> Non
 
     workspace = collection_workspace(tmp_path, log)
 
-    assert any(entry.startswith("collect-run.log") for entry in workspace.list_dir("data"))
+    with pytest.raises(SandboxError, match="not readable by the agent"):
+        workspace.resolve("data")
 
 
 def test_collection_denies_a_log_kept_outside_the_transcripts_directory(
@@ -319,7 +318,7 @@ def test_collection_denies_a_log_kept_outside_the_transcripts_directory(
         workspace.resolve("run.jsonl")
 
 
-def test_collection_keeps_the_config_readable(tmp_path: Path) -> None:
+def test_collection_denies_config_files(tmp_path: Path) -> None:
     """A training question asks whether any .toml files are here.
 
     The evaluation's seal covers omniagent.toml, because it quotes held-out
@@ -331,4 +330,33 @@ def test_collection_keeps_the_config_readable(tmp_path: Path) -> None:
 
     workspace = collection_workspace(tmp_path, None)
 
-    assert workspace.resolve("omniagent.toml").name == "omniagent.toml"
+    with pytest.raises(SandboxError, match="not readable by the agent"):
+        workspace.resolve("omniagent.toml")
+
+
+def test_collection_refuses_user_workspace_reads(tmp_path: Path) -> None:
+    (tmp_path / "private.txt").write_text("WORKSPACE_CANARY", encoding="utf-8")
+    workspace = collection_workspace(tmp_path, None)
+
+    with pytest.raises(SandboxError, match="not readable by the agent"):
+        workspace.resolve("private.txt")
+
+
+def test_dataset_collection_is_opt_in_and_persistence_stays_closed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit):
+        collect_dataset_main([])
+    assert "dataset capture is disabled" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit):
+        collect_dataset_main(["--resume"])
+    assert "--resume is unavailable" in capsys.readouterr().err
+
+    separate_sink = tmp_path / "dataset.jsonl"
+    with pytest.raises(SystemExit):
+        collect_dataset_main(
+            ["--opt-in-dataset", "--dataset-sink", str(separate_sink)]
+        )
+    assert "dataset capture is disabled" in capsys.readouterr().err
+    assert not separate_sink.exists()

@@ -1,0 +1,1 @@
+This inventory file is part of eval-fixture, a directory created to give evaluation a stable listing subject.

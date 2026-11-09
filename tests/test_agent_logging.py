@@ -19,27 +19,26 @@ from openai import APIConnectionError, APIStatusError
 import observability as obs
 from agent import AgentConfig, AgentError, ReActAgent
 from tests.fakes import FakeOpenAI
+from tests.log_capture import configure_memory_sink, reset_capture
+from tests.log_capture import read_lines as read_memory_lines
 
 
 @pytest.fixture(autouse=True)
 def _clean_logging() -> Iterator[None]:
-    obs.reset()
+    reset_capture()
     yield
-    obs.reset()
+    reset_capture()
 
 
 @pytest.fixture
 def log_file(tmp_path: Path) -> Path:
     path = tmp_path / "omniagent.jsonl"
-    obs.configure(level=logging.DEBUG, log_file=path, session_id="test-session")
+    configure_memory_sink(path, level=logging.DEBUG, session_id="test-session")
     return path
 
 
 def records(path: Path) -> list[dict[str, Any]]:
-    for handler in obs.get_logger().handlers:
-        handler.flush()
-    text = path.read_text(encoding="utf-8").strip()
-    return [json.loads(line) for line in text.splitlines()] if text else []
+    return read_memory_lines(path)
 
 
 def events(path: Path) -> list[str]:
@@ -90,7 +89,7 @@ def test_a_tool_using_turn_logs_the_whole_story(log_file: Path) -> None:
     ]
 
 
-def test_turn_and_step_context_is_attached(log_file: Path) -> None:
+def test_only_step_count_telemetry_is_persisted(log_file: Path) -> None:
     fake = FakeOpenAI(
         replies=[
             "Thought: maths\nAction: calculate\nAction Input: 2 + 2",
@@ -101,15 +100,13 @@ def test_turn_and_step_context_is_attached(log_file: Path) -> None:
     agent.run("What is 2 + 2?")
 
     by_event = {record["event"]: record for record in records(log_file)}
-    assert by_event["agent.tool.call"]["turn"] == 1
-    assert by_event["agent.tool.call"]["step"] == 1
-    assert by_event["agent.step.final_answer"]["step"] == 2
-    assert by_event["agent.turn.end"]["turn"] == 1
-    # agent.created happens before any turn, so it carries neither.
-    assert "turn" not in by_event["agent.created"]
+    assert by_event["agent.tool.call"]["step_count"] == 1
+    assert by_event["agent.step.final_answer"]["step_count"] == 2
+    assert by_event["agent.turn.end"]["step_count"] == 2
+    assert all("turn" not in record and "step" not in record for record in by_event.values())
 
 
-def test_turn_counter_increments_across_questions(log_file: Path) -> None:
+def test_turn_counter_increments_in_memory_without_logging_it(log_file: Path) -> None:
     fake = FakeOpenAI(
         replies=["Thought: done\nFinal Answer: one", "Thought: done\nFinal Answer: two"]
     )
@@ -117,18 +114,20 @@ def test_turn_counter_increments_across_questions(log_file: Path) -> None:
     agent.run("first")
     agent.run("second")
 
-    turns = [r["turn"] for r in records(log_file) if r["event"] == "agent.turn.start"]
-    assert turns == [1, 2]
+    assert agent._turn == 2
+    turn_records = [r for r in records(log_file) if r["event"] == "agent.turn.start"]
+    assert len(turn_records) == 2
+    assert all("turn" not in r for r in turn_records)
 
 
-def test_session_id_is_on_every_record(log_file: Path) -> None:
+def test_session_id_is_not_persisted(log_file: Path) -> None:
     fake = FakeOpenAI(replies=["Thought: done\nFinal Answer: 4"])
     build(fake).run("What is 2 + 2?")
 
-    assert all(record["session_id"] == "test-session" for record in records(log_file))
+    assert all("session_id" not in record for record in records(log_file))
 
 
-def test_tool_result_carries_the_observation_and_timing(log_file: Path) -> None:
+def test_tool_result_carries_only_safe_telemetry(log_file: Path) -> None:
     fake = FakeOpenAI(
         replies=[
             "Thought: maths\nAction: calculate\nAction Input: 2 + 2",
@@ -138,21 +137,22 @@ def test_tool_result_carries_the_observation_and_timing(log_file: Path) -> None:
     build(fake).run("What is 2 + 2?")
 
     result = only(log_file, "agent.tool.result")
-    assert result["tool"] == "calculate"
-    assert result["ok"] is True
-    assert result["observation"] == "2 + 2 = 4"
-    assert isinstance(result["elapsed_ms"], (int, float))
+    assert result["tool_name"] == "calculate"
+    assert result["status"] == "succeeded"
+    assert isinstance(result["duration_ms"], int | float)
+    assert "observation" not in result
 
 
-def test_llm_response_carries_timing_and_token_usage(log_file: Path) -> None:
+def test_llm_response_carries_only_safe_telemetry(log_file: Path) -> None:
     fake = FakeOpenAI(replies=["Thought: done\nFinal Answer: 4"])
     build(fake).run("What is 2 + 2?")
 
     response = only(log_file, "agent.llm.response")
-    assert response["prompt_tokens"] == 100
-    assert response["completion_tokens"] == 20
-    assert response["finish_reason"] == "stop"
-    assert isinstance(response["elapsed_ms"], (int, float))
+    assert "model_tag" not in response
+    assert response["status"] == "completed"
+    assert isinstance(response["duration_ms"], int | float)
+    assert "reply" not in response
+    assert "prompt_tokens" not in response
 
 
 def test_turn_end_reports_steps_used(log_file: Path) -> None:
@@ -165,7 +165,7 @@ def test_turn_end_reports_steps_used(log_file: Path) -> None:
     )
     build(fake).run("go")
 
-    assert only(log_file, "agent.turn.end")["steps_used"] == 3
+    assert only(log_file, "agent.turn.end")["step_count"] == 3
 
 
 # --------------------------------------------------------------------------- #
@@ -183,9 +183,9 @@ def test_a_failing_tool_is_logged_as_not_ok(log_file: Path) -> None:
     build(fake).run("What is 1 / 0?")
 
     result = only(log_file, "agent.tool.result")
-    assert result["ok"] is False
-    assert result["level"] == "WARNING"
-    assert result["observation"].startswith("Error: division by zero")
+    assert result["status"] == "failed"
+    assert result["tool_name"] == "calculate"
+    assert "observation" not in result
 
 
 def test_an_unknown_tool_is_logged_by_the_registry(log_file: Path) -> None:
@@ -197,10 +197,10 @@ def test_an_unknown_tool_is_logged_by_the_registry(log_file: Path) -> None:
     )
     build(fake).run("email someone")
 
-    unknown = only(log_file, "tool.unknown")
-    assert unknown["requested"] == "send_email"
-    assert unknown["level"] == "WARNING"
-    assert "calculate" in unknown["available"]
+    unknown = only(log_file, "agent.tool.policy_violation")
+    assert unknown["status"] == "rejected"
+    assert "requested" not in unknown
+    assert "available" not in unknown
 
 
 def test_the_agent_recovers_from_bad_tool_arguments(log_file: Path) -> None:
@@ -221,23 +221,23 @@ def test_the_agent_recovers_from_bad_tool_arguments(log_file: Path) -> None:
     assert agent.run("What is 2 + 2?") == "It is 4."
 
     invalid = only(log_file, "tool.invalid_args")
-    assert invalid["tool"] == "calculate"
-    assert "expression" in invalid["reason"], "the error must name the field that was wanted"
+    assert invalid["tool_name"] == "calculate"
+    assert "reason" not in invalid
 
     results = [r for r in records(log_file) if r["event"] == "agent.tool.result"]
-    assert [r["ok"] for r in results] == [False, True]
-    assert results[1]["observation"] == "2 + 2 = 4"
+    assert [r["status"] for r in results] == ["failed", "succeeded"]
+    assert "observation" not in results[1]
 
 
-def test_a_format_violation_is_logged_with_the_offending_reply(log_file: Path) -> None:
+def test_a_format_violation_is_logged_without_the_offending_reply(log_file: Path) -> None:
     fake = FakeOpenAI(
         replies=["Sure! The answer is probably 4.", "Thought: done\nFinal Answer: It is 4."]
     )
     build(fake).run("What is 2 + 2?")
 
     violation = only(log_file, "agent.format.violation")
-    assert violation["level"] == "WARNING"
-    assert violation["reply"] == "Sure! The answer is probably 4."
+    assert violation["status"] == "invalid_format"
+    assert "reply" not in violation
 
 
 def test_running_out_of_steps_is_logged(log_file: Path) -> None:
@@ -248,7 +248,7 @@ def test_running_out_of_steps_is_logged(log_file: Path) -> None:
     assert agent.run("go") == "2"
 
     assert "agent.budget.exhausted" in events(log_file)
-    assert only(log_file, "agent.budget.exhausted")["max_steps"] == 2
+    assert only(log_file, "agent.budget.exhausted")["step_count"] == 2
 
 
 def test_an_unreachable_server_is_logged_with_a_traceback(log_file: Path) -> None:
@@ -260,8 +260,8 @@ def test_an_unreachable_server_is_logged_with_a_traceback(log_file: Path) -> Non
         agent.run("What is 2 + 2?")
 
     record = only(log_file, "agent.llm.unreachable")
-    assert record["level"] == "ERROR"
-    assert "APIConnectionError" in record["error"]
+    assert record["status"] == "unreachable"
+    assert "error" not in record
 
 
 def test_a_server_error_logs_the_status_code(log_file: Path) -> None:
@@ -272,7 +272,19 @@ def test_a_server_error_logs_the_status_code(log_file: Path) -> None:
     with pytest.raises(AgentError, match="ollama pull"):
         agent.run("What is 2 + 2?")
 
-    assert only(log_file, "agent.llm.error")["status_code"] == 404
+    assert only(log_file, "agent.llm.error")["status"] == "error"
+
+
+def test_model_server_exception_details_are_sanitized_for_users() -> None:
+    raw_detail = "RAW_MODEL_SERVER_BODY_CANARY"
+    error = APIStatusError(raw_detail, response=_stub_response(500), body=None)
+    agent = build(FakeOpenAI(models_error=error))
+
+    with pytest.raises(AgentError) as raised:
+        agent.check_connection()
+
+    assert "HTTP 500" in str(raised.value)
+    assert raw_detail not in str(raised.value)
 
 
 def test_connection_check_logs_whether_the_model_is_installed(log_file: Path) -> None:
@@ -282,8 +294,9 @@ def test_connection_check_logs_whether_the_model_is_installed(log_file: Path) ->
     agent.check_connection()
 
     record = only(log_file, "agent.connection.ok")
-    assert record["model_installed"] is False
-    assert record["available"] == ["gemma2:2b"]
+    assert record["status"] == "failed"
+    assert "model_tag" not in record
+    assert "available" not in record
 
 
 # --------------------------------------------------------------------------- #
@@ -296,17 +309,16 @@ def test_the_api_key_never_appears_in_the_log(log_file: Path) -> None:
     agent = build(fake, api_key="sk-this-must-never-be-logged")
     agent.run("What is 2 + 2?")
 
-    raw = log_file.read_text(encoding="utf-8")
+    raw = json.dumps(records(log_file))
     assert "sk-this-must-never-be-logged" not in raw
-    assert only(log_file, "agent.created")["config"]["api_key"] == "***redacted***"
-    # The rest of the config is still there to debug with.
-    assert only(log_file, "agent.created")["config"]["model"] == "qwen2.5:7b"
+    assert "model_tag" not in only(log_file, "agent.created")
+    assert "config" not in only(log_file, "agent.created")
 
 
 def test_logging_stays_off_stdout(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    obs.configure(level=logging.DEBUG, log_file=tmp_path / "log.jsonl")
+    obs.configure(level=logging.DEBUG)
     fake = FakeOpenAI(replies=["Thought: done\nFinal Answer: 4"])
     build(fake).run("What is 2 + 2?")
 

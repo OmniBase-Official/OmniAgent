@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 
+import main
+from agent import DEFAULT_MODEL
 from config import (
     DEFAULT_CONFIG_NAME,
     ConfigError,
@@ -56,8 +58,18 @@ def settings_at(
 def test_built_in_defaults_when_there_is_nothing_else(tmp_path: Path) -> None:
     settings, sources = settings_at(tmp_path)
 
+    assert settings.model == DEFAULT_MODEL
+    assert sources["model"] == "built-in"
     assert settings.max_steps == 8
     assert sources["max_steps"] == "built-in"
+
+
+def test_model_help_describes_the_code_default(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main.parse_args(["--help"])
+
+    assert caught.value.code == 0
+    assert f"(default: {DEFAULT_MODEL})" in capsys.readouterr().out
 
 
 def test_the_config_file_is_discovered_in_the_working_directory(project: Path) -> None:
@@ -279,6 +291,23 @@ def test_an_empty_profile_is_allowed(project: Path) -> None:
     assert sources["model"] == "file:defaults"
 
 
+def test_retry_layers_are_visible_and_independent(project: Path) -> None:
+    settings, sources = settings_at(project, cli={"max_retries": 7})
+    agent_config = settings.agent_config()
+
+    assert settings.max_retries == 7
+    assert sources["max_retries"] == "command line"
+    assert settings.client_max_retries == 0
+    assert sources["client_max_retries"] == "built-in"
+    assert agent_config.max_retries == 7
+    assert agent_config.client_max_retries == 0
+
+
+def test_http_retry_setting_is_fixed_at_zero(project: Path) -> None:
+    with pytest.raises(ConfigError, match="client_max_retries"):
+        settings_at(project, cli={"client_max_retries": 1})
+
+
 # --------------------------------------------------------------------------- #
 # types and conversion
 # --------------------------------------------------------------------------- #
@@ -352,3 +381,25 @@ def test_the_rendered_table_names_each_source(project: Path) -> None:
     assert "profile:demo" in rendered
     assert "file:defaults" in rendered
     assert "built-in" in rendered
+
+
+def test_verbose_is_disabled_by_default(tmp_path: Path) -> None:
+    settings, _ = settings_at(tmp_path)
+
+    assert settings.verbose is False
+    assert settings.agent_config().verbose is False
+
+
+def test_verbose_cli_flags_override_the_default() -> None:
+    assert main.cli_settings(main.parse_args(["--verbose"]))["verbose"] is True
+    assert main.cli_settings(main.parse_args(["--quiet"]))["verbose"] is False
+
+
+def test_verbose_and_quiet_cannot_be_used_together(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main.parse_args(["--verbose", "--quiet"])
+
+    assert caught.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err

@@ -1,0 +1,1 @@
+This summary describes eval-fixture as a stable subject for directory-listing evaluation, with no runtime-generated entries.

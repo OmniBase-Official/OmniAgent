@@ -1,0 +1,1 @@
+eval-fixture exists to give the evaluation a subject directory whose listing stays stable. This note states that purpose.

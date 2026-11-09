@@ -1,0 +1,1 @@
+eval-fixture exists so the evaluation has a directory to list that nothing in ordinary runs writes into. This file records that context.

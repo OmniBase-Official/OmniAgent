@@ -19,6 +19,7 @@ dev = [
     "pytest>=8.0",
     "mypy>=1.10",
     "ruff>=0.8",
+    "setuptools>=68",
 ]
 # Only needed to run scripts/smoke_train.py; the agent itself needs none of it.
 # Pinned to the versions the smoke test was proved against.
@@ -43,7 +44,7 @@ training = [
 
 [tool.setuptools]
 # Flat layout: the agent is a handful of top-level modules, not a package.
-py-modules = ["agent", "main", "tools", "observability", "export_dataset", "sandbox", "validate_dataset", "config"]
+py-modules = ["agent", "main", "tools", "observability", "export_dataset", "dataset_provenance", "sandbox", "validate_dataset", "config"]
 
 # --------------------------------------------------------------------------- #
 # mypy - strict, no exceptions. Untyped code does not get merged.
@@ -163,7 +164,7 @@ ignore = [
 ban-relative-imports = "all"
 
 [tool.ruff.lint.isort]
-known-first-party = ["agent", "config", "export_dataset", "main", "observability", "sandbox", "tools", "validate_dataset", "tests"]
+known-first-party = ["agent", "config", "dataset_provenance", "export_dataset", "main", "observability", "sandbox", "tools", "validate_dataset", "tests"]
 
 # --------------------------------------------------------------------------- #
 # pytest
@@ -173,3 +174,9 @@ testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q --strict-markers --strict-config"
 filterwarnings = ["error"]
+# tests/test_wheel_completeness.py builds a wheel in a subprocess and imports
+# out of it, which costs a few seconds once per session. Deselect it with
+# -m "not wheel" when that matters; CI runs it.
+markers = [
+    "wheel: builds a wheel and imports every module in it",
+]

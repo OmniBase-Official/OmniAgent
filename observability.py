@@ -1,22 +1,8 @@
-"""Structured logging for OmniAgent.
+"""Write sanitized operational telemetry with a closed field schema.
 
-The console output a user reads (the Thought/Action/Observation trace in
-``main.py``) and the log stream a machine reads are two different products.
-This module owns the second one: newline-delimited JSON, one object per event,
-with ambient context -- session, turn, step -- attached automatically.
-
-Usage::
-
-    import observability as obs
-
-    obs.configure(level="INFO", log_file=Path("omniagent.jsonl"))
-    with obs.bind(turn=1):
-        obs.event("agent.turn.start", question="What is 2 + 2?")
-
-Every record carries ``ts``, ``level``, ``logger``, ``event`` and ``message``,
-plus whatever fields were bound or passed. Values that look like credentials
-are masked and long strings are truncated, so a log file stays safe to paste
-into a bug report.
+Only event status, duration, step count, fixed tool names, model tags/digests,
+and the runtime version are persisted. Trajectory data belongs in a separately
+approved dataset sink and is never accepted by this module.
 """
 
 from __future__ import annotations
@@ -24,97 +10,99 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import math
+import re
 import sys
 import uuid
 from collections.abc import Mapping
-from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Final
 
 LOGGER_NAME: Final[str] = "omniagent"
-
-#: Fields longer than this are truncated in the log output.
-MAX_FIELD_LENGTH: Final[int] = 2_000
-
-#: Fields the dataset exporter reads back verbatim. A truncated prompt or reply
-#: would become corrupt training data, so these get a far larger budget -- still
-#: bounded, so a runaway tool output cannot write an unbounded line.
-MAX_TRAINING_FIELD_LENGTH: Final[int] = 32_000
-
-TRAINING_FIELDS: Final[frozenset[str]] = frozenset(
-    {
-        "system_prompt",
-        "question",
-        "answer",
-        "reply",
-        "observation",
-        "tool_input",
-    }
-)
-
-#: Substrings that mark a field as a credential, matched case-insensitively.
-_SENSITIVE_HINTS: Final[tuple[str, ...]] = (
-    "api_key",
-    "apikey",
-    "secret",
-    "password",
-    "passwd",
-    "token",
-    "authorization",
-)
-
-_REDACTED: Final[str] = "***redacted***"
-
-#: Appended to any value that had to be shortened. The dataset exporter looks
-#: for it and refuses to turn a truncated record into a training example.
 TRUNCATION_MARKER: Final[str] = "...(truncated"
 
-#: Names that contain a sensitive hint but are plainly not credentials. The
-#: policy is default-deny -- over-redacting a counter is cheap, leaking a key is
-#: not -- so anything new has to be listed here explicitly.
-_SAFE_FIELDS: Final[frozenset[str]] = frozenset(
+# Operational telemetry has a separate, closed schema. This is deliberately
+# much smaller than the fields the dataset exporter used to consume: trajectory
+# capture needs a separately approved sink and must never piggyback on logs.
+FIXED_TOOL_NAMES: Final[frozenset[str]] = frozenset(
     {
-        "tokens",
-        "token_count",
-        "prompt_tokens",
-        "completion_tokens",
-        "total_tokens",
-        "cached_tokens",
-        "reasoning_tokens",
-        "max_tokens",
+        "calculate",
+        "get_current_time",
+        "read_file",
+        "list_directory",
+        "search_text",
+        "file_info",
     }
 )
 
-#: Attributes that :class:`logging.LogRecord` always defines. Anything else a
-#: caller attaches via ``extra=`` is treated as a structured field.
-_RESERVED_ATTRS: Final[frozenset[str]] = frozenset(
+_EVENT_FIELDS: Final[dict[str, frozenset[str]]] = {
+    "agent.created": frozenset({"status", "model_digest"}),
+    "agent.reset": frozenset({"status", "step_count"}),
+    "agent.connection.unreachable": frozenset({"status"}),
+    "agent.connection.error": frozenset({"status"}),
+    "agent.connection.ok": frozenset({"status"}),
+    "agent.turn.start": frozenset({"status", "step_count"}),
+    "agent.turn.end": frozenset({"status", "duration_ms", "step_count"}),
+    "agent.step.final_answer": frozenset({"status", "step_count"}),
+    "agent.format.violation": frozenset({"status", "step_count"}),
+    "agent.budget.exhausted": frozenset({"status", "step_count"}),
+    "agent.loop.repeated_action": frozenset({"status", "step_count", "tool_name"}),
+    "agent.tool.call": frozenset({"status", "step_count", "tool_name"}),
+    "agent.tool.result": frozenset({"status", "duration_ms", "step_count", "tool_name"}),
+    "agent.tool.policy_violation": frozenset({"status", "step_count", "tool_name"}),
+    "agent.context.trimmed": frozenset({"status", "step_count"}),
+    "agent.llm.request": frozenset(
+        {"status", "model_digest", "step_count"}
+    ),
+    "agent.llm.response": frozenset(
+        {"status", "duration_ms", "model_digest", "step_count"}
+    ),
+    "agent.llm.retry": frozenset({"status", "duration_ms", "step_count"}),
+    "agent.llm.unreachable": frozenset({"status", "step_count"}),
+    "agent.llm.error": frozenset({"status", "step_count"}),
+    "cli.interrupted": frozenset({"status", "step_count"}),
+    "cli.aborted": frozenset({"status", "step_count"}),
+    "tool.unknown": frozenset({"status"}),
+    "tool.invalid_args": frozenset({"status", "tool_name"}),
+    "tool.crashed": frozenset({"status", "tool_name"}),
+}
+
+_STATUSES: Final[frozenset[str]] = frozenset(
     {
-        "args",
-        "asctime",
         "created",
-        "exc_info",
-        "exc_text",
-        "filename",
-        "funcName",
-        "levelname",
-        "levelno",
-        "lineno",
-        "message",
-        "module",
-        "msecs",
-        "msg",
-        "name",
-        "pathname",
-        "process",
-        "processName",
-        "relativeCreated",
-        "stack_info",
-        "taskName",
-        "thread",
-        "threadName",
+        "reset",
+        "started",
+        "completed",
+        "requested",
+        "succeeded",
+        "failed",
+        "rejected",
+        "unreachable",
+        "error",
+        "retrying",
+        "invalid_format",
+        "step_budget_exhausted",
+        "repeated_action",
+        "trimmed",
+        "interrupted",
+        "aborted",
     }
 )
+_SHA256 = re.compile(r"^(?:sha256:)?[a-fA-F0-9]{64}$")
+_TELEMETRY_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "record_type",
+        "event",
+        "status",
+        "duration_ms",
+        "step_count",
+        "tool_name",
+        "model_digest",
+        "runtime_version",
+    }
+)
+_RUNTIME_VERSION: Final[str] = sys.version.split()[0]
 
 _EMPTY_CONTEXT: Final[Mapping[str, Any]] = {}
 
@@ -130,45 +118,36 @@ _configured = False
 # --------------------------------------------------------------------------- #
 
 
-def _is_sensitive(key: str, value: Any) -> bool:
-    """Whether a field should be masked.
-
-    Name-matching alone needed a hand-maintained allow-list, and the list was
-    always one field behind: `prompt_tokens` was caught during M2, and
-    `estimated_tokens_before` slipped past the fix. The general rule is simpler
-    and does not need maintaining -- a field named "...tokens..." holding a
-    *number* is a count, because a credential is never an int. Singular
-    "token" (auth_token, access_token) is untouched by this, and so is any
-    string or list however it is named.
-    """
-    lowered = key.lower()
-    if lowered in _SAFE_FIELDS:
-        return False
-    if "tokens" in lowered and isinstance(value, (int, float)) and not isinstance(value, bool):
-        return False
-    return any(hint in lowered for hint in _SENSITIVE_HINTS)
-
-
-def _sanitise(key: str, value: Any) -> Any:
-    """Mask credentials, shorten long strings, and make a value JSON-safe."""
-    if _is_sensitive(key, value):
-        return _REDACTED
-    limit = MAX_TRAINING_FIELD_LENGTH if key in TRAINING_FIELDS else MAX_FIELD_LENGTH
-    return _coerce(value, limit)
-
-
-def _coerce(value: Any, limit: int = MAX_FIELD_LENGTH) -> Any:
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    if isinstance(value, str):
-        if len(value) > limit:
-            return f"{value[:limit]}{TRUNCATION_MARKER}, {len(value)} chars)"
-        return value
-    if isinstance(value, Mapping):
-        return {str(k): _sanitise(str(k), v) for k, v in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_coerce(item, limit) for item in value]
-    return _coerce(repr(value), limit)
+def _sanitise_event(name: str, fields: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return telemetry from the closed schema, dropping every other value."""
+    allowed = _EVENT_FIELDS.get(name)
+    if allowed is None:
+        return None
+    payload: dict[str, Any] = {
+        "record_type": "operational_telemetry",
+        "event": name,
+        "runtime_version": _RUNTIME_VERSION,
+    }
+    for key, value in fields.items():
+        if key not in allowed:
+            continue
+        if key == "status" and isinstance(value, str) and value in _STATUSES:
+            payload[key] = value
+        elif (
+            key == "duration_ms"
+            and isinstance(value, int | float)
+            and not isinstance(value, bool)
+        ):
+            if math.isfinite(value) and value >= 0:
+                payload[key] = round(float(value), 3)
+        elif key == "step_count" and isinstance(value, int) and not isinstance(value, bool):
+            if value >= 0:
+                payload[key] = value
+        elif key == "tool_name" and isinstance(value, str) and value in FIXED_TOOL_NAMES:
+            payload[key] = value
+        elif key == "model_digest" and isinstance(value, str) and _SHA256.fullmatch(value):
+            payload[key] = value.lower()
+    return payload
 
 
 # --------------------------------------------------------------------------- #
@@ -177,12 +156,11 @@ def _coerce(value: Any, limit: int = MAX_FIELD_LENGTH) -> Any:
 
 
 class ContextFilter(logging.Filter):
-    """Copy the ambient :func:`bind` context onto every record."""
+    """Do not copy context fields into persisted telemetry."""
 
-    def filter(self, record: logging.LogRecord) -> bool:
-        for key, value in _context.get().items():
-            if key not in _RESERVED_ATTRS and not hasattr(record, key):
-                setattr(record, key, value)
+    def filter(self, _record: logging.LogRecord) -> bool:
+        # Context is intentionally not copied into log records. Session ids and
+        # any future bound data are outside the telemetry contract.
         return True
 
 
@@ -190,27 +168,19 @@ class JsonLinesFormatter(logging.Formatter):
     """Render a record as a single-line JSON object."""
 
     def format(self, record: logging.LogRecord) -> str:
-        created = datetime.fromtimestamp(record.created, tz=UTC)
-        payload: dict[str, Any] = {
-            "ts": created.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-            "level": record.levelname,
-            "logger": record.name,
-            "event": str(getattr(record, "event", record.name)),
-            "message": record.getMessage(),
+        event_name = str(getattr(record, "event", ""))
+        fields = {
+            key: value
+            for key, value in record.__dict__.items()
+            if key in _TELEMETRY_FIELDS and key != "event"
         }
-
-        for key, value in record.__dict__.items():
-            if key in _RESERVED_ATTRS or key in payload or key.startswith("_"):
-                continue
-            payload[key] = _sanitise(key, value)
-
-        # logging stores a falsy exc_info verbatim, so this is False far more
-        # often than it is None. Checking `is not None` would try to format a
-        # bool as a traceback and lose the record.
-        if record.exc_info and isinstance(record.exc_info, tuple):
-            payload["error"] = _coerce(self.formatException(record.exc_info))
-
-        return json.dumps(payload, ensure_ascii=False, default=repr)
+        payload = _sanitise_event(event_name, fields)
+        fallback = {
+            "record_type": "operational_telemetry",
+            "event": "telemetry.dropped",
+            "runtime_version": _RUNTIME_VERSION,
+        }
+        return json.dumps(payload or fallback)
 
 
 # --------------------------------------------------------------------------- #
@@ -226,18 +196,24 @@ def configure(
     session_id: str | None = None,
     force: bool = False,
 ) -> str:
-    """Install the JSON-lines handlers and return the session id.
+    """Install the JSON-lines handlers and return an in-memory session id.
 
     Calling this twice is a no-op unless ``force`` is set, so importing a module
     that configures logging cannot silently double every line.
 
     :param level: minimum level to emit, as a name or a ``logging`` constant.
-    :param log_file: file to append JSON lines to; its parent is created.
+    :param log_file: rejected because persistent operational files are disabled.
     :param console: also stream the JSON lines to stderr (stdout stays free for
         the human-readable trace).
-    :param session_id: reuse an id instead of generating one.
+    :param session_id: accepted for API compatibility but never persisted.
     :param force: replace handlers that a previous call installed.
     """
+    if log_file is not None:
+        raise RuntimeError(
+            "persistent operational log files are disabled until an approved "
+            "retention and deletion policy exists"
+        )
+
     global _configured  # noqa: PLW0603 - module-level singleton by design
 
     logger = logging.getLogger(LOGGER_NAME)
@@ -254,13 +230,6 @@ def configure(
 
     formatter = JsonLinesFormatter()
     context_filter = ContextFilter()
-
-    if log_file is not None:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
-        file_handler.setFormatter(formatter)
-        file_handler.addFilter(context_filter)
-        logger.addHandler(file_handler)
 
     if console:
         stream_handler = logging.StreamHandler(sys.stderr)
@@ -357,17 +326,23 @@ def event(
     """Emit one structured event.
 
     :param name: dotted event name, e.g. ``agent.tool.call``.
-    :param message: optional human-readable text; defaults to the event name.
-    :param fields: arbitrary structured data, sanitised before it is written.
+    :param message: ignored. Persisted messages can contain raw user data.
+    :param fields: only fields in the closed telemetry schema are persisted.
     """
     target = logger or get_logger()
+    _ = message, exc_info  # accepted for API compatibility, never persisted
     if not target.isEnabledFor(level):
         return
-    extra = {key: value for key, value in fields.items() if key not in _RESERVED_ATTRS}
-    extra["event"] = name
+    safe = _sanitise_event(name, fields)
+    if safe is None:
+        return
+    # Reduce values before they enter any LogRecord or handler. No custom
+    # message, exception, prompt, argument, observation, or answer is retained.
+    extra = {key: value for key, value in safe.items() if key != "event"}
+    extra["event"] = safe["event"]
     target.log(
         level,
-        message if message is not None else name,
+        name,
         extra=extra,
-        exc_info=exc_info or None,
+        exc_info=None,
     )

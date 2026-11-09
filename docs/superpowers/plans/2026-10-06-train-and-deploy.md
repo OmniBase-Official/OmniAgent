@@ -291,7 +291,7 @@ git commit -m "feat: promotion refuses a run the evaluations have not passed"
 
 **Interfaces:** none; this is documentation that contradicts the manifest.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 @pytest.mark.parametrize("path", ["scripts/smoke_train.py", "scripts/build_notebook.py", "README.md"])
@@ -300,28 +300,49 @@ def test_nothing_tells_the_reader_to_train_on_a_hosted_notebook(path: str) -> No
     assert "colab" not in (REPO_ROOT / path).read_text(encoding="utf-8").lower()
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_local_only.py -v`
 Expected: FAIL on at least `scripts/smoke_train.py`.
 
-- [ ] **Step 3: Rewrite the three mentions**
+- [x] **Step 3: Rewrite the three mentions**
 
 `smoke_train.py`'s docstring says the notebook targets a local GPU with a real
 base model, which a CPU cannot exercise. Keep what it says about catching a
 transformers/trl/peft API change before a twenty-minute run.
 
-- [ ] **Step 4: Regenerate the notebook and run the three gates**
+- [x] **Step 4: Regenerate the notebook and run the three gates**
 
 Run: `.venv/Scripts/python.exe scripts/build_notebook.py && .venv/Scripts/python.exe -m pytest`
 Expected: notebook regenerated, all green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/smoke_train.py scripts/build_notebook.py README.md notebooks/train_omniagent_lora.ipynb tests/test_local_only.py
 git commit -m "docs: the notebook trains locally, which is what the manifest records"
 ```
+
+**Completed 2026-10-23 in `675e0de`, with three corrections to this section.**
+Brief: `docs/pm/brief-01-task-4-local-only-framing.md`, which carries the
+measurements.
+
+- **Step 1 narrowed.** The parametrized assertion over three paths was wrong
+  for two of them. `README.md` holds no occurrence of the string, so the case
+  would have passed for the wrong reason, and `scripts/build_notebook.py:37`
+  argues *for* local training, so the case would have forced the deletion of
+  correct prose. The test asserts on `scripts/smoke_train.py` alone.
+- **Step 3 narrowed to one file.** "The three mentions" is one docstring.
+  `README.md` and `scripts/build_notebook.py` were not modified.
+- **"Test: tests/test_local_only.py" was wrong.** The file did not exist. It
+  was created.
+- **Step 4 kept as a check, not a change.** Regenerating the notebook is a
+  no-op when its generator is untouched, so it was run only to confirm that.
+  It did not confirm it -- see the finding recorded in the brief: the
+  generator emits `import json` that the committed notebook lacks, and
+  `tests/test_notebook.py:264` cannot detect that class of drift. That is a
+  separate task and was deliberately not folded into this commit.
+
 
 ---
 

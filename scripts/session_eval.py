@@ -51,6 +51,7 @@ sys.path.insert(0, str(PROJECT / "scripts"))
 from collect_dataset import SESSIONS
 from eval_scoring import Question, Score, Verdict, header, judge, row
 from eval_workspace import sealed_workspace
+from holdout_eval import SEARCH_MARKER, SEARCH_SUBJECT
 
 import observability as obs
 from agent import AgentConfig, AgentError, ReActAgent
@@ -60,17 +61,6 @@ if TYPE_CHECKING:
     from openai import OpenAI
 
 
-#: Three of these carried no expected answer until 2026-10-06, so a third of
-#: the walk was scored on tool choice alone and read as though the answers had
-#: passed. They had not: the data-directory question reached for
-#: list_directory in all ten runs and described the data directory in four of
-#: them, answering something else in the other six.
-#:
-#: The expectations are taken from the answers the agent actually gave, and two
-#: of them depend on the working tree: agent.py has to keep containing
-#: "agent.budget.exhausted", and data/ has to keep containing collect-run.log.
-#: If either stops being true the question stops being answerable and the
-#: figure will fall without the agent changing.
 #: One session, mixed on purpose. Every question is already in holdout_eval's
 #: bank, so the isolated pass should reproduce figures we have measured before
 #: and the shared pass can be read against them. The topics alternate -- maths,
@@ -81,8 +71,8 @@ WALK: tuple[Question, ...] = (
     Question("How many lines does tests/fakes.py have?", "122", "file_info"),
     Question("What is 7 factorial divided by 5 factorial?", "42"),
     Question(
-        "Where is the word 'budget' used in agent.py?",
-        "agent.budget.exhausted",
+        f"Which file contains the marker {SEARCH_MARKER}?",
+        SEARCH_SUBJECT,
         "search_text",
     ),
     Question("What is 2 to the power of 11, minus 48?", "2000"),

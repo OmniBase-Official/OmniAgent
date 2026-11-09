@@ -10,6 +10,7 @@ and asserts that nothing reachable holds a held-out question's text.
 
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -18,8 +19,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from eval_scoring import Question
-from eval_workspace import ANSWER_KEY, LISTING_ONLY, sealed_workspace
-from holdout_eval import SESSIONS_UNDER_TEST
+from eval_workspace import ANSWER_KEY, LISTING_ONLY, fixture_only_workspace, sealed_workspace
+from grounding_cohort import FIXTURE, TASKS, accepted_answer
+from holdout_eval import SEARCH_MARKER, SEARCH_SUBJECT, SESSIONS_UNDER_TEST
 from session_eval import WALK
 
 from sandbox import _BINARY_SNIFF_BYTES, SandboxError, Workspace, get_workspace, set_workspace
@@ -52,17 +54,15 @@ LEAKED_SENTENCE = "The word 'budget' is used in the line"
 #: cannot be, and listing it here is the record that it was looked at.
 #:
 #: Measured, not assumed: the invariant below named every one of these.
-#: ``agent.budget.exhausted`` occurs in **five** reachable files, so the
-#: 'budget' question's expectation is not uniquely located in ``agent.py`` --
-#: a ``search_text`` over ``.`` still returns four files that are not the
-#: question's subject. Sealing the transcripts does not make that question
-#: clean; it only stops the answer sentence coming back.
+#: ``agent.budget.exhausted`` occurs in **five** reachable files. The question
+#: that used this expectation has been retired; this entry now documents the
+#: codebase's event-carrier spread rather than guarding a live expectation.
 EXPECTATION_CARRIERS: dict[str, frozenset[str]] = {
     "agent.budget.exhausted": frozenset(
         {
             "agent.py",  # the question's subject: the fact being measured
-            "README.md",  # the log event documented
-            "export_dataset.py",  # the log event filtered
+            "export_dataset.py",  # the log event is rejected here
+            "observability.py",  # the log event is emitted here
             "tests/test_agent_logging.py",  # the log event asserted
             "tests/test_export_dataset.py",  # the log event in a fixture
         }
@@ -119,7 +119,7 @@ def reachable_files(workspace: Workspace) -> list[Path]:
     ``.venv`` and ``models/`` and discarding it afterwards took 113 seconds.
     """
     found: list[Path] = []
-    stack = [PROJECT]
+    stack = [workspace.root]
     while stack:
         for child in stack.pop().iterdir():
             try:
@@ -222,6 +222,45 @@ def test_the_questions_own_subjects_stay_readable(sealed: Workspace) -> None:
         assert sealed.resolve(subject).is_file(), f"{subject} became unreadable"
 
 
+def test_the_search_marker_has_one_reachable_carrier(sealed: Workspace) -> None:
+    carriers = [
+        path
+        for path in reachable_files(sealed)
+        if SEARCH_MARKER in path.read_text("utf-8", errors="ignore")
+    ]
+
+    assert len(carriers) == 1
+    assert sealed.display(carriers[0]) == SEARCH_SUBJECT
+
+
+def test_the_search_subject_expectation_has_no_reachable_carrier(sealed: Workspace) -> None:
+    carriers = [
+        path
+        for path in reachable_files(sealed)
+        if SEARCH_SUBJECT in path.read_text("utf-8", errors="ignore")
+    ]
+
+    assert carriers == []
+
+
+def test_eval_fixture_contains_only_the_six_existing_files_and_new_subject() -> None:
+    files = {
+        path.relative_to(PROJECT).as_posix()
+        for path in (PROJECT / "eval-fixture").rglob("*")
+        if path.is_file()
+    }
+
+    assert files == {
+        "eval-fixture/evaluation-context.txt",
+        "eval-fixture/fixture-purpose.txt",
+        "eval-fixture/listing-notes.txt",
+        "eval-fixture/stable-inventory.txt",
+        "eval-fixture/subject-summary.txt",
+        "eval-fixture/fixed-subject-marker/one-item.txt",
+        SEARCH_SUBJECT,
+    }
+
+
 def test_search_text_no_longer_finds_the_leaked_answer(transcripts: Workspace) -> None:
     """Reproduce the observed leak with a synthetic transcript and the real tools."""
     original = get_workspace()
@@ -314,3 +353,107 @@ def test_a_run_log_can_be_sealed_as_well(tmp_path: Path) -> None:
 
     with pytest.raises(SandboxError, match="not readable by the agent"):
         workspace.resolve("data/session-runs.jsonl")
+
+
+# --------------------------------------------------------------------------- #
+# the invariant, extended over the evidence-grounding fixture
+# --------------------------------------------------------------------------- #
+#
+# The older evaluations use the answer-key seal above. The evidence-grounding
+# cohort uses a workspace exposing only its synthetic fixture.
+
+
+@pytest.fixture
+def grounding_sealed(tmp_path: Path) -> Workspace:
+    """Exactly the workspace a grounding trial runs against."""
+    shutil.copytree(FIXTURE, tmp_path / FIXTURE.name)
+    return fixture_only_workspace(tmp_path, tmp_path / FIXTURE.name)
+
+
+def test_each_grounding_answer_has_exactly_one_reachable_carrier(
+    grounding_sealed: Workspace,
+) -> None:
+    """Mb's test. The answer may only be readable from the ledger it is about.
+
+    Not "no reachable file holds it": the fixture is the subject, so its own
+    ledger must hold it -- that is what makes the answer derivable from
+    evidence rather than guessable. What must not exist is a *second* carrier.
+    The seal has moved a leak instead of closing it once before, and this is
+    the shape of check that caught it.
+    """
+    carriers: dict[str, list[str]] = {}
+    for task in TASKS:
+        expected = accepted_answer(task)
+        found = sorted(
+            grounding_sealed.display(path)
+            for path in reachable_files(grounding_sealed)
+            if expected in path.read_text("utf-8", errors="ignore")
+        )
+        carriers[task.task_id] = found
+
+    assert carriers == {task.task_id: [task.subject] for task in TASKS}
+
+
+def test_no_reachable_file_holds_a_grounding_task_prompt(
+    grounding_sealed: Workspace,
+) -> None:
+    """A file holding the question has no reason to be readable during a run.
+
+    Searched over whitespace-normalised text, because a prompt wrapped across
+    two source lines or two lines of prose is the same leak and the contiguous
+    search does not see it. Measured on this tree: the old bank's question
+    "What is inside the data directory?" is wrapped across
+    ``tests/test_shipped_config.py:88``, which is reachable, and
+    ``search_text`` returns that line -- while
+    ``test_no_reachable_file_holds_a_held_out_question`` above passes. That
+    hole is reported, not fixed here; the old texts are not this category's.
+
+    What this check cannot do, also measured: find a prompt inside the module
+    that defines it. Python's implicit concatenation leaves quote characters
+    between the fragments, which normalisation does not remove. So this is the
+    second line of defence, and
+    ``test_the_category_seals_exactly_the_two_files_that_define_it`` is the
+    load-bearing one.
+    """
+    prompts = {" ".join(task.prompt.split()) for task in TASKS}
+    leaking: dict[str, list[str]] = {}
+    for path in reachable_files(grounding_sealed):
+        flattened = " ".join(path.read_text("utf-8", errors="ignore").split())
+        found = sorted(prompt for prompt in prompts if prompt in flattened)
+        if found:
+            leaking[grounding_sealed.display(path)] = found
+
+    assert leaking == {}, f"these reachable files hold a task prompt: {leaking}"
+
+
+def test_the_grounding_fixture_holds_only_the_files_the_oracle_reads() -> None:
+    """The fixture's inventory, pinned the way eval-fixture's is.
+
+    Something writing an extra file into the one directory the agent reads is
+    the failure this guards. A human adding one deliberately updates this test
+    and, with it, the fixture hash in every record.
+    """
+    files = {
+        path.relative_to(PROJECT).as_posix()
+        for path in (PROJECT / "grounding-cohort").rglob("*")
+        if path.is_file()
+    }
+
+    assert files == {
+        "grounding-cohort/README.txt",
+        "grounding-cohort/ledger-alpha.txt",
+        "grounding-cohort/ledger-beta.txt",
+    }
+
+
+def test_the_grounding_answers_are_distinctive_enough_for_the_older_invariant() -> None:
+    """Measured, not assumed.
+
+    ``held_out_expectations()`` above drops anything shorter than twelve
+    characters, and a mutation in brief 10 showed an expectation under that
+    length is not checked at all. If these answers ever go short, the check
+    above still covers them but the older one would not, so the fact is pinned
+    here rather than left to be rediscovered.
+    """
+    for task in TASKS:
+        assert len(accepted_answer(task)) >= _DISTINCTIVE

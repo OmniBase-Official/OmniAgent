@@ -1,0 +1,1 @@
+This item is inside the fixture's nested directory. The fixture exists to give evaluation a subject with a stable listing.

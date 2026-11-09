@@ -21,6 +21,7 @@ from itertools import pairwise
 
 from eval_scoring import Score, Verdict
 from eval_workspace import sealed_workspace
+from holdout_eval import SEARCH_MARKER, SEARCH_SUBJECT
 from session_eval import (
     WALK,
     Outcome,
@@ -368,11 +369,11 @@ def test_every_walk_question_checks_something_about_the_answer() -> None:
 def test_the_walk_expectations_match_source_and_a_transcript_listing(tmp_path: Path) -> None:
     """Check source facts and a reproducible listing, without private run logs."""
     root = Path(__file__).resolve().parent.parent
-    budget = next(question for question in WALK if question.prefer_tool == "search_text")
+    search_subject = next(question for question in WALK if question.prefer_tool == "search_text")
     listing = next(question for question in WALK if question.prefer_tool == "list_directory")
 
-    assert budget.expect is not None
-    assert budget.expect in (root / "agent.py").read_text(encoding="utf-8")
+    assert search_subject.expect == SEARCH_SUBJECT
+    assert SEARCH_MARKER in (root / SEARCH_SUBJECT).read_text(encoding="utf-8")
     data = tmp_path / "data"
     data.mkdir()
     (data / "collect-run.log").write_text("synthetic run log\n", encoding="utf-8")

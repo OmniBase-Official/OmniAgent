@@ -14,20 +14,28 @@ The loop is deliberately small and readable:
 
 from __future__ import annotations
 
-import hashlib
+import ipaddress
 import logging
 import re
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable
-from typing import Any, cast
+from collections.abc import Callable, Collection, Iterable
+from typing import Any, Final, Literal, cast
+from urllib.parse import urlsplit
 
+import httpx
 from openai import APIConnectionError, APIStatusError, OpenAI
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import observability as obs
-from tools import NO_ARG_INPUTS, TOOLS, describe_tools, run_tool, tool_names
+from tools import (
+    FIXED_TOOL_ALLOWLIST,
+    NO_ARG_INPUTS,
+    describe_tools,
+    run_tool,
+    tool_names,
+)
 
 _log = obs.get_logger("agent")
 
@@ -248,8 +256,172 @@ def _assistant(content: str) -> ChatCompletionMessageParam:
     return {"role": "assistant", "content": content}
 
 
+# --------------------------------------------------------------------------- #
+# the endpoint policy -- gate 1 of the agentic MVP contract
+# --------------------------------------------------------------------------- #
+
+#: What an error message says in place of the endpoint. The contract forbids
+#: printing the URL, and both failure sites use this so they cannot drift apart.
+ENDPOINT_DESCRIPTION: Final = "the configured local endpoint"
+
+#: Plain HTTP only. There is no certificate that validates for ``localhost``, so
+#: ``https`` here would mean either a self-signed chain or verification turned
+#: off -- a new trust surface for a hop that never leaves the machine.
+_ALLOWED_SCHEME: Final = "http"
+
+_LOOPBACK_NAME: Final = "localhost"
+
+_POLICY_PREFIX: Final = "base_url must name the local loopback endpoint:"
+
+
+class EndpointPolicyError(ValueError):
+    """The configured endpoint is not the local loopback endpoint.
+
+    A ``ValueError`` on purpose: a pydantic field validator turns one into a
+    ``ValidationError``, and ``config.resolve`` reports that with the layer the
+    value came from, so the user is told which file or variable to fix.
+    """
+
+
+def _host_refusal(host: str) -> str | None:
+    """Why *host* is not loopback, or ``None`` if it is.
+
+    One function for two callers -- the configuration validator and the
+    transport -- because a host rule that exists twice is a host rule that will
+    disagree with itself.
+    """
+    if host == _LOOPBACK_NAME:
+        return None
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return f"the host is {host!r}, which is neither {_LOOPBACK_NAME!r} nor a loopback address"
+
+    if address.is_unspecified:
+        # 0.0.0.0 and :: are bind addresses: they say "every interface this
+        # machine has", which is what a server listens on, not what a client
+        # connects to. Where they do connect at all, the destination is decided
+        # by the operating system rather than by this configuration.
+        return f"{host!r} is a bind address, not a destination"
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        # ``::ffff:127.0.0.1`` really is loopback -- Python says is_loopback is
+        # True -- and it would reach the same server. It is refused anyway: the
+        # contract names two literals, and every extra spelling of the same
+        # destination is one more near-miss for a reader or a later string
+        # comparison to get wrong. The cost is that a user who writes it is told
+        # to write 127.0.0.1 instead.
+        return f"{host!r} is IPv4-mapped loopback; write the IPv4 literal instead"
+    if not address.is_loopback:
+        return f"{host!r} is not a loopback address"
+    return None
+
+
+def validate_loopback_url(url: str) -> str:
+    """Return *url* unchanged if it is the local loopback endpoint; raise if not.
+
+    Checked where the value is configured, not where it is used. A config object
+    that holds a foreign endpoint until something tries it will eventually be
+    used by a path that forgot to look, and the contract's claim is that no
+    request *can* route off loopback.
+
+    The message never repeats the URL. ``http://user:pw@localhost`` would
+    otherwise copy a credential into an error string; the host and the reason
+    are all a user needs in order to fix it.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError as exc:
+        raise EndpointPolicyError(f"{_POLICY_PREFIX} it cannot be parsed as a URL") from exc
+
+    if parts.scheme != _ALLOWED_SCHEME:
+        raise EndpointPolicyError(
+            f"{_POLICY_PREFIX} the scheme must be {_ALLOWED_SCHEME!r}, not {parts.scheme!r}"
+        )
+    if parts.username is not None or parts.password is not None:
+        raise EndpointPolicyError(f"{_POLICY_PREFIX} it carries user information")
+    if parts.query:
+        raise EndpointPolicyError(f"{_POLICY_PREFIX} it carries a query string")
+    if parts.fragment:
+        raise EndpointPolicyError(f"{_POLICY_PREFIX} it carries a fragment")
+    try:
+        _ = parts.port
+    except ValueError as exc:
+        raise EndpointPolicyError(f"{_POLICY_PREFIX} its port is not a number") from exc
+
+    host = parts.hostname
+    if not host:
+        raise EndpointPolicyError(f"{_POLICY_PREFIX} it names no host")
+    refusal = _host_refusal(host)
+    if refusal is not None:
+        raise EndpointPolicyError(f"{_POLICY_PREFIX} {refusal}")
+    return url
+
+
+class LoopbackOnlyTransport(httpx.BaseTransport):
+    """The last thing a request passes through before a socket is opened.
+
+    The configuration validator refuses a foreign endpoint, but a redirect hop
+    is a URL the configuration never saw. Every request -- first hop or later --
+    is re-checked here, so "no request can leave loopback" does not depend on
+    remembering to validate at each call site.
+    """
+
+    def __init__(self, inner: httpx.BaseTransport) -> None:
+        self._inner = inner
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.scheme != _ALLOWED_SCHEME:
+            raise EndpointPolicyError(
+                f"refused before connecting: the scheme must be "
+                f"{_ALLOWED_SCHEME!r}, not {request.url.scheme!r}"
+            )
+        refusal = _host_refusal(request.url.host)
+        if refusal is not None:
+            raise EndpointPolicyError(f"refused before connecting: {refusal}")
+        return self._inner.handle_request(request)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def build_local_http_client(
+    timeout: float, transport: httpx.BaseTransport | None = None
+) -> httpx.Client:
+    """An HTTP client that cannot be proxied and cannot be redirected off host.
+
+    Two guards, and it is worth recording which one does the work. httpx reads
+    ``HTTP_PROXY``/``HTTPS_PROXY``/``ALL_PROXY`` only when it builds its own
+    transport -- ``allow_env_proxies = trust_env and transport is None``,
+    ``httpx/_client.py:685`` -- so passing the policy transport below is what
+    keeps an environment proxy from mounting ahead of it. Measured: with the
+    three variables set and the transport dropped, httpx mounts three proxy
+    patterns and the endpoint routes through one of them; with the transport
+    passed it mounts none, even when ``trust_env`` is true.
+
+    ``trust_env=False`` is therefore the second, independent guard rather than
+    the first: it keeps ``.netrc`` and the SSL environment out as well, and it
+    is what would still refuse a proxy if this function ever stopped passing a
+    transport.
+
+    :param transport: the inner transport. Only tests pass one; production
+        leaves it out and gets the real one.
+    """
+    inner = transport if transport is not None else httpx.HTTPTransport()
+    return httpx.Client(
+        timeout=timeout,
+        follow_redirects=False,
+        trust_env=False,
+        transport=LoopbackOnlyTransport(inner),
+    )
+
+
 class AgentConfig(BaseModel):
-    """Runtime configuration for a single agent instance."""
+    """Runtime configuration for a single agent instance.
+
+    ``max_retries`` is the application's retry loop for retryable model
+    failures. ``client_max_retries`` is the OpenAI SDK's HTTP retry layer and
+    is fixed at zero, so each application attempt corresponds to one request.
+    """
 
     model: str = Field(default=DEFAULT_MODEL, description="Ollama model tag.")
     base_url: str = Field(default=DEFAULT_BASE_URL, description="Local OpenAI-compatible endpoint.")
@@ -257,12 +429,15 @@ class AgentConfig(BaseModel):
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     max_steps: int = Field(default=8, ge=1, le=50, description="Max ReAct iterations per question.")
     timeout: float = Field(default=180.0, gt=0, description="Per-request timeout in seconds.")
-    verbose: bool = Field(default=True, description="Stream the reasoning trace to the console.")
+    verbose: bool = Field(default=False, description="Stream the reasoning trace to the console.")
+    client_max_retries: Literal[0] = Field(
+        default=0, description="OpenAI SDK HTTP retries; fixed at zero."
+    )
     max_retries: int = Field(
         default=2,
         ge=0,
         le=10,
-        description="Extra attempts after a transient model-server failure.",
+        description="Application-level extra attempts after a retryable model-server failure.",
     )
     retry_backoff: float = Field(
         default=1.0,
@@ -297,6 +472,32 @@ class AgentConfig(BaseModel):
             "measures about 1,400 tokens, so 600 keeps one observation a minority "
             "voice. The window is not the binding constraint -- share of prompt is."
         ),
+    )
+
+    @field_validator("base_url")
+    @classmethod
+    def _base_url_is_loopback(cls, value: str) -> str:
+        """Refuse a non-loopback endpoint here, where the value is set."""
+        return validate_loopback_url(value)
+
+
+def build_openai_client(
+    config: AgentConfig, transport: httpx.BaseTransport | None = None
+) -> OpenAI:
+    """The client the agent talks to the model with.
+
+    Four things are decided here and nowhere else: the endpoint (already
+    validated by :class:`AgentConfig`), no SDK-level retries, no proxy, and no
+    redirect off host.
+
+    :param transport: the inner transport. Only tests pass one.
+    """
+    return OpenAI(
+        base_url=config.base_url,
+        api_key=config.api_key,
+        timeout=config.timeout,
+        max_retries=config.client_max_retries,
+        http_client=build_local_http_client(config.timeout, transport=transport),
     )
 
 
@@ -427,6 +628,8 @@ class ReActAgent:
         config: AgentConfig | None = None,
         printer: Callable[[str], None] = print,
         client: OpenAI | None = None,
+        allowed_tools: Collection[str] | None = None,
+        before_model_request: Callable[[], None] | None = None,
     ) -> None:
         """Build an agent.
 
@@ -436,12 +639,10 @@ class ReActAgent:
         """
         self.config = config or AgentConfig()
         self._print = printer
-        self.client = client or OpenAI(
-            base_url=self.config.base_url,
-            api_key=self.config.api_key,
-            timeout=self.config.timeout,
-            max_retries=0,
-        )
+        self._before_model_request = before_model_request
+        requested_tools = FIXED_TOOL_ALLOWLIST if allowed_tools is None else allowed_tools
+        self.allowed_tools = frozenset(requested_tools) & FIXED_TOOL_ALLOWLIST
+        self.client = client or build_openai_client(self.config)
         self.system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             tools=describe_tools(), tool_names=tool_names()
         )
@@ -454,26 +655,22 @@ class ReActAgent:
         obs.event(
             "agent.created",
             logger=_log,
-            # INFO, not DEBUG: this record carries the system prompt the dataset
-            # exporter replays, so a log written at the default level has to
-            # contain it or none of the run is usable for training.
             level=logging.INFO,
-            # api_key is redacted by the formatter, which this proves.
-            config=self.config.model_dump(),
-            tools=list(TOOLS),
-            # The exporter replays this verbatim as the system turn, and the
-            # digest tells runs made with different prompts apart.
-            system_prompt=self.system_prompt,
-            system_prompt_sha256=hashlib.sha256(
-                self.system_prompt.encode("utf-8")
-            ).hexdigest(),
+            status="created",
+            model_tag=self.config.model,
         )
 
     # -- public API -------------------------------------------------------- #
 
     def reset(self) -> None:
         """Forget the conversation history."""
-        obs.event("agent.reset", logger=_log, level=logging.DEBUG, turns=self._turn)
+        obs.event(
+            "agent.reset",
+            logger=_log,
+            level=logging.DEBUG,
+            status="reset",
+            step_count=len(self.last_trace),
+        )
         self.history.clear()
         self.last_trace.clear()
 
@@ -486,11 +683,11 @@ class ReActAgent:
                 "agent.connection.unreachable",
                 logger=_log,
                 level=logging.ERROR,
-                base_url=self.config.base_url,
-                exc_info=True,
+                status="unreachable",
+                model_tag=self.config.model,
             )
             raise AgentError(
-                f"Cannot reach a local model server at {self.config.base_url}. "
+                f"Cannot reach a local model server at {ENDPOINT_DESCRIPTION}. "
                 "Is Ollama running? Start it with 'ollama serve'."
             ) from exc
         except APIStatusError as exc:
@@ -498,21 +695,18 @@ class ReActAgent:
                 "agent.connection.error",
                 logger=_log,
                 level=logging.ERROR,
-                base_url=self.config.base_url,
-                status_code=exc.status_code,
-                exc_info=True,
+                status="error",
+                model_tag=self.config.model,
             )
             raise AgentError(
-                f"Model server returned HTTP {exc.status_code}: {exc.message}"
+                f"Model server returned HTTP {exc.status_code}."
             ) from exc
 
         obs.event(
             "agent.connection.ok",
             logger=_log,
-            base_url=self.config.base_url,
-            model=self.config.model,
-            model_installed=model_is_installed(self.config.model, available),
-            available=available,
+            status="succeeded" if model_is_installed(self.config.model, available) else "failed",
+            model_tag=self.config.model,
         )
         return available
 
@@ -530,9 +724,8 @@ class ReActAgent:
         obs.event(
             "agent.turn.start",
             logger=_log,
-            question=question,
-            max_steps=self.config.max_steps,
-            history_messages=len(self.history),
+            status="started",
+            step_count=0,
         )
 
         for iteration in range(1, self.config.max_steps + 1):
@@ -560,8 +753,8 @@ class ReActAgent:
                     obs.event(
                         "agent.step.final_answer",
                         logger=_log,
-                        thought=step.thought,
-                        answer=step.final_answer,
+                        status="completed",
+                        step_count=iteration,
                     )
                     return self._finish(question, step.final_answer, started, iteration)
 
@@ -571,7 +764,8 @@ class ReActAgent:
                         "agent.format.violation",
                         logger=_log,
                         level=logging.WARNING,
-                        reply=reply,
+                        status="invalid_format",
+                        step_count=iteration,
                     )
                     nudge = (
                         "Your last reply did not follow the required format. Reply with "
@@ -584,6 +778,10 @@ class ReActAgent:
                     continue
 
                 observation = self._invoke_tool(step)
+                if step.action not in self.allowed_tools:
+                    # A task policy rejection terminates this turn immediately;
+                    # the model cannot retry or route around the denied tool.
+                    return ""
                 # The rut check below still sees the whole thing; only what the
                 # model is asked to read again is capped.
                 shown = cap_observation(observation, self.config.max_observation_tokens)
@@ -598,7 +796,8 @@ class ReActAgent:
             "agent.budget.exhausted",
             logger=_log,
             level=logging.WARNING,
-            max_steps=self.config.max_steps,
+            status="step_budget_exhausted",
+            step_count=self.config.max_steps,
         )
         fallback = self._force_final_answer(scratchpad, question)
         return self._finish(question, fallback, started, self.config.max_steps)
@@ -635,10 +834,8 @@ class ReActAgent:
             "agent.loop.repeated_action",
             logger=_log,
             level=logging.WARNING,
-            tool=signature[0],
-            tool_input=signature[1],
-            attempts=count,
-            failing=failed,
+            status="repeated_action",
+            tool_name=signature[0],
         )
         if failed:
             return (
@@ -657,16 +854,32 @@ class ReActAgent:
     def _invoke_tool(self, step: Step) -> str:
         """Run the tool a step asked for, logging the call and its result."""
         tool_name = step.action or ""
+        permitted = tool_name in self.allowed_tools
         obs.event(
             "agent.tool.call",
             logger=_log,
-            tool=tool_name,
-            tool_input=step.action_input or "",
-            thought=step.thought,
+            status="requested" if permitted else "rejected",
+            step_count=len(self.last_trace),
+            tool_name=tool_name,
         )
 
         started = time.perf_counter()
-        observation = run_tool(tool_name, step.action_input or "")
+        if permitted:
+            observation = run_tool(
+                tool_name,
+                step.action_input or "",
+                allowed_tools=self.allowed_tools,
+            )
+        else:
+            obs.event(
+                "agent.tool.policy_violation",
+                logger=_log,
+                level=logging.WARNING,
+                status="rejected",
+                step_count=len(self.last_trace),
+                tool_name=tool_name,
+            )
+            observation = "Error: tool is not allowed for this task."
         elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
 
         step.observation = observation
@@ -675,10 +888,10 @@ class ReActAgent:
             "agent.tool.result",
             logger=_log,
             level=logging.WARNING if failed else logging.INFO,
-            tool=tool_name,
-            ok=not failed,
-            observation=observation,
-            elapsed_ms=elapsed_ms,
+            status="failed" if failed else "succeeded",
+            duration_ms=elapsed_ms,
+            step_count=len(self.last_trace),
+            tool_name=tool_name,
         )
         self._trace_observation(observation)
         return observation
@@ -687,9 +900,9 @@ class ReActAgent:
         obs.event(
             "agent.turn.end",
             logger=_log,
-            answer=answer,
-            steps_used=steps,
-            elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+            status="completed",
+            step_count=steps,
+            duration_ms=round((time.perf_counter() - started) * 1000, 3),
         )
         return self._remember(question, answer)
 
@@ -758,17 +971,11 @@ class ReActAgent:
             if keep < len(content):
                 pad[-1]["content"] = content[:keep] + _CLIPPED
 
-        final = total()
         obs.event(
             "agent.context.trimmed",
             logger=_log,
             level=logging.WARNING,
-            estimated_tokens_before=original,
-            estimated_tokens_after=final,
-            budget=budget,
-            context_window=self.config.context_window,
-            earlier_turns_dropped=len(history) - len(kept_history),
-            still_over=final > budget,
+            status="trimmed",
         )
         return cast("list[ChatCompletionMessageParam]", assembled())
 
@@ -777,27 +984,22 @@ class ReActAgent:
         obs.event(
             "agent.llm.request",
             logger=_log,
-            model=self.config.model,
-            temperature=self.config.temperature,
-            message_count=len(messages),
-            stop_enabled=stop,
+            status="requested",
+            model_tag=self.config.model,
+            step_count=len(self.last_trace) + 1,
         )
 
         started = time.perf_counter()
         response = self._create_with_retries(messages, stop=stop)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
         content = (response.choices[0].message.content or "").strip()
-        usage = response.usage
         obs.event(
             "agent.llm.response",
             logger=_log,
-            model=self.config.model,
-            elapsed_ms=elapsed_ms,
-            reply_chars=len(content),
-            finish_reason=response.choices[0].finish_reason,
-            prompt_tokens=usage.prompt_tokens if usage else None,
-            completion_tokens=usage.completion_tokens if usage else None,
-            reply=content,
+            status="completed",
+            model_tag=self.config.model,
+            duration_ms=elapsed_ms,
+            step_count=len(self.last_trace) + 1,
         )
         return content
 
@@ -813,6 +1015,8 @@ class ReActAgent:
         """
         attempts = self.config.max_retries + 1
         for attempt in range(1, attempts + 1):
+            if self._before_model_request is not None:
+                self._before_model_request()
             try:
                 return self.client.chat.completions.create(
                     model=self.config.model,
@@ -846,11 +1050,10 @@ class ReActAgent:
                 "agent.llm.retry",
                 logger=_log,
                 level=logging.WARNING,
-                attempt=attempt,
-                of=attempts,
-                delay_seconds=round(delay, 3),
-                status_code=status_code,
-                reason=type(exc).__name__,
+                status="retrying",
+                model_tag=self.config.model,
+                duration_ms=round(delay * 1000, 3),
+                step_count=len(self.last_trace) + 1,
             )
             if delay:
                 time.sleep(delay)
@@ -861,12 +1064,12 @@ class ReActAgent:
                 "agent.llm.unreachable",
                 logger=_log,
                 level=logging.ERROR,
-                base_url=self.config.base_url,
-                attempts=attempt,
-                exc_info=True,
+                status="unreachable",
+                model_tag=self.config.model,
+                step_count=len(self.last_trace) + 1,
             )
             raise AgentError(
-                f"Lost the connection to {self.config.base_url} after {attempt} "
+                f"Lost the connection to {ENDPOINT_DESCRIPTION} after {attempt} "
                 f"attempt{'s' if attempt > 1 else ''}. Is Ollama still running?"
             ) from exc
 
@@ -874,11 +1077,9 @@ class ReActAgent:
             "agent.llm.error",
             logger=_log,
             level=logging.ERROR,
-            status_code=status_code,
-            model=self.config.model,
-            attempts=attempt,
-            retryable=retryable,
-            exc_info=True,
+            status="error",
+            model_tag=self.config.model,
+            step_count=len(self.last_trace) + 1,
         )
         hint = ""
         if status_code == _HTTP_NOT_FOUND:

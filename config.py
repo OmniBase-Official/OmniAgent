@@ -18,8 +18,10 @@ A config file is TOML, read with the standard library -- no new dependency::
 
     [profile.demo]
     model = "qwen2.5-coder:7b"
-    log_file = "data/demo.jsonl"
     max_steps = 10
+
+Persistent ``log_file`` settings are rejected by the CLI until an approved
+retention and deletion policy exists.
 """
 
 from __future__ import annotations
@@ -28,11 +30,17 @@ import os
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from agent import DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL, AgentConfig
+from agent import (
+    DEFAULT_API_KEY,
+    DEFAULT_BASE_URL,
+    DEFAULT_MODEL,
+    AgentConfig,
+    validate_loopback_url,
+)
 
 #: Looked for in the working directory when --config is not given.
 DEFAULT_CONFIG_NAME: Final = "omniagent.toml"
@@ -60,6 +68,9 @@ class Settings(BaseModel):
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     max_steps: int = Field(default=8, ge=1, le=50)
     timeout: float = Field(default=180.0, gt=0)
+    client_max_retries: Literal[0] = Field(
+        default=0, description="OpenAI SDK HTTP retries; fixed at zero."
+    )
     max_retries: int = Field(default=2, ge=0, le=10)
     retry_backoff: float = Field(default=1.0, ge=0.0)
     max_repeated_actions: int = Field(default=2, ge=1, le=10)
@@ -67,7 +78,20 @@ class Settings(BaseModel):
     log_file: Path | None = Field(default=None)
     log_level: str = Field(default="INFO")
     log_console: bool = Field(default=False)
-    verbose: bool = Field(default=True)
+    verbose: bool = Field(default=False)
+
+    @field_validator("base_url")
+    @classmethod
+    def _base_url_is_loopback(cls, value: str) -> str:
+        """Refuse a non-loopback endpoint in the layer the user supplies it in.
+
+        ``AgentConfig`` validates it as well, but that happens in
+        :meth:`agent_config`, which is called after ``resolve`` has returned.
+        Validating here means a bad endpoint in the TOML, an environment
+        variable or a flag is reported with the layer it came from, before any
+        of it reaches an agent.
+        """
+        return validate_loopback_url(value)
 
     def agent_config(self) -> AgentConfig:
         """The subset the agent itself cares about."""
@@ -78,6 +102,7 @@ class Settings(BaseModel):
             temperature=self.temperature,
             max_steps=self.max_steps,
             timeout=self.timeout,
+            client_max_retries=self.client_max_retries,
             max_retries=self.max_retries,
             retry_backoff=self.retry_backoff,
             max_repeated_actions=self.max_repeated_actions,
