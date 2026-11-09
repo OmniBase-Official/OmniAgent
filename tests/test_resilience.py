@@ -7,7 +7,6 @@ stuck resending an Action that cannot work. Both are handled here.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Iterator
 from pathlib import Path
@@ -16,9 +15,9 @@ from typing import Any
 import pytest
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
-import observability as obs
 from agent import AgentConfig, AgentError, ReActAgent
 from tests.fakes import FakeOpenAI
+from tests.log_capture import configure_memory_sink, read_lines, reset_capture
 
 FINAL = "Thought: done\nFinal Answer: {answer}"
 BAD_CALL = "Thought: maths\nAction: calculate\nAction Input: 1 / 0"
@@ -26,23 +25,20 @@ BAD_CALL = "Thought: maths\nAction: calculate\nAction Input: 1 / 0"
 
 @pytest.fixture(autouse=True)
 def _clean_logging() -> Iterator[None]:
-    obs.reset()
+    reset_capture()
     yield
-    obs.reset()
+    reset_capture()
 
 
 @pytest.fixture
 def log_file(tmp_path: Path) -> Path:
-    path = tmp_path / "omniagent.jsonl"
-    obs.configure(level=logging.DEBUG, log_file=path, session_id="test-session")
+    path = tmp_path / "memory-log"
+    configure_memory_sink(path, level=logging.DEBUG, session_id="test-session")
     return path
 
 
 def records(path: Path) -> list[dict[str, Any]]:
-    for handler in obs.get_logger().handlers:
-        handler.flush()
-    text = path.read_text(encoding="utf-8").strip()
-    return [json.loads(line) for line in text.splitlines()] if text else []
+    return read_lines(path)
 
 
 def events_named(path: Path, name: str) -> list[dict[str, Any]]:
@@ -164,7 +160,11 @@ def test_the_client_does_not_retry_underneath_us() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_the_backoff_doubles_and_is_logged(log_file: Path) -> None:
+def test_the_backoff_doubles_while_retry_events_stay_sanitized(
+    log_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr("agent.time.sleep", delays.append)
     fake = FakeOpenAI(
         script=[connection_error(), connection_error(), FINAL.format(answer="4")]
     )
@@ -173,9 +173,9 @@ def test_the_backoff_doubles_and_is_logged(log_file: Path) -> None:
     assert agent.run("hi") == "4"
 
     retries = events_named(log_file, "agent.llm.retry")
-    assert [r["attempt"] for r in retries] == [1, 2]
-    assert [r["delay_seconds"] for r in retries] == [0.5, 1.0]
-    assert all(r["level"] == "WARNING" for r in retries)
+    assert len(retries) == 2
+    assert delays == [0.5, 1.0]
+    assert all(set(record) <= {"record_type", "event", "runtime_version"} for record in retries)
 
 
 def test_a_successful_first_attempt_logs_no_retry(log_file: Path) -> None:
@@ -184,14 +184,16 @@ def test_a_successful_first_attempt_logs_no_retry(log_file: Path) -> None:
     assert events_named(log_file, "agent.llm.retry") == []
 
 
-def test_the_failure_record_counts_the_attempts(log_file: Path) -> None:
+def test_the_failure_event_does_not_persist_attempt_details(log_file: Path) -> None:
     fake = FakeOpenAI(completion_error=connection_error())
     agent = build(fake, max_retries=2)
 
     with pytest.raises(AgentError):
         agent.run("hi")
 
-    assert events_named(log_file, "agent.llm.unreachable")[0]["attempts"] == 3
+    records_for_event = events_named(log_file, "agent.llm.unreachable")
+    assert len(records_for_event) == 1
+    assert set(records_for_event[0]) <= {"record_type", "event", "runtime_version"}
 
 
 # --------------------------------------------------------------------------- #
@@ -209,8 +211,7 @@ def test_a_repeated_failing_action_gets_an_intervention(log_file: Path) -> None:
 
     rut = events_named(log_file, "agent.loop.repeated_action")
     assert len(rut) == 1
-    assert rut[0]["tool"] == "calculate"
-    assert rut[0]["attempts"] == 2
+    assert set(rut[0]) <= {"record_type", "event", "runtime_version"}
 
     sent = [str(m["content"]) for m in fake.calls[2]["messages"]]
     assert any("Do not send it again" in message for message in sent)
@@ -255,8 +256,7 @@ def test_a_third_identical_succeeding_action_is_a_rut(log_file: Path) -> None:
 
     rut = events_named(log_file, "agent.loop.repeated_action")
     assert len(rut) == 1
-    assert rut[0]["failing"] is False
-    assert rut[0]["attempts"] == 3
+    assert set(rut[0]) <= {"record_type", "event", "runtime_version"}
 
     sent = [str(m["content"]) for m in fake.calls[3]["messages"]]
     assert any("succeeded every time" in message for message in sent)
@@ -269,8 +269,7 @@ def test_a_failing_action_still_intervenes_one_attempt_sooner(log_file: Path) ->
 
     rut = events_named(log_file, "agent.loop.repeated_action")
     assert len(rut) == 1
-    assert rut[0]["failing"] is True
-    assert rut[0]["attempts"] == 2
+    assert set(rut[0]) <= {"record_type", "event", "runtime_version"}
 
 
 def test_the_rut_counter_resets_between_turns(log_file: Path) -> None:

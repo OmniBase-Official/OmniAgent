@@ -19,7 +19,7 @@ import logging
 import re
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from typing import Any, cast
 
 from openai import APIConnectionError, APIStatusError, OpenAI
@@ -27,7 +27,14 @@ from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 from pydantic import BaseModel, Field
 
 import observability as obs
-from tools import NO_ARG_INPUTS, TOOLS, describe_tools, run_tool, tool_names
+from tools import (
+    FIXED_TOOL_ALLOWLIST,
+    NO_ARG_INPUTS,
+    TOOLS,
+    describe_tools,
+    run_tool,
+    tool_names,
+)
 
 _log = obs.get_logger("agent")
 
@@ -427,6 +434,8 @@ class ReActAgent:
         config: AgentConfig | None = None,
         printer: Callable[[str], None] = print,
         client: OpenAI | None = None,
+        allowed_tools: Collection[str] | None = None,
+        before_model_request: Callable[[], None] | None = None,
     ) -> None:
         """Build an agent.
 
@@ -436,6 +445,9 @@ class ReActAgent:
         """
         self.config = config or AgentConfig()
         self._print = printer
+        self._before_model_request = before_model_request
+        requested_tools = FIXED_TOOL_ALLOWLIST if allowed_tools is None else allowed_tools
+        self.allowed_tools = frozenset(requested_tools) & FIXED_TOOL_ALLOWLIST
         self.client = client or OpenAI(
             base_url=self.config.base_url,
             api_key=self.config.api_key,
@@ -584,6 +596,8 @@ class ReActAgent:
                     continue
 
                 observation = self._invoke_tool(step)
+                if step.action not in self.allowed_tools:
+                    return ""
                 # The rut check below still sees the whole thing; only what the
                 # model is asked to read again is capped.
                 shown = cap_observation(observation, self.config.max_observation_tokens)
@@ -657,6 +671,7 @@ class ReActAgent:
     def _invoke_tool(self, step: Step) -> str:
         """Run the tool a step asked for, logging the call and its result."""
         tool_name = step.action or ""
+        permitted = tool_name in self.allowed_tools
         obs.event(
             "agent.tool.call",
             logger=_log,
@@ -666,7 +681,14 @@ class ReActAgent:
         )
 
         started = time.perf_counter()
-        observation = run_tool(tool_name, step.action_input or "")
+        if permitted:
+            observation = run_tool(
+                tool_name,
+                step.action_input or "",
+                allowed_tools=self.allowed_tools,
+            )
+        else:
+            observation = "Error: tool is not allowed for this task."
         elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
 
         step.observation = observation
@@ -813,6 +835,8 @@ class ReActAgent:
         """
         attempts = self.config.max_retries + 1
         for attempt in range(1, attempts + 1):
+            if self._before_model_request is not None:
+                self._before_model_request()
             try:
                 return self.client.chat.completions.create(
                     model=self.config.model,

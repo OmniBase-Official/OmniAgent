@@ -1,0 +1,14 @@
+Synthetic custody ledger B. Invented values only, and no value here appears in
+ledger A.
+
+record-id          custodian-token        state
+ledger-row-8810    saffron-dingo-07       pending
+ledger-row-8811    viridian-okapi-23      pending
+ledger-row-8812    crimson-lorikeet-58    withdrawn
+ledger-row-8813    pewter-aurochs-12      pending
+ledger-row-8814    turquoise-lemur-44     settled
+ledger-row-8815    bronze-caracal-36      pending
+ledger-row-8816    plum-numbat-81         withdrawn
+
+Exactly one record in this ledger is settled. The custodian tokens are unique
+within the ledger.

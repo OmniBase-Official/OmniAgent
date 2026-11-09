@@ -52,18 +52,18 @@ LEAKED_SENTENCE = "The word 'budget' is used in the line"
 #: cannot be, and listing it here is the record that it was looked at.
 #:
 #: Measured, not assumed: the invariant below named every one of these.
-#: ``agent.budget.exhausted`` occurs in **five** reachable files, so the
+#: ``agent.budget.exhausted`` occurs in **six** reachable files, so the
 #: 'budget' question's expectation is not uniquely located in ``agent.py`` --
-#: a ``search_text`` over ``.`` still returns four files that are not the
+#: a ``search_text`` over ``.`` still returns five files that are not the
 #: question's subject. Sealing the transcripts does not make that question
 #: clean; it only stops the answer sentence coming back.
 EXPECTATION_CARRIERS: dict[str, frozenset[str]] = {
     "agent.budget.exhausted": frozenset(
         {
             "agent.py",  # the question's subject: the fact being measured
+            "observability.py",  # the event is emitted through this registry
             "README.md",  # the log event documented
             "export_dataset.py",  # the log event filtered
-            "tests/test_agent_logging.py",  # the log event asserted
             "tests/test_export_dataset.py",  # the log event in a fixture
         }
     ),
