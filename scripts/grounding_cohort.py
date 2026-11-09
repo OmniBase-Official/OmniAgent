@@ -295,15 +295,7 @@ def _validate_trial_identity(cohort_id: str, task: Task, repeat: int) -> Task:
     if type(task) is not Task or type(task.task_id) is not str:
         _invalid_trial_record()
     canonical_task = next((item for item in TASKS if item.task_id == task.task_id), None)
-    if canonical_task is None:
-        _invalid_trial_record()
-    if (
-        type(task.variant) is not str
-        or task.variant != canonical_task.variant
-        or type(task.allowlist) is not tuple
-        or any(type(name) is not str for name in task.allowlist)
-        or task.allowlist != canonical_task.allowlist
-    ):
+    if canonical_task is None or task != canonical_task:
         _invalid_trial_record()
     if type(repeat) is not int or not 1 <= repeat <= _MAX_REPEATS:
         _invalid_trial_record()
@@ -681,6 +673,31 @@ def _run_trial(task: Task, *, config: AgentConfig, client: OpenAI, root: Path) -
     )
 
 
+def _validate_cohort_inputs(
+    *,
+    cohort_id: str,
+    tasks: tuple[Task, ...],
+    repeats: int,
+    preflight: Preflight,
+) -> tuple[str, str]:
+    if type(repeats) is not int or not 1 <= repeats <= _MAX_REPEATS:
+        _invalid_trial_record()
+    if type(tasks) is not tuple or not tasks:
+        _invalid_trial_record()
+    seen_task_ids: set[str] = set()
+    for task in tasks:
+        canonical_task = _validate_trial_identity(cohort_id, task, 1)
+        if canonical_task.task_id in seen_task_ids:
+            _invalid_trial_record()
+        seen_task_ids.add(canonical_task.task_id)
+
+    fixture_hash = FROZEN_FIXTURE_SHA256
+    _validate_preflight_record(preflight, fixture_hash, "0" * 64)
+    protocol_hash = protocol_sha256(tasks, preflight)
+    _validate_preflight_record(preflight, fixture_hash, protocol_hash)
+    return fixture_hash, protocol_hash
+
+
 def run_cohort(  # noqa: PLR0913 - preflight, client and the run's own knobs
     *,
     preflight: Preflight,
@@ -703,6 +720,13 @@ def run_cohort(  # noqa: PLR0913 - preflight, client and the run's own knobs
     persist where the contract permits, which is outside the repository under a
     retention period the owner has not yet set.
     """
+    fixture_hash, protocol_hash = _validate_cohort_inputs(
+        cohort_id=cohort_id,
+        tasks=tasks,
+        repeats=repeats,
+        preflight=preflight,
+    )
+
     config = AgentConfig(
         model=preflight.model_tag,
         verbose=False,
@@ -711,8 +735,6 @@ def run_cohort(  # noqa: PLR0913 - preflight, client and the run's own knobs
         timeout=preflight.timeout_seconds,
         max_retries=preflight.max_retries,
     )
-    fixture_hash = FROZEN_FIXTURE_SHA256
-    protocol_hash = protocol_sha256(tasks, preflight)
     records: list[dict[str, object]] = []
     stopped_on = _revision_mismatch(preflight, observe_revision())
 

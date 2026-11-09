@@ -37,11 +37,11 @@ FIXED_TOOL_NAMES: Final[frozenset[str]] = frozenset(
 )
 
 _EVENT_FIELDS: Final[dict[str, frozenset[str]]] = {
-    "agent.created": frozenset({"status", "model_tag", "model_digest"}),
+    "agent.created": frozenset({"status", "model_digest"}),
     "agent.reset": frozenset({"status", "step_count"}),
-    "agent.connection.unreachable": frozenset({"status", "model_tag"}),
-    "agent.connection.error": frozenset({"status", "model_tag"}),
-    "agent.connection.ok": frozenset({"status", "model_tag"}),
+    "agent.connection.unreachable": frozenset({"status"}),
+    "agent.connection.error": frozenset({"status"}),
+    "agent.connection.ok": frozenset({"status"}),
     "agent.turn.start": frozenset({"status", "step_count"}),
     "agent.turn.end": frozenset({"status", "duration_ms", "step_count"}),
     "agent.step.final_answer": frozenset({"status", "step_count"}),
@@ -53,14 +53,14 @@ _EVENT_FIELDS: Final[dict[str, frozenset[str]]] = {
     "agent.tool.policy_violation": frozenset({"status", "step_count", "tool_name"}),
     "agent.context.trimmed": frozenset({"status", "step_count"}),
     "agent.llm.request": frozenset(
-        {"status", "model_tag", "model_digest", "step_count"}
+        {"status", "model_digest", "step_count"}
     ),
     "agent.llm.response": frozenset(
-        {"status", "duration_ms", "model_tag", "model_digest", "step_count"}
+        {"status", "duration_ms", "model_digest", "step_count"}
     ),
-    "agent.llm.retry": frozenset({"status", "duration_ms", "model_tag", "step_count"}),
-    "agent.llm.unreachable": frozenset({"status", "model_tag", "step_count"}),
-    "agent.llm.error": frozenset({"status", "model_tag", "step_count"}),
+    "agent.llm.retry": frozenset({"status", "duration_ms", "step_count"}),
+    "agent.llm.unreachable": frozenset({"status", "step_count"}),
+    "agent.llm.error": frozenset({"status", "step_count"}),
     "cli.interrupted": frozenset({"status", "step_count"}),
     "cli.aborted": frozenset({"status", "step_count"}),
     "tool.unknown": frozenset({"status"}),
@@ -89,7 +89,6 @@ _STATUSES: Final[frozenset[str]] = frozenset(
         "aborted",
     }
 )
-_MODEL_TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _SHA256 = re.compile(r"^(?:sha256:)?[a-fA-F0-9]{64}$")
 _TELEMETRY_FIELDS: Final[frozenset[str]] = frozenset(
     {
@@ -99,7 +98,6 @@ _TELEMETRY_FIELDS: Final[frozenset[str]] = frozenset(
         "duration_ms",
         "step_count",
         "tool_name",
-        "model_tag",
         "model_digest",
         "runtime_version",
     }
@@ -145,15 +143,7 @@ def _sanitise_event(name: str, fields: Mapping[str, Any]) -> dict[str, Any] | No
         elif key == "step_count" and isinstance(value, int) and not isinstance(value, bool):
             if value >= 0:
                 payload[key] = value
-        elif (
-            key == "tool_name"
-            and isinstance(value, str)
-            and value in FIXED_TOOL_NAMES
-        ) or (
-            key == "model_tag"
-            and isinstance(value, str)
-            and _MODEL_TAG.fullmatch(value)
-        ):
+        elif key == "tool_name" and isinstance(value, str) and value in FIXED_TOOL_NAMES:
             payload[key] = value
         elif key == "model_digest" and isinstance(value, str) and _SHA256.fullmatch(value):
             payload[key] = value.lower()

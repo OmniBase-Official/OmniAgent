@@ -148,7 +148,7 @@ def test_llm_response_carries_only_safe_telemetry(log_file: Path) -> None:
     build(fake).run("What is 2 + 2?")
 
     response = only(log_file, "agent.llm.response")
-    assert response["model_tag"] == "qwen2.5:7b"
+    assert "model_tag" not in response
     assert response["status"] == "completed"
     assert isinstance(response["duration_ms"], int | float)
     assert "reply" not in response
@@ -295,7 +295,7 @@ def test_connection_check_logs_whether_the_model_is_installed(log_file: Path) ->
 
     record = only(log_file, "agent.connection.ok")
     assert record["status"] == "failed"
-    assert record["model_tag"] == "qwen2.5:7b"
+    assert "model_tag" not in record
     assert "available" not in record
 
 
@@ -311,7 +311,7 @@ def test_the_api_key_never_appears_in_the_log(log_file: Path) -> None:
 
     raw = json.dumps(records(log_file))
     assert "sk-this-must-never-be-logged" not in raw
-    assert only(log_file, "agent.created")["model_tag"] == "qwen2.5:7b"
+    assert "model_tag" not in only(log_file, "agent.created")
     assert "config" not in only(log_file, "agent.created")
 
 

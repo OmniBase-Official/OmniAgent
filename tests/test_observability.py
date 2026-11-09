@@ -142,6 +142,17 @@ def test_credentials_are_dropped(tmp_path: Path, field: str) -> None:
     assert "sk-super-secret-value" not in json.dumps(record)
 
 
+def test_secret_shaped_model_tag_is_dropped(tmp_path: Path) -> None:
+    log_file = tmp_path / "log.jsonl"
+    configure_memory_sink(log_file)
+
+    obs.event("agent.llm.request", model_tag="token-abc123")
+
+    record = read_lines(log_file)[0]
+    assert "model_tag" not in record
+    assert "token-abc123" not in json.dumps(record)
+
+
 @pytest.mark.parametrize(
     "field", ["prompt_tokens", "completion_tokens", "total_tokens", "max_tokens", "tokens"]
 )

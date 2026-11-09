@@ -331,6 +331,11 @@ def test_the_trial_record_carries_every_field_the_contract_lists(
         "cohort_id",
         "task_id",
         "variant",
+        "prompt",
+        "subject",
+        "key_column",
+        "key_value",
+        "answer_column",
         "commit",
         "tree_clean",
         "model_tag",
@@ -361,6 +366,16 @@ def test_record_canary_rejection_matrix(  # noqa: PLR0912
         task = replace(task, task_id=canary)
     elif field == "variant":
         task = replace(task, variant=canary)
+    elif field == "prompt":
+        task = replace(task, prompt=canary)
+    elif field == "subject":
+        task = replace(task, subject=canary)
+    elif field == "key_column":
+        task = replace(task, key_column=canary)
+    elif field == "key_value":
+        task = replace(task, key_value=canary)
+    elif field == "answer_column":
+        task = replace(task, answer_column=canary)
     elif field == "allowlist":
         task = replace(task, allowlist=(canary,))
     elif field == "commit":
@@ -398,6 +413,122 @@ def test_record_canary_rejection_matrix(  # noqa: PLR0912
         )
 
     assert canary not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["prompt", "subject", "key_column", "key_value", "answer_column"],
+)
+def test_run_cohort_rejects_noncanonical_task_before_model_request(
+    field: str,
+) -> None:
+    task = TASKS[0]
+    if field == "prompt":
+        task = replace(task, prompt="token-abc123")
+    elif field == "subject":
+        task = replace(task, subject="token-abc123")
+    elif field == "key_column":
+        task = replace(task, key_column="token-abc123")
+    elif field == "key_value":
+        task = replace(task, key_value="token-abc123")
+    else:
+        task = replace(task, answer_column="token-abc123")
+    fake = FakeOpenAI(replies=["Final Answer: must not run"])
+
+    with pytest.raises(
+        ValueError, match="evaluation trial record violates the approved schema"
+    ):
+        run_cohort(
+            preflight=_preflight(),
+            client=fake.as_client(),
+            cohort_id="canonical-task-check",
+            tasks=(task,),
+            repeats=1,
+            observe_revision=_fixed_revision(),
+        )
+
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize(
+    "repeats",
+    [0, -1, cohort_module._MAX_REPEATS + 1, True],
+)
+def test_run_cohort_rejects_invalid_repeat_count_before_model_request(
+    repeats: int,
+) -> None:
+    fake = FakeOpenAI(replies=["Final Answer: must not run"])
+
+    with pytest.raises(
+        ValueError, match="evaluation trial record violates the approved schema"
+    ):
+        run_cohort(
+            preflight=_preflight(),
+            client=fake.as_client(),
+            cohort_id="repeat-bound-check",
+            tasks=(TASKS[0],),
+            repeats=repeats,
+            observe_revision=_fixed_revision(),
+        )
+
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize(
+    "tasks",
+    [(), (TASKS[0], TASKS[0])],
+    ids=["empty", "duplicate-task-id"],
+)
+def test_run_cohort_rejects_empty_or_duplicate_task_inventory_before_model_request(
+    tasks: tuple[Task, ...],
+) -> None:
+    fake = FakeOpenAI(replies=["Final Answer: must not run"])
+
+    with pytest.raises(
+        ValueError, match="evaluation trial record violates the approved schema"
+    ):
+        run_cohort(
+            preflight=_preflight(),
+            client=fake.as_client(),
+            cohort_id="inventory-check",
+            tasks=tasks,
+            repeats=1,
+            observe_revision=_fixed_revision(),
+        )
+
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("commit", "bad commit canary"),
+        ("tree_clean", 1),
+        ("model_tag", "RAW SECRET\nCANARY"),
+        ("model_digest", "bad digest canary"),
+        ("runtime_version", "bad runtime\ncanary"),
+        ("max_steps", 0),
+        ("timeout_seconds", 0),
+    ],
+)
+def test_run_cohort_rejects_invalid_preflight_before_model_request(
+    field: str, value: object
+) -> None:
+    fake = FakeOpenAI(replies=["Final Answer: must not run"])
+
+    with pytest.raises(
+        ValueError, match="evaluation trial record violates the approved schema"
+    ):
+        run_cohort(
+            preflight=_preflight(**{field: value}),
+            client=fake.as_client(),
+            cohort_id="preflight-check",
+            tasks=(TASKS[0],),
+            repeats=1,
+            observe_revision=_fixed_revision(),
+        )
+
+    assert fake.calls == []
 
 
 def test_trial_record_accepts_only_bounded_identifier_formats() -> None:
