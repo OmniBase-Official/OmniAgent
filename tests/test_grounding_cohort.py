@@ -1,8 +1,8 @@
 """The evidence-grounding category: a derived oracle and a record that carries no answers.
 
 One category, built end to end, so the record format is proved before
-thirty-six trials are spent on it. Every test here runs on an injected fake
-client; nothing in this module may reach a model server.
+thirty-six trials are spent on it. Tests use a scripted client or a local
+in-process HTTP server; none reaches a real model server.
 """
 
 from __future__ import annotations
@@ -15,11 +15,12 @@ import sys
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import grounding_cohort as cohort_module
+import httpx
 import pytest
 from eval_workspace import fixture_only_workspace
 from grounding_cohort import (
@@ -37,6 +38,7 @@ from grounding_cohort import (
     run_cohort,
     trial_record,
 )
+from openai import OpenAI
 
 import agent as agent_module
 import tools as tools_module
@@ -491,6 +493,266 @@ def test_run_cohort_rejects_noncanonical_task_before_model_request(
         )
 
     assert fake.calls == []
+
+
+def test_run_cohort_rejects_remote_client_before_model_request() -> None:
+    fake = FakeOpenAI(replies=["Final Answer: must not run"])
+    client = fake.as_client()
+    fake.__dict__["base_url"] = "https://attacker.invalid/v1"
+
+    with pytest.raises(agent_module.EndpointPolicyError):
+        run_cohort(
+            preflight=_preflight(endpoint="loopback"),
+            client=client,
+            cohort_id="endpoint-check",
+            tasks=(TASKS[0],),
+            repeats=1,
+            observe_revision=_fixed_revision(),
+        )
+
+    assert fake.calls == []
+
+
+def test_run_cohort_rejects_openai_subclass_with_delegated_chat() -> None:
+    delegated_calls: list[object] = []
+
+    class DelegatedChat:
+        def __init__(self) -> None:
+            self.completions = self
+
+        def create(self, **kwargs: object) -> None:
+            delegated_calls.append(kwargs)
+
+    class DelegatingOpenAI(OpenAI):
+        def __init__(self) -> None:
+            super().__init__(base_url="http://127.0.0.1:11434/v1", api_key="local")
+            self._delegated_chat = DelegatedChat()
+
+        @property
+        def chat(self) -> Any:
+            return self._delegated_chat
+
+    client = DelegatingOpenAI()
+    try:
+        with pytest.raises(agent_module.EndpointPolicyError):
+            run_cohort(
+                preflight=_preflight(),
+                client=client,
+                cohort_id="subclass-client-check",
+                tasks=(TASKS[0],),
+                repeats=1,
+                observe_revision=_fixed_revision(),
+            )
+    finally:
+        client.close()
+
+    assert delegated_calls == []
+
+
+def test_run_cohort_rejects_fake_client_metadata_impostor_before_calls() -> None:
+    delegated_calls: list[object] = []
+
+    class DelegatedCompletions:
+        def create(self, **kwargs: object) -> None:
+            delegated_calls.append(kwargs)
+
+    class DelegatedChat:
+        def __init__(self) -> None:
+            self.completions = DelegatedCompletions()
+
+    impostor_type = type(
+        "FakeOpenAI",
+        (),
+        {"__module__": "tests.fakes", "__qualname__": "FakeOpenAI"},
+    )
+    impostor = impostor_type()
+    impostor.chat = DelegatedChat()
+    client = cast(OpenAI, impostor)
+
+    with pytest.raises(agent_module.EndpointPolicyError):
+        run_cohort(
+            preflight=_preflight(),
+            client=client,
+            cohort_id="fake-metadata-check",
+            tasks=(TASKS[0],),
+            repeats=1,
+            observe_revision=_fixed_revision(),
+        )
+
+    assert delegated_calls == []
+
+
+def test_run_cohort_rejects_mutated_fake_chat_before_delegated_call() -> None:
+    fake = FakeOpenAI(replies=["must not be called"])
+    delegated_calls: list[object] = []
+
+    class DelegatedCompletions:
+        def create(self, **kwargs: object) -> None:
+            delegated_calls.append(kwargs)
+
+    class DelegatedChat:
+        def __init__(self) -> None:
+            self.completions = DelegatedCompletions()
+
+    fake.__dict__["chat"] = DelegatedChat()
+    with pytest.raises(agent_module.EndpointPolicyError):
+        run_cohort(
+            preflight=_preflight(),
+            client=fake.as_client(),
+            cohort_id="mutated-fake-chat-check",
+            tasks=(TASKS[0],),
+            repeats=1,
+            observe_revision=_fixed_revision(),
+        )
+
+    assert fake.calls == []
+    assert delegated_calls == []
+
+
+def test_run_cohort_rejects_mutated_openai_chat_before_delegated_call() -> None:
+    fake = FakeOpenAI(replies=["must not be called"])
+    client = agent_module.build_openai_client(agent_module.AgentConfig())
+    client.__dict__["chat"] = fake.chat
+    try:
+        with pytest.raises(agent_module.EndpointPolicyError):
+            run_cohort(
+                preflight=_preflight(),
+                client=client,
+                cohort_id="mutated-chat-check",
+                tasks=(TASKS[0],),
+                repeats=1,
+                observe_revision=_fixed_revision(),
+            )
+    finally:
+        client.close()
+
+    assert fake.calls == []
+
+
+def test_agent_rejects_client_chat_mutation_before_any_request() -> None:
+    delegated_calls: list[object] = []
+
+    class DelegatedCompletions:
+        def create(self, **kwargs: object) -> None:
+            delegated_calls.append(kwargs)
+
+    class DelegatedChat:
+        def __init__(self) -> None:
+            self.completions = DelegatedCompletions()
+
+    client = agent_module.build_openai_client(agent_module.AgentConfig())
+    agent = agent_module.ReActAgent(client=client)
+    client.__dict__["chat"] = DelegatedChat()
+    try:
+        with pytest.raises(agent_module.EndpointPolicyError):
+            agent.run("Do not send this request.")
+    finally:
+        client.close()
+
+    assert delegated_calls == []
+
+
+def test_agent_rejects_transport_replacement_before_any_request() -> None:
+    class CountingTransport(httpx.BaseTransport):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            self.calls += 1
+            return httpx.Response(200, request=request)
+
+        def close(self) -> None:
+            pass
+
+    client = agent_module.build_openai_client(agent_module.AgentConfig())
+    agent = agent_module.ReActAgent(client=client)
+    counting_transport = CountingTransport()
+    client._client._transport = counting_transport
+    try:
+        with pytest.raises(agent_module.EndpointPolicyError):
+            agent.run("Do not send this request.")
+    finally:
+        client.close()
+
+    assert counting_transport.calls == 0
+
+
+def test_agent_rejects_fake_chat_mutation_before_delegated_call() -> None:
+    fake = FakeOpenAI(replies=["Thought: done.\nFinal Answer: pinned fake answer"])
+    delegated_calls: list[object] = []
+
+    class DelegatedCompletions:
+        def create(self, **kwargs: object) -> None:
+            delegated_calls.append(kwargs)
+
+    class DelegatedChat:
+        def __init__(self) -> None:
+            self.completions = DelegatedCompletions()
+
+    agent = agent_module.ReActAgent(client=fake.as_client())
+    fake.__dict__["chat"] = DelegatedChat()
+
+    with pytest.raises(agent_module.EndpointPolicyError):
+        agent.run("Do not send this request.")
+
+    assert fake.calls == []
+    assert delegated_calls == []
+
+
+def test_guarded_loopback_client_completes_run_and_records_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = TASKS[0]
+    responses = [
+        _read_step(task),
+        _answer_step(f"The value is {accepted_answer(task)}."),
+    ]
+
+    def fake_http_response(
+        _transport: httpx.HTTPTransport, request: httpx.Request
+    ) -> httpx.Response:
+        request.read()
+        body = json.dumps(
+            {
+                "id": "chatcmpl-local-fixture",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "local-fixture",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": responses.pop(0)},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            }
+        ).encode("utf-8")
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/json"},
+            content=body,
+            request=request,
+        )
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", fake_http_response)
+    base_url = "http://127.0.0.1:11434/v1"
+    client = agent_module.build_openai_client(agent_module.AgentConfig(base_url=base_url))
+    result = run_cohort(
+        preflight=_preflight(),
+        client=client,
+        cohort_id="guarded-client-record",
+        tasks=(task,),
+        repeats=1,
+        observe_revision=_fixed_revision(),
+    )
+    client.close()
+
+    assert len(result.records) == 1
+    assert result.records[0]["execution_status"] == "completed"
+    assert result.records[0]["endpoint"] == "loopback"
+    assert base_url not in json.dumps(result.records)
+    assert responses == []
 
 
 @pytest.mark.parametrize(
@@ -1172,18 +1434,13 @@ def test_fixture_junction_is_rejected_before_model_request(tmp_path: Path) -> No
     assert not fake.calls
 
 
-def test_fixture_drift_between_requests_stops_without_second_request(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_fixture_drift_between_requests_stops_without_second_request() -> None:
     fake = FakeOpenAI(replies=[_read_step(TASKS[0]), _answer_step("answer")])
-    original = fake.completions.create
 
-    def mutate_after_request(**kwargs: Any) -> Any:
-        reply = original(**kwargs)
+    def mutate_after_request() -> None:
         (get_workspace().root / TASKS[0].subject).write_text("changed", encoding="utf-8")
-        return reply
 
-    monkeypatch.setattr(fake.completions, "create", mutate_after_request)
+    fake.completions.after_create = mutate_after_request
     result = run_cohort(preflight=_preflight(), client=fake.as_client(), cohort_id="c",
                         tasks=(TASKS[0],), repeats=2, observe_revision=_fixed_revision())
     assert result.stopped_on == "fixture_drift"
@@ -1207,22 +1464,19 @@ def test_trial_record_drops_untrusted_tool_name() -> None:
 
 @pytest.mark.parametrize("change", ["modify", "remove"])
 def test_drift_after_final_response_stops_without_success_record(
-    monkeypatch: pytest.MonkeyPatch, change: str,
+    change: str,
 ) -> None:
     fake = FakeOpenAI(replies=[_read_step(TASKS[0]), _answer_step("answer")])
-    original = fake.completions.create
 
-    def mutate_after_final(**kwargs: Any) -> Any:
-        reply = original(**kwargs)
+    def mutate_after_final() -> None:
         if len(fake.calls) == 2:
             path = get_workspace().root / FIXTURE.name / "README.txt"
             if change == "remove":
                 path.unlink()
             else:
                 path.write_text("changed", encoding="utf-8")
-        return reply
 
-    monkeypatch.setattr(fake.completions, "create", mutate_after_final)
+    fake.completions.after_create = mutate_after_final
     result = run_cohort(preflight=_preflight(), client=fake.as_client(), cohort_id="c",
                         tasks=(TASKS[0],), repeats=2, observe_revision=_fixed_revision())
     assert result.stopped_on == "fixture_drift"

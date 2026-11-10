@@ -364,6 +364,18 @@ def test_listing_hides_dot_entries(workspace: Workspace) -> None:
     assert not any(entry.startswith(".") for entry in entries)
 
 
+def test_listing_hides_outside_symlink_metadata(workspace: Workspace, outside: Path) -> None:
+    alias = workspace.root / "alias.txt"
+    try:
+        alias.symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"creating a symlink is unavailable: {exc}")
+
+    entries = workspace.list_dir(".")
+
+    assert not any(entry.startswith("alias.txt") for entry in entries)
+
+
 def test_listing_puts_directories_first(workspace: Workspace) -> None:
     (workspace.root / "zzz").mkdir()
     entries = workspace.list_dir(".")

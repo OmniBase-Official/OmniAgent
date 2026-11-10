@@ -29,7 +29,7 @@ Start-Process "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" -ArgumentList "serv
 Wait about fifteen seconds. Check it answered:
 
 ```powershell
-Invoke-RestMethod http://localhost:11434/api/tags | Select-Object -ExpandProperty models | Select-Object name
+Invoke-RestMethod http://127.0.0.1:11434/api/tags | Select-Object -ExpandProperty models | Select-Object name
 ```
 
 `omniagent:latest` must be in that list.

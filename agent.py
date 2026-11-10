@@ -15,16 +15,24 @@ The loop is deliberately small and readable:
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
 import re
 import time
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable
+from importlib import import_module
 from typing import Any, cast
+from urllib.parse import urlsplit
 
+import httpcore
+import httpx
 from openai import APIConnectionError, APIStatusError, OpenAI
+from openai.resources.chat import Chat as OpenAIChat
+from openai.resources.chat.completions import Completions as OpenAIChatCompletions
+from openai.resources.models import Models as OpenAIModels
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import observability as obs
 from tools import (
@@ -37,10 +45,199 @@ from tools import (
 )
 
 _log = obs.get_logger("agent")
+_STANDARD_CHAT_CREATE = OpenAIChatCompletions.create
+_STANDARD_MODELS_LIST = OpenAIModels.list
 
-DEFAULT_BASE_URL = "http://localhost:11434/v1"
+DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_API_KEY = "local-ollama"  # Ollama ignores it; the client demands one.
 DEFAULT_MODEL = "qwen2.5:7b"
+
+_ALLOWED_SCHEME = "http"
+_ENDPOINT_POLICY_PREFIX = "base_url must name the local loopback endpoint:"
+
+
+class EndpointPolicyError(ValueError):
+    """A configured or requested model endpoint violates the local-only policy."""
+
+
+def _host_refusal(host: str) -> str | None:
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return "the host must be a loopback IP literal"
+    if address.is_unspecified:
+        return "an unspecified bind address is not an approved destination"
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return "IPv4-mapped IPv6 addresses are not approved loopback destinations"
+    if not address.is_loopback:
+        return "the host is not a loopback address"
+    return None
+
+
+def validate_loopback_url(url: str) -> str:
+    """Accept only plain HTTP URLs with an approved loopback host and no secrets."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError as exc:
+        raise EndpointPolicyError(f"{_ENDPOINT_POLICY_PREFIX} it cannot be parsed") from exc
+    if parts.scheme != _ALLOWED_SCHEME:
+        raise EndpointPolicyError(f"{_ENDPOINT_POLICY_PREFIX} the scheme must be 'http'")
+    if parts.username is not None or parts.password is not None:
+        raise EndpointPolicyError(f"{_ENDPOINT_POLICY_PREFIX} user information is not allowed")
+    if parts.query or parts.fragment:
+        raise EndpointPolicyError(f"{_ENDPOINT_POLICY_PREFIX} query and fragment are not allowed")
+    if port == 0:
+        raise EndpointPolicyError(f"{_ENDPOINT_POLICY_PREFIX} the port must be valid")
+    host = parts.hostname
+    if not host:
+        raise EndpointPolicyError(f"{_ENDPOINT_POLICY_PREFIX} it names no host")
+    refusal = _host_refusal(host)
+    if refusal is not None:
+        raise EndpointPolicyError(f"{_ENDPOINT_POLICY_PREFIX} {refusal}")
+    return url
+
+
+class LoopbackOnlyTransport(httpx.BaseTransport):
+    """Recheck every request immediately before it reaches the socket transport."""
+
+    def __init__(self, inner: httpx.BaseTransport) -> None:
+        self._inner = inner
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if not self.uses_direct_http_transport():
+            raise EndpointPolicyError(
+                "refused before connecting: the socket transport was modified"
+            )
+        if request.url.scheme != _ALLOWED_SCHEME:
+            raise EndpointPolicyError("refused before connecting: only HTTP loopback is allowed")
+        refusal = _host_refusal(request.url.host)
+        if refusal is not None:
+            raise EndpointPolicyError(f"refused before connecting: {refusal}")
+        return self._inner.handle_request(request)
+
+    def close(self) -> None:
+        self._inner.close()
+
+    def uses_direct_http_transport(self) -> bool:
+        pool = getattr(self._inner, "_pool", None)
+        return (
+            type(self._inner) is httpx.HTTPTransport
+            and type(pool) is httpcore.ConnectionPool
+            and getattr(pool, "_uds", None) is None
+            and getattr(pool, "_proxy_url", None) is None
+            and getattr(pool, "_proxy", None) is None
+            and getattr(pool, "_local_address", None) is None
+            and getattr(pool, "_socket_options", None) is None
+            and type(getattr(pool, "_network_backend", None)) is httpcore.SyncBackend
+        )
+
+
+def build_local_http_client(timeout: float) -> httpx.Client:
+    """Build a client with proxy discovery and redirects disabled and a final URL guard."""
+    return httpx.Client(
+        timeout=timeout,
+        follow_redirects=False,
+        trust_env=False,
+        transport=LoopbackOnlyTransport(httpx.HTTPTransport()),
+    )
+
+
+def build_openai_client(config: AgentConfig) -> OpenAI:
+    """Build the only supported network client for model requests."""
+    return OpenAI(
+        base_url=config.base_url,
+        api_key=config.api_key,
+        timeout=config.timeout,
+        max_retries=0,
+        http_client=build_local_http_client(config.timeout),
+    )
+
+
+def _validated_client_methods(
+    client: object,
+) -> tuple[Callable[..., Any], Callable[..., Any]]:
+    """Return validated bound completion and model-list methods for a client."""
+    base_url = getattr(client, "base_url", None)
+    if base_url is None:
+        try:
+            fake_types = import_module("tests.fakes")
+            fake_client_type = fake_types.FakeOpenAI
+            fake_chat_type = fake_types.FakeChat
+            fake_completions_type = fake_types.FakeCompletions
+            fake_models_type = fake_types.FakeModels
+        except (ImportError, AttributeError):
+            raise EndpointPolicyError("the model client endpoint cannot be verified") from None
+        if type(client) is not fake_client_type:
+            raise EndpointPolicyError("the model client endpoint cannot be verified")
+        fake_client = cast(Any, client)
+        chat = fake_client.chat
+        completions = fake_client.completions
+        models = fake_client.models
+        create_method = completions.create
+        model_list_method = models.list
+        if (
+            type(chat) is not fake_chat_type
+            or type(completions) is not fake_completions_type
+            or type(models) is not fake_models_type
+            or chat.completions is not completions
+            or getattr(create_method, "__self__", None) is not completions
+            or getattr(create_method, "__func__", None) is not fake_completions_type.create
+            or getattr(model_list_method, "__self__", None) is not models
+            or getattr(model_list_method, "__func__", None) is not fake_models_type.list
+        ):
+            raise EndpointPolicyError("the fake client request path is not the standard test path")
+        return create_method, model_list_method
+
+    validate_loopback_url(str(base_url).rstrip("/"))
+    if type(client) is not OpenAI:
+        raise EndpointPolicyError("an endpoint-bearing client must be the guarded OpenAI client")
+    http_client = client._client  # noqa: SLF001 - SDK exposes no public transport inspection API
+    transport = getattr(http_client, "_transport", None)
+    mounts = getattr(http_client, "_mounts", None)
+    if (
+        http_client.trust_env is not False
+        or http_client.follow_redirects is not False
+        or mounts
+        or type(transport) is not LoopbackOnlyTransport
+    ):
+        raise EndpointPolicyError("the model client transport is not guarded for loopback-only use")
+    if not transport.uses_direct_http_transport():
+        raise EndpointPolicyError("the model client transport is not guarded for loopback-only use")
+    chat = client.chat
+    completions = chat.completions
+    models = client.models
+    create_method = completions.create
+    model_list_method = models.list
+    if (
+        type(chat) is not OpenAIChat
+        or type(completions) is not OpenAIChatCompletions
+        or type(models) is not OpenAIModels
+        or chat._client is not client  # noqa: SLF001 - SDK resources expose no public owner API
+        or completions._client is not client  # noqa: SLF001 - SDK resources expose no public owner API
+        or models._client is not client  # noqa: SLF001 - SDK resources expose no public owner API
+        or getattr(create_method, "__self__", None) is not completions
+        or getattr(create_method, "__func__", None) is not _STANDARD_CHAT_CREATE
+        or getattr(model_list_method, "__self__", None) is not models
+        or getattr(model_list_method, "__func__", None) is not _STANDARD_MODELS_LIST
+    ):
+        raise EndpointPolicyError(
+            "the model client request path is not the standard guarded SDK path"
+        )
+    return create_method, model_list_method
+
+
+def validate_openai_client_endpoint(client: object) -> str:
+    """Verify a client and its request methods, then return only its classification."""
+    _validated_client_methods(client)
+    return "loopback"
+
+
+def _same_bound_method(first: Callable[..., Any], second: Callable[..., Any]) -> bool:
+    return (
+        getattr(first, "__self__", None) is getattr(second, "__self__", None)
+        and getattr(first, "__func__", None) is getattr(second, "__func__", None)
+    )
 
 SYSTEM_PROMPT_TEMPLATE = """You are OmniAgent, a careful reasoning assistant that solves tasks by \
 thinking step by step and calling tools.
@@ -295,6 +492,7 @@ class AgentConfig(BaseModel):
         ge=64,
         description="Tokens held back from the prompt so the reply has room.",
     )
+
     max_observation_tokens: int = Field(
         default=600,
         ge=64,
@@ -305,6 +503,11 @@ class AgentConfig(BaseModel):
             "voice. The window is not the binding constraint -- share of prompt is."
         ),
     )
+
+    @field_validator("base_url")
+    @classmethod
+    def _base_url_is_loopback(cls, value: str) -> str:
+        return validate_loopback_url(value)
 
 
 class Step(BaseModel):
@@ -448,12 +651,11 @@ class ReActAgent:
         self._before_model_request = before_model_request
         requested_tools = FIXED_TOOL_ALLOWLIST if allowed_tools is None else allowed_tools
         self.allowed_tools = frozenset(requested_tools) & FIXED_TOOL_ALLOWLIST
-        self.client = client or OpenAI(
-            base_url=self.config.base_url,
-            api_key=self.config.api_key,
-            timeout=self.config.timeout,
-            max_retries=0,
-        )
+        if client is not None:
+            self.client = client
+        else:
+            self.client = build_openai_client(self.config)
+        self._completion_create, self._models_list = _validated_client_methods(self.client)
         self.system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             tools=describe_tools(), tool_names=tool_names()
         )
@@ -489,10 +691,24 @@ class ReActAgent:
         self.history.clear()
         self.last_trace.clear()
 
+    def _create_completion(self, **kwargs: Any) -> Any:
+        """Revalidate the client path before dispatching the pinned method."""
+        current_create, _ = _validated_client_methods(self.client)
+        if not _same_bound_method(current_create, self._completion_create):
+            raise EndpointPolicyError("the model completion method changed after validation")
+        return self._completion_create(**kwargs)
+
+    def _list_models(self) -> Any:
+        """Revalidate the client path before dispatching the pinned model-list method."""
+        _, current_list = _validated_client_methods(self.client)
+        if not _same_bound_method(current_list, self._models_list):
+            raise EndpointPolicyError("the model-list method changed after validation")
+        return self._models_list()
+
     def check_connection(self) -> list[str]:
         """Return the model tags the local server offers, or raise AgentError."""
         try:
-            available = [m.id for m in self.client.models.list().data]
+            available = [m.id for m in self._list_models().data]
         except APIConnectionError as exc:
             obs.event(
                 "agent.connection.unreachable",
@@ -838,11 +1054,14 @@ class ReActAgent:
             if self._before_model_request is not None:
                 self._before_model_request()
             try:
-                return self.client.chat.completions.create(
-                    model=self.config.model,
-                    messages=messages,
-                    temperature=self.config.temperature,
-                    stop=["\nObservation:", "Observation:"] if stop else None,
+                return cast(
+                    ChatCompletion,
+                    self._create_completion(
+                        model=self.config.model,
+                        messages=messages,
+                        temperature=self.config.temperature,
+                        stop=["\nObservation:", "Observation:"] if stop else None,
+                    ),
                 )
             except APIConnectionError as exc:
                 self._handle_attempt_failure(exc, attempt, attempts, retryable=True)

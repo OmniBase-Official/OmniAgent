@@ -120,6 +120,8 @@ _configured = False
 
 def _sanitise_event(name: str, fields: Mapping[str, Any]) -> dict[str, Any] | None:
     """Return telemetry from the closed schema, dropping every other value."""
+    if type(name) is not str:
+        return None
     allowed = _EVENT_FIELDS.get(name)
     if allowed is None:
         return None
@@ -129,9 +131,11 @@ def _sanitise_event(name: str, fields: Mapping[str, Any]) -> dict[str, Any] | No
         "runtime_version": _RUNTIME_VERSION,
     }
     for key, value in fields.items():
+        if type(key) is not str:
+            continue
         if key not in allowed:
             continue
-        if key == "status" and isinstance(value, str) and value in _STATUSES:
+        if key == "status" and type(value) is str and value in _STATUSES:
             payload[key] = value
         elif (
             key == "duration_ms"
@@ -140,12 +144,12 @@ def _sanitise_event(name: str, fields: Mapping[str, Any]) -> dict[str, Any] | No
         ):
             if math.isfinite(value) and value >= 0:
                 payload[key] = round(float(value), 3)
-        elif key == "step_count" and isinstance(value, int) and not isinstance(value, bool):
+        elif key == "step_count" and type(value) is int:
             if value >= 0:
                 payload[key] = value
-        elif key == "tool_name" and isinstance(value, str) and value in FIXED_TOOL_NAMES:
+        elif key == "tool_name" and type(value) is str and value in FIXED_TOOL_NAMES:
             payload[key] = value
-        elif key == "model_digest" and isinstance(value, str) and _SHA256.fullmatch(value):
+        elif key == "model_digest" and type(value) is str and _SHA256.fullmatch(value):
             payload[key] = value.lower()
     return payload
 

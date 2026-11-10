@@ -264,12 +264,15 @@ class Workspace:
         for child in path.iterdir():
             if child.name.startswith("."):
                 continue
-            if self._is_unnameable(child.resolve()):
+            resolved = child.resolve()
+            if not self._inside(resolved):
+                continue  # an outside symlink must not disclose even metadata
+            if self._is_unnameable(resolved):
                 continue  # naming it is a pointer to what it holds
-            if child.is_dir():
+            if resolved.is_dir():
                 entries.append((0, child.name, f"{child.name}/"))
-            elif child.is_file():
-                entries.append((1, child.name, f"{child.name} ({child.stat().st_size} bytes)"))
+            elif resolved.is_file():
+                entries.append((1, child.name, f"{child.name} ({resolved.stat().st_size} bytes)"))
         return [label for _, _, label in sorted(entries)]
 
     def display(self, path: Path) -> str:

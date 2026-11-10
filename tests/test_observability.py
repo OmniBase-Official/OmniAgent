@@ -202,6 +202,61 @@ def test_non_serialisable_values_do_not_break_the_line(tmp_path: Path) -> None:
     assert "numbers" not in record
 
 
+def test_sanitizer_rejects_spoofed_string_subclasses() -> None:
+    class SpoofedText(str):
+        allowed_value: str
+
+        def __new__(cls, value: str, allowed_value: str) -> SpoofedText:
+            instance = super().__new__(cls, value)
+            instance.allowed_value = allowed_value
+            return instance
+
+        def __hash__(self) -> int:
+            return hash(self.allowed_value)
+
+        def __eq__(self, other: object) -> bool:
+            return other == self.allowed_value
+
+    canary_text = "SECRET_TELEMETRY_CANARY"
+    spoofed_status = SpoofedText(canary_text, "created")
+    spoofed_tool = SpoofedText(canary_text, "calculate")
+    spoofed_digest = SpoofedText(canary_text, "a" * 64)
+    spoofed_key = SpoofedText(canary_text, "status")
+    spoofed_event = SpoofedText(canary_text, "agent.created")
+
+    payload = obs._sanitise_event(
+        "agent.created",
+        {
+            "status": spoofed_status,
+            "tool_name": spoofed_tool,
+            "model_digest": spoofed_digest,
+        },
+    )
+    assert payload is not None
+    serialised = json.dumps(payload)
+    assert canary_text not in serialised
+    assert "status" not in payload
+    assert "tool_name" not in payload
+    assert "model_digest" not in payload
+    key_payload = obs._sanitise_event("agent.created", {spoofed_key: "created"})
+    assert key_payload is not None
+    assert "status" not in key_payload
+    assert obs._sanitise_event(spoofed_event, {"status": "created"}) is None
+
+
+def test_sanitizer_rejects_int_subclasses_for_step_count() -> None:
+    class SpoofedInt(int):
+        pass
+
+    payload = obs._sanitise_event(
+        "agent.turn.start",
+        {"status": "started", "step_count": SpoofedInt(4)},
+    )
+
+    assert payload is not None
+    assert "step_count" not in payload
+
+
 def test_exception_details_are_never_captured(tmp_path: Path) -> None:
     log_file = tmp_path / "log.jsonl"
     configure_memory_sink(log_file)

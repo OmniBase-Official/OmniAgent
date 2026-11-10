@@ -2,7 +2,7 @@
 
 Starts an interactive REPL (or answers a single question with --ask) backed by
 the local ReAct loop in ``agent.py``. Nothing here talks to the internet: every
-request goes to the Ollama server on localhost.
+request goes to the Ollama server at the loopback IP address.
 """
 
 from __future__ import annotations

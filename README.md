@@ -4,7 +4,7 @@ A local-only **ReAct (Reason + Act)** agent, written from scratch in ~600 lines 
 
 No LangChain. No LlamaIndex. No cloud API. The agent talks to a model running on
 your own machine through [Ollama](https://ollama.com), using the `openai` client
-library pointed at `http://localhost:11434/v1`. Nothing leaves localhost.
+library pointed at `http://127.0.0.1:11434/v1`. Nothing leaves your machine.
 
 <img src="docs/demo1.svg" alt="Cloning OmniAgent and asking it five questions: it multiplies, carries the result into a follow-up, then is refused by read_file, told to use file_info, and takes the hint." width="860">
 
@@ -216,7 +216,7 @@ On Windows the desktop app usually starts the server for you; `ollama serve`
 in a terminal works too. Verify it is listening:
 
 ```bash
-curl http://localhost:11434/api/tags
+curl http://127.0.0.1:11434/api/tags
 ```
 
 ### 2. Pull a model
@@ -289,7 +289,7 @@ python main.py --model qwen2.5-coder:7b --quiet
 | Flag | Default | Meaning |
 |---|---|---|
 | `--model` | `qwen2.5:7b` | Ollama model tag (env: `OMNIAGENT_MODEL`). |
-| `--base-url` | `http://localhost:11434/v1` | OpenAI-compatible endpoint (env: `OMNIAGENT_BASE_URL`). |
+| `--base-url` | `http://127.0.0.1:11434/v1` | OpenAI-compatible loopback IP endpoint (env: `OMNIAGENT_BASE_URL`). Hostnames are refused. |
 | `--max-steps` | `8` | Maximum ReAct iterations per question. |
 | `--temperature` | `0.1` | Sampling temperature. Low values keep the format stable. |
 | `--quiet` | off | Hide the Thought/Action/Observation trace. |
@@ -353,7 +353,7 @@ python main.py --profile demo --print-config
 
 ```
 model                 qwen2.5-coder:7b                    file:defaults
-base_url              http://localhost:11434/v1           built-in
+base_url              http://127.0.0.1:11434/v1           built-in
 api_key               ***redacted***                      built-in
 temperature           0.0                                 profile:demo
 max_steps             12                                  profile:demo
@@ -379,7 +379,7 @@ level. `api_key` is never printed back.
 $ python main.py --model qwen2.5-coder:7b --ask "What is 15% of 2400, then add the
   square root of 169 to it? Also tell me what day of the week it is today."
 
-    endpoint : http://localhost:11434/v1
+    endpoint : http://127.0.0.1:11434/v1
     model    : qwen2.5-coder:7b
 
   [step 1]
@@ -711,7 +711,7 @@ workflow was rehearsed locally in a throwaway virtualenv holding only
 
 | Symptom | Fix |
 |---|---|
-| `Cannot reach a local model server at http://localhost:11434/v1` | Ollama is not running. Start it with `ollama serve`. |
+| `Cannot reach a local model server at http://127.0.0.1:11434/v1` | Ollama is not running. Start it with `ollama serve`. |
 | `Model '...' is not installed on this Ollama server` | `ollama pull <model>`, or pass `--model` with one from `ollama list`. |
 | The agent answers maths without calling `calculate` | Lower `--temperature`, or use a larger instruction-tuned model. |
 | Replies keep breaking the format | The model is too small or is a reasoning model. Try `qwen2.5:7b` or `llama3.1:8b`. |

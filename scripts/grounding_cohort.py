@@ -36,7 +36,7 @@ sys.path.insert(0, str(PROJECT / "scripts"))
 
 from eval_workspace import FIXTURE_FILES, fixture_only_workspace, validate_fixture
 
-from agent import AgentConfig, AgentError, ReActAgent
+from agent import AgentConfig, AgentError, ReActAgent, validate_openai_client_endpoint
 from sandbox import get_workspace, set_workspace
 from tools import FIXED_TOOL_ALLOWLIST
 
@@ -489,6 +489,7 @@ def trial_record(  # noqa: PLR0913 - one parameter per frozen record field, by d
     fixture_hash: str,
     protocol_hash: str,
     observed: Observed,
+    endpoint: str = LOOPBACK,
 ) -> dict[str, object]:
     """Build one trial's record without exposing caller-controlled identifiers.
 
@@ -500,6 +501,8 @@ def trial_record(  # noqa: PLR0913 - one parameter per frozen record field, by d
     record_key = _ACTIVE_RECORD_KEY.get() or secrets.token_bytes(32)
     canonical_task = _validate_trial_identity(cohort_id, task, repeat)
     _validate_preflight_record(preflight, fixture_hash, protocol_hash)
+    if type(endpoint) is not str or endpoint != LOOPBACK:
+        raise TrialRecordSchemaError("endpoint must be the enforced loopback classification")
     safe_tools, tool_statuses = _validated_observation(observed)
 
     return {
@@ -521,7 +524,7 @@ def trial_record(  # noqa: PLR0913 - one parameter per frozen record field, by d
         "model_tag_hmac_sha256": _opaque_identifier(preflight.model_tag, record_key),
         "model_digest_hmac_sha256": _opaque_identifier(preflight.model_digest, record_key),
         "runtime_version_hmac_sha256": _opaque_identifier(preflight.runtime_version, record_key),
-        "endpoint": preflight.endpoint,
+        "endpoint": endpoint,
         "temperature": preflight.temperature,
         "max_steps": preflight.max_steps,
         "timeout_seconds": preflight.timeout_seconds,
@@ -743,6 +746,9 @@ def run_cohort(  # noqa: PLR0913 - preflight, client and the run's own knobs
         repeats=repeats,
         preflight=preflight,
     )
+    # The caller's preflight label is not evidence about the actual client.
+    # Inspect the URL and network stack before the first possible model call.
+    enforced_endpoint = validate_openai_client_endpoint(client)
 
     config = AgentConfig(
         model=preflight.model_tag,
@@ -786,6 +792,7 @@ def run_cohort(  # noqa: PLR0913 - preflight, client and the run's own knobs
                         task=task,
                         repeat=repeat,
                         preflight=preflight,
+                        endpoint=enforced_endpoint,
                         fixture_hash=fixture_hash,
                         protocol_hash=protocol_hash,
                         observed=observed,

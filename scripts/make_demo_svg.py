@@ -30,7 +30,7 @@ CAST: tuple[tuple[str, str], ...] = (
     ("cmd", "$ python main.py --profile demo"),
     ("dim", ""),
     ("dim", "  local-only ReAct agent  -  no cloud, no framework"),
-    ("dim", "    endpoint : http://localhost:11434/v1"),
+    ("dim", "    endpoint : http://127.0.0.1:11434/v1"),
     ("dim", "    model    : omniagent-v2"),
     ("dim", ""),
     ("you", "You > What is 144 * 12?"),
