@@ -14,7 +14,7 @@ run is a question you do not know the answer to.
 ## Before you record
 
 ```bash
-.venv/Scripts/python.exe -c "import httpx;print(httpx.get('http://localhost:11434/api/tags').status_code)"
+.venv/Scripts/python.exe -c "import httpx;print(httpx.get('http://127.0.0.1:11434/api/tags').status_code)"
 ```
 
 Expect `200`. If not, start Ollama and wait ~15 s:
@@ -46,7 +46,7 @@ claim about it was measured.
 ```
 
 The banner is worth pausing on: profile, workspace, session id, log file,
-endpoint `http://localhost:11434/v1`, model `omniagent-v2`. Point at the
+endpoint `http://127.0.0.1:11434/v1`, model `omniagent-v2`. Point at the
 endpoint — that is the whole local-only claim in one line.
 
 ## Beat 3 — the five questions (3 min)

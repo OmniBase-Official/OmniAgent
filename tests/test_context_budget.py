@@ -12,7 +12,6 @@ without quoting the file at all.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Iterator
 from pathlib import Path
@@ -24,6 +23,7 @@ import observability as obs
 from agent import AgentConfig, ReActAgent, cap_observation
 from sandbox import SandboxError, Workspace, get_workspace, set_workspace
 from tests.fakes import FakeOpenAI
+from tests.log_capture import configure_memory_sink, read_lines, reset_capture
 from tools import describe_tools, file_info, run_tool
 
 FINAL = "Thought: done\nFinal Answer: 4"
@@ -174,9 +174,10 @@ def test_the_newest_message_is_clipped_only_as_a_last_resort() -> None:
     assert len(contents[-1]) < 30_000
 
 
-def test_trimming_is_logged_with_the_numbers(tmp_path: Path) -> None:
-    log = tmp_path / "log.jsonl"
-    obs.configure(level=logging.DEBUG, log_file=log, session_id="s1")
+def test_trimming_emits_only_closed_schema_telemetry(tmp_path: Path) -> None:
+    log_key = tmp_path / "memory-log"
+    reset_capture()
+    configure_memory_sink(log_key, level=logging.DEBUG, session_id="s1")
 
     fake = FakeOpenAI(replies=[FINAL])
     agent = build(fake, context_window=2048)
@@ -184,15 +185,12 @@ def test_trimming_is_logged_with_the_numbers(tmp_path: Path) -> None:
     agent.history.append({"role": "assistant", "content": "a" * 40_000})
     agent.run("What is 2 + 2?")
 
-    for handler in obs.get_logger().handlers:
-        handler.flush()
-    records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-    trims = [r for r in records if r["event"] == "agent.context.trimmed"]
+    trims = [r for r in read_lines(log_key) if r["event"] == "agent.context.trimmed"]
 
     assert trims
-    assert trims[0]["level"] == "WARNING"
-    assert trims[0]["estimated_tokens_after"] < trims[0]["estimated_tokens_before"]
-    assert trims[0]["context_window"] == 2048
+    assert set(trims[0]) <= {"record_type", "event", "runtime_version", "status", "step_count"}
+    assert "context_window" not in trims[0]
+    reset_capture()
 
 
 def test_the_budget_leaves_room_for_the_reply() -> None:

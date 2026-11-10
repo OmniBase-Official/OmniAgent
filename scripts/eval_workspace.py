@@ -24,6 +24,7 @@ way a transcript written by a future run cannot quietly reopen the leak.
 
 from __future__ import annotations
 
+import stat
 from pathlib import Path
 
 from sandbox import Workspace
@@ -55,16 +56,15 @@ LISTING_ONLY: tuple[str, ...] = ("data",)
 ANSWER_KEY: tuple[str, ...] = (
     "docs",
     "models",
-    "NEXT_CHAT.md",
     # A build artifact holding a copy of README.md, which documents the log
     # event the 'budget' question is scored against. Found by measurement, not
     # by reading the tree: a sealed search still returned two matches from it.
     "omniagent.egg-info",
     "omniagent.toml",
+    "scripts/make_demo_svg.py",
     "scripts/eval_workspace.py",
     # Holds the demo questions, which are held-out questions too. Fifth file
     # written this week to carry the key in; the invariant caught every one.
-    "scripts/make_demo_svg.py",
     "scripts/holdout_eval.py",
     "scripts/session_eval.py",
     "tests/test_collect_dataset.py",
@@ -100,3 +100,40 @@ def sealed_workspace(project: Path, *, also_deny: tuple[Path, ...] = ()) -> Work
             (project / relative).resolve() for relative in LISTING_ONLY
         ),
     )
+
+
+FIXTURE_FILES = frozenset({"README.txt", "ledger-alpha.txt", "ledger-beta.txt"})
+
+
+def validate_fixture(fixture: Path) -> None:
+    """Refuse anything except the frozen flat inventory before reading files.
+
+    Concurrent untrusted writers are outside the current threat model; lstat
+    checks do not provide handle-based protection against a concurrent swap.
+    """
+    def check(path: Path, directory: bool) -> None:
+        metadata = path.lstat()
+        reparse = getattr(metadata, "st_file_attributes", 0) & getattr(
+            stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+        )
+        if reparse or stat.S_ISLNK(metadata.st_mode):
+            raise ValueError("fixture links and reparse points are prohibited")
+        if not (stat.S_ISDIR(metadata.st_mode) if directory else stat.S_ISREG(metadata.st_mode)):
+            raise ValueError("unexpected fixture entry type")
+
+    check(fixture, True)
+    entries = list(fixture.iterdir())
+    if {entry.name for entry in entries} != FIXTURE_FILES:
+        raise ValueError("unexpected fixture inventory")
+    for entry in entries:
+        check(entry, False)
+
+
+def fixture_only_workspace(project: Path, fixture: Path) -> Workspace:
+    """Open an already staged root containing only the validated fixture."""
+    if fixture.parent != project or fixture.name != "grounding-cohort":
+        raise ValueError("invalid staged fixture path")
+    if {child.name for child in project.iterdir()} != {fixture.name}:
+        raise ValueError("unexpected staging inventory")
+    validate_fixture(fixture)
+    return Workspace.at(project)

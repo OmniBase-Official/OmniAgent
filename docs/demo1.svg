@@ -52,7 +52,7 @@ text { opacity: 0; white-space: pre }
 <text class="l3" x="18" y="101" fill="#7ee787">$ ollama pull qwen2.5-coder:7b</text>
 <text class="l4" x="18" y="120" fill="#7ee787">$ python main.py --profile demo</text>
 <text class="l6" x="18" y="158" fill="#6e7681">  local-only ReAct agent  -  no cloud, no framework</text>
-<text class="l7" x="18" y="177" fill="#6e7681">    endpoint : http://localhost:11434/v1</text>
+<text class="l7" x="18" y="177" fill="#6e7681">    endpoint : http://127.0.0.1:11434/v1</text>
 <text class="l8" x="18" y="196" fill="#6e7681">    model    : omniagent-v2</text>
 <text class="l10" x="18" y="234" fill="#79c0ff">You &gt; What is 144 * 12?</text>
 <text class="l11" x="18" y="253" fill="#6e7681">  [step 1]</text>

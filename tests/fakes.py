@@ -7,6 +7,7 @@ a scripted sequence of replies, and records what it was asked for.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -58,6 +59,7 @@ class FakeCompletions:
         self._script = list(script)
         self._error = error
         self.calls: list[dict[str, Any]] = []
+        self.after_create: Callable[[], None] | None = None
 
     def create(self, **kwargs: Any) -> FakeCompletion:
         self.calls.append(kwargs)
@@ -70,7 +72,10 @@ class FakeCompletions:
         entry = self._script.pop(0)
         if isinstance(entry, Exception):
             raise entry
-        return FakeCompletion(choices=[FakeChoice(message=FakeMessage(entry))])
+        completion = FakeCompletion(choices=[FakeChoice(message=FakeMessage(entry))])
+        if self.after_create is not None:
+            self.after_create()
+        return completion
 
 
 class FakeChat:
