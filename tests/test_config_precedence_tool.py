@@ -456,9 +456,11 @@ def test_guarded_profile_abort_is_reported_before_layer_construction(
         "    raise ValueError('unconditional')\n",
         "    runner = __builtins__['eval']\n    runner('layers.reverse()')\n",
         "    if profile:\n        raise ValueError('unrelated guard')\n",
-        "    if file_path is not None:\n"
-        "        layers.append(('before-error', defaults))\n"
-        "        raise ValueError('after append')\n",
+        (
+            "    if file_path is not None:\n"
+            "        layers.append(('before-error', defaults))\n"
+            "        raise ValueError('after append')\n"
+        ),
     ],
     ids=["unconditional", "builtins-eval-alias", "unrelated-guard", "after-append"],
 )

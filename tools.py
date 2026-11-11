@@ -1107,25 +1107,28 @@ def _validate_static_calls(function: ast.FunctionDef) -> None:
             raise ValueError(f"unsupported call in resolve(): {callable_name}")
 
 
-def _layer_row(  # noqa: PLR0913 - the context is read-only AST evidence
-    index: int,
-    call: ast.Call,
-    function: ast.FunctionDef,
-    parents: dict[ast.AST, ast.AST],
-    source: str,
-    constants: dict[str, str],
-) -> str:
-    if not isinstance(parents.get(call), ast.Expr):
+@dataclass(frozen=True)
+class _LayerRowContext:
+    function: ast.FunctionDef
+    parents: dict[ast.AST, ast.AST]
+    source: str
+    constants: dict[str, str]
+
+
+def _layer_row(index: int, call: ast.Call, context: _LayerRowContext) -> str:
+    if not isinstance(context.parents.get(call), ast.Expr):
         raise TypeError("layers.append() must be a standalone statement")
     if len(call.args) != 1 or call.keywords or not isinstance(call.args[0], ast.Tuple):
         raise ValueError("layers.append() must receive one (label, value) tuple")
     pair = call.args[0].elts
     if len(pair) != _PAIR_SIZE:
         raise ValueError("layer tuple must contain exactly a label and a value")
-    label = _static_layer_label(pair[0], constants)
+    label = _static_layer_label(pair[0], context.constants)
     if not label or len(label) > _MAX_CONFIG_CONDITION_CHARS:
         raise ValueError("layer label is empty or too long to report safely")
-    conditions = _append_conditions(call, function, parents, source)
+    conditions = _append_conditions(
+        call, context.function, context.parents, context.source
+    )
     condition_text = "; ".join(conditions) if conditions else "unconditional"
     if label.casefold() == "environment":
         kind = "process environment"
@@ -1185,8 +1188,9 @@ def _layer_rows(function: ast.FunctionDef, source: str, constants: dict[str, str
         raise ValueError("all layer appends must precede the merge loop")
     _validate_layer_mutations(function, parents, initializer, append_calls, outer)
 
+    row_context = _LayerRowContext(function, parents, source, constants)
     return [
-        _layer_row(index, call, function, parents, source, constants)
+        _layer_row(index, call, row_context)
         for index, call in enumerate(append_calls, start=1)
     ]
 
@@ -1300,8 +1304,10 @@ def _merge_rows(function: ast.FunctionDef, source: str) -> list[str]:
         f"line {outer.lineno}: for {layer_name}, {values_name} in layers",
         f"line {inner.lineno}: for {field_name}, {value_name} in {ast.unparse(inner.iter)}",
         f"line {assignment.lineno}: merged[{field_name}] = {value_name}",
-        "The loops preserve append order; assigning the same dictionary key again "
-        "means a later layer overrides an earlier value.",
+        (
+            "The loops preserve append order; assigning the same dictionary key again "
+            "means a later layer overrides an earlier value."
+        ),
         *settings_row,
         *abort_rows,
     ]
@@ -1697,8 +1703,10 @@ def inspect_default_model_cli() -> str:
             f"{main_path}:{flag_line}: parser declares --model",
             f"{main_path}:{forwarding_line}: cli_settings forwards args.model",
             f"{main_path}:{resolve_line}: resolve() receives cli_settings(args) as CLI overrides",
-            "The layer report shows command line last, so an explicit --model "
-            "overrides the configured default.",
+            (
+                "The layer report shows command line last, so an explicit --model "
+                "overrides the configured default."
+            ),
         ]
     )
 
