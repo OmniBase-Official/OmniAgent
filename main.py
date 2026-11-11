@@ -22,7 +22,7 @@ from agent import (
     model_is_installed,
 )
 from config import DEFAULT_CONFIG_NAME, LOG_LEVELS, ConfigError, render, resolve
-from sandbox import SandboxError, set_workspace, without_own_transcripts
+from sandbox import SandboxError, without_own_transcripts, workspace_scope
 from tools import FIXED_TOOL_ALLOWLIST, TOOLS, run_tool
 
 BANNER = r"""
@@ -307,29 +307,30 @@ def main(argv: list[str] | None = None) -> int:
     except SandboxError as exc:
         print(Style.red(f"[!] {exc}"))
         return 1
-    set_workspace(workspace)
+    with workspace_scope(workspace):
+        print(Style.cyan(BANNER))
+        if args.profile:
+            print(Style.dim(f"    profile  : {args.profile}"))
+        print(Style.dim(f"    workspace: {workspace.root}"))
+        if settings.log_file is not None or settings.log_console:
+            print(Style.dim(f"    session  : {session_id}"))
+            if settings.log_file is not None:
+                print(Style.dim(f"    log      : {settings.log_file}"))
 
-    print(Style.cyan(BANNER))
-    if args.profile:
-        print(Style.dim(f"    profile  : {args.profile}"))
-    print(Style.dim(f"    workspace: {workspace.root}"))
-    if settings.log_file is not None or settings.log_console:
-        print(Style.dim(f"    session  : {session_id}"))
-        if settings.log_file is not None:
-            print(Style.dim(f"    log      : {settings.log_file}"))
+        if args.tool is not None:
+            return direct_tool(args.tool, args.tool_input)
 
-    if args.tool is not None:
-        return direct_tool(args.tool, args.tool_input)
+        agent = ReActAgent(
+            config=settings.agent_config(),
+            printer=lambda text: print(Style.dim(text)),
+            workspace=workspace,
+        )
+        if not preflight(agent):
+            return 1
 
-    agent = ReActAgent(
-        config=settings.agent_config(), printer=lambda text: print(Style.dim(text))
-    )
-    if not preflight(agent):
-        return 1
-
-    if args.ask:
-        return answer(agent, args.ask)
-    return repl(agent)
+        if args.ask:
+            return answer(agent, args.ask)
+        return repl(agent)
 
 
 if __name__ == "__main__":

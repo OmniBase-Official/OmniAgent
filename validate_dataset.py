@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from trajectory_utils import actions_in as _actions_in
+
 #: Below this, a fine-tune is not worth starting. A warning, not an error.
 DEFAULT_MIN_EXAMPLES = 10
 
@@ -139,14 +141,6 @@ def check_shape(messages: Any, where: str) -> list[str]:
             break
         expected = "assistant" if expected == "user" else "user"
     return problems
-
-
-def _actions_in(reply: str) -> list[str]:
-    return [
-        line.split(":", 1)[1].strip()
-        for line in reply.splitlines()
-        if line.strip().lower().startswith("action:")
-    ]
 
 
 def validate_file(  # noqa: PLR0912 - one branch per thing a dataset gets wrong

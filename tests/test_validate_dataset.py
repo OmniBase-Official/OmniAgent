@@ -11,9 +11,16 @@ from typing import Any
 
 import pytest
 
+from trajectory_utils import actions_in
 from validate_dataset import check_shape, find_secrets, main, validate_file
 
 SYSTEM = "You are OmniAgent."
+
+
+def test_actions_in_shared_parser_preserves_order_and_colons() -> None:
+    reply = "Thought: plan\naction: first\nAction: second:detail\nFinal Answer: done"
+
+    assert actions_in(reply) == ["first", "second:detail"]
 
 
 def example(*turns: tuple[str, str]) -> dict[str, Any]:

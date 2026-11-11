@@ -31,6 +31,7 @@ from typing import Any
 
 from dataset_provenance import write_sidecar
 from observability import TRUNCATION_MARKER
+from trajectory_utils import actions_in as _actions_in
 
 #: Events that mean the turn contains a message the log does not record
 #: verbatim -- a format correction, a rut intervention, or the forced
@@ -339,15 +340,6 @@ def _skip_reason(
     if turn.steps < min_steps:
         return f"fewer than {min_steps} steps"
     return None
-
-
-def _actions_in(reply: str) -> list[str]:
-    actions = []
-    for line in reply.splitlines():
-        stripped = line.strip()
-        if stripped.lower().startswith("action:"):
-            actions.append(stripped.split(":", 1)[1].strip())
-    return actions
 
 
 def write_examples(examples: Iterable[dict[str, list[dict[str, str]]]], path: Path) -> int:

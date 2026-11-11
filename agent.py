@@ -35,6 +35,7 @@ from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 from pydantic import BaseModel, Field, field_validator
 
 import observability as obs
+from sandbox import Workspace, workspace_scope
 from tools import (
     FIXED_INTERNAL_CAPABILITY_ALLOWLIST,
     FIXED_TOOL_ALLOWLIST,
@@ -676,6 +677,7 @@ class ReActAgent:
         before_model_request: Callable[[], None] | None = None,
         *,
         allowed_capabilities: Collection[str] | None = None,
+        workspace: Workspace | None = None,
     ) -> None:
         """Build an agent.
 
@@ -686,6 +688,7 @@ class ReActAgent:
         self.config = config or AgentConfig()
         self._print = printer
         self._before_model_request = before_model_request
+        self.workspace = workspace
         self.allowed_tools = frozenset(
             FIXED_TOOL_ALLOWLIST if allowed_tools is None else allowed_tools
         ) & FIXED_TOOL_ALLOWLIST
@@ -793,6 +796,9 @@ class ReActAgent:
     def run(self, question: str) -> str:
         """Answer one question, running the ReAct loop until it settles."""
         self._turn += 1
+        if self.workspace is not None:
+            with workspace_scope(self.workspace), obs.bind(turn=self._turn):
+                return self._run_turn(question)
         with obs.bind(turn=self._turn):
             return self._run_turn(question)
 

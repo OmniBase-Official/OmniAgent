@@ -35,13 +35,20 @@ ReDoS via a search pattern        There is no regex: search is literal
                                   has nothing to backtrack over.
 ================================  ==========================================
 
-The workspace root defaults to the current directory and is set once at
-startup. Nothing here writes, renames or deletes -- these tools are read-only
-by construction.
+Workspace selection is scoped per execution context for agent isolation.
+``set_workspace`` remains as a current-context compatibility API; explicit
+per-agent workspaces are preferred for new callers. Context variables do not
+automatically cross arbitrary thread handoffs; bind the scope in the worker.
+Filesystem reads are not atomic against concurrent untrusted writers; TOCTOU
+attacks by such writers are outside this threat model. Nothing here writes,
+renames or deletes -- these tools are read-only by construction.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -355,7 +362,9 @@ class Workspace:
         return str(relative).replace("\\", "/") or "."
 
 
-_workspace: Workspace | None = None
+_workspace_context: ContextVar[Workspace | None] = ContextVar(
+    "omniagent_workspace", default=None
+)
 
 
 
@@ -392,14 +401,23 @@ def without_own_transcripts(root: Path, log_file: Path | None) -> Workspace:
 
 
 def set_workspace(workspace: Workspace) -> None:
-    """Install the workspace the file tools will use."""
-    global _workspace  # noqa: PLW0603 - module-level singleton by design
-    _workspace = workspace
+    """Set the current execution context's workspace for legacy callers."""
+    _workspace_context.set(workspace)
+
+
+@contextmanager
+def workspace_scope(workspace: Workspace) -> Iterator[None]:
+    """Temporarily select a workspace for this execution context."""
+    token = _workspace_context.set(workspace)
+    try:
+        yield
+    finally:
+        _workspace_context.reset(token)
 
 
 def get_workspace() -> Workspace:
-    """The installed workspace, defaulting to the current directory."""
-    global _workspace  # noqa: PLW0603 - module-level singleton by design
-    if _workspace is None:
-        _workspace = Workspace.at(Path.cwd())
-    return _workspace
+    """Return the current context's workspace, defaulting to the current directory."""
+    scoped = _workspace_context.get()
+    if scoped is not None:
+        return scoped
+    return Workspace.at(Path.cwd())
