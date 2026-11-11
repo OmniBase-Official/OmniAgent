@@ -1,8 +1,8 @@
-"""Turn OmniAgent's run logs into a supervised fine-tuning dataset.
+"""Turn explicitly supplied compatible trajectory files into an SFT dataset.
 
-Every run already records the exact conversation the model saw -- the system
-prompt, the question, each raw reply, and each Observation -- so no separate
-collection step is needed. This module replays those records back into the chat
+OmniAgent does not create persistent run transcripts under its current privacy
+policy. This exporter remains available for compatible files collected through
+an independently approved process and replays those records into the chat
 format that TRL and transformers consume:
 
     {"messages": [{"role": "system", ...}, {"role": "user", ...}, ...]}

@@ -43,7 +43,17 @@ training = [
 
 [tool.setuptools]
 # Flat layout: the agent is a handful of top-level modules, not a package.
-py-modules = ["agent", "main", "tools", "observability", "export_dataset", "sandbox", "validate_dataset", "config"]
+py-modules = [
+    "agent",
+    "main",
+    "tools",
+    "observability",
+    "export_dataset",
+    "dataset_provenance",
+    "sandbox",
+    "validate_dataset",
+    "config",
+]
 
 # --------------------------------------------------------------------------- #
 # mypy - strict, no exceptions. Untyped code does not get merged.

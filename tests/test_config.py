@@ -21,6 +21,7 @@ from config import (
     render,
     resolve,
 )
+from main import main as cli_main
 
 CONFIG = """
 [defaults]
@@ -291,14 +292,63 @@ def test_environment_strings_are_coerced_to_the_right_types(tmp_path: Path) -> N
             "OMNIAGENT_MAX_STEPS": "11",
             "OMNIAGENT_TEMPERATURE": "0.4",
             "OMNIAGENT_LOG_CONSOLE": "true",
-            "OMNIAGENT_LOG_FILE": "logs/run.jsonl",
         },
     )
 
     assert settings.max_steps == 11
     assert settings.temperature == pytest.approx(0.4)
     assert settings.log_console is True
-    assert settings.log_file == Path("logs/run.jsonl")
+    assert settings.log_file is None
+
+
+@pytest.mark.parametrize(
+    ("cli", "env", "toml"),
+    [
+        ({}, {"OMNIAGENT_LOG_FILE": "logs/run.jsonl"}, None),
+        ({"log_file": "logs/run.jsonl"}, {}, None),
+        ({}, {}, '[defaults]\nlog_file = "logs/run.jsonl"\n'),
+    ],
+)
+def test_persistent_log_requests_fail_with_actionable_config_error(
+    tmp_path: Path, cli: dict[str, object], env: dict[str, str], toml: str | None
+) -> None:
+    config_path = None
+    if toml is not None:
+        config_path = tmp_path / "omniagent.toml"
+        config_path.write_text(toml, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="persistent log files are disabled"):
+        resolve(cli, env=env, config_path=config_path, cwd=tmp_path)
+
+
+def test_persistent_log_request_from_env_file_is_rejected(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".env").write_text(
+        "OMNIAGENT_LOG_FILE=logs/run.jsonl\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError, match="persistent log files are disabled"):
+        resolve(env={}, cwd=tmp_path)
+
+
+def test_persistent_log_request_from_profile_is_rejected(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "omniagent.toml"
+    config_path.write_text(
+        '[profile.demo]\nlog_file = "logs/run.jsonl"\n', encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError, match="persistent log files are disabled"):
+        resolve(profile="demo", env={}, config_path=config_path, cwd=tmp_path)
+
+
+def test_print_config_rejects_a_cli_log_file_before_rendering(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli_main(["--print-config", "--log-file", "logs/run.jsonl"]) == 2
+    assert "persistent log files are disabled" in capsys.readouterr().out
 
 
 def test_the_agent_config_carries_the_resolved_values(project: Path) -> None:

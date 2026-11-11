@@ -28,7 +28,7 @@ keeps the loop in plain sight so you can read it, break it, and change it:
 | [`tools.py`](tools.py) | Tool implementations, their pydantic argument schemas, and the registry the prompt is generated from. |
 | [`sandbox.py`](sandbox.py) | The filesystem boundary the file tools work inside, and its threat model. |
 | [`config.py`](config.py) | One settings model, and the documented precedence that fills it. |
-| [`observability.py`](observability.py) | Structured JSON-lines logging: session/turn/step context, credential redaction, truncation. |
+| [`observability.py`](observability.py) | In-memory and optional console diagnostics with credential redaction and truncation. |
 | [`export_dataset.py`](export_dataset.py) | Replays run logs into a chat-format SFT dataset. |
 | [`validate_dataset.py`](validate_dataset.py) | Refuses a malformed dataset, or one containing a credential, before training. |
 | [`notebooks/`](notebooks) | The local LoRA fine-tune, merge, GGUF export and Ollama registration. |
@@ -177,7 +177,7 @@ perform; it is a leak that gets written down and then trained on.
 | Absolute paths outside the root | Same check — an absolute path is allowed only if it lands inside the workspace. |
 | Symlinks and junctions pointing out | `Path.resolve()` follows them *before* the containment check, so the target is tested, not the link. |
 | Secrets inside the workspace | Dot-files and dot-directories (`.env`, `.git`, `.ssh`) are refused outright, as are credential suffixes (`.pem`, `.key`, `.p12`, …) and names (`id_rsa`, `credentials`). |
-| The agent reading its own log back | The active `--log-file` is denied, so earlier conversations cannot re-enter the context and the dataset. |
+| Persistent conversation logs | Disabled by policy; the agent does not write run transcripts to disk. |
 | Huge files exhausting memory | Size is checked before the read (100 KB), and the returned text is capped (16 000 chars). |
 | Binary files flooding the context | A NUL byte in the first 8 KB rejects the file. |
 | Devices — `CON`, `NUL`, `COM1`, `\.\PhysicalDrive0` | Only regular files pass. |
@@ -313,7 +313,7 @@ python main.py --model qwen2.5-coder:7b --quiet
 | `--ask` | — | Answer one question and exit. |
 | `--tool` | — | Run one allow-listed deterministic tool without an LLM request. |
 | `--tool-input` | empty | Raw input for `--tool`; JSON object input is accepted for multi-field tools. |
-| `--log-file` | — | Append structured JSON-lines logs here (env: `OMNIAGENT_LOG_FILE`). |
+| `--log-file` | Disabled | Rejected with a privacy-policy error; persistent logs are not supported. |
 | `--log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` (env: `OMNIAGENT_LOG_LEVEL`). |
 | `--log-console` | off | Also stream the JSON logs to stderr. |
 | `--workspace` | cwd | Directory the file tools may read inside. |
@@ -350,14 +350,8 @@ model = "qwen2.5-coder:7b"
 log_level = "INFO"
 
 [profile.demo]
-max_steps = 12
-log_file = "data/demo.jsonl"
+max_steps = 8
 temperature = 0.0
-
-[profile.collect]
-log_file = "data/collect.jsonl"
-log_level = "DEBUG"
-verbose = false
 ```
 
 ```bash
@@ -375,15 +369,16 @@ model                 qwen2.5-coder:7b                    file:defaults
 base_url              http://127.0.0.1:11434/v1           built-in
 api_key               ***redacted***                      built-in
 temperature           0.0                                 profile:demo
-max_steps             12                                  profile:demo
-log_file              data/demo.jsonl                     profile:demo
+max_steps             8                                   profile:demo
+log_file              None                                built-in
 ```
 
 Every setting also has an environment variable, `OMNIAGENT_` plus its name in
-upper case — `OMNIAGENT_MODEL`, `OMNIAGENT_MAX_STEPS`, `OMNIAGENT_LOG_FILE`. A
-`.env` file beside the config supplies the same names; the real environment
-wins over it. That parser is deliberately boring: `KEY=value`, `#` comments,
-optional quotes. No substitution, no expansion, nothing executed.
+upper case. `OMNIAGENT_MODEL` and `OMNIAGENT_MAX_STEPS` are examples;
+`OMNIAGENT_LOG_FILE` is recognized so a nonempty request can be rejected during
+validation. A `.env` file beside the config supplies the same names; the real
+environment wins over it. That parser is deliberately boring: `KEY=value`, `#`
+comments, optional quotes. No substitution, no expansion, nothing executed.
 
 A typo is an error, not a silent default — `modle = "..."` is refused with a
 list of the settings that do exist, and so is an unknown `--profile`, an
@@ -458,56 +453,34 @@ tool, or answer -- instead of handing back the same Observation again.
 
 ---
 
-## Logging
+## Diagnostics and privacy
 
-The console trace is for you; the log stream is for machines:
-
-```bash
-python main.py --log-file run.jsonl --ask "What is 18% of 1500?"
-```
-
-Every step of the loop becomes one JSON object per line:
-
-```json
-{"ts":"2026-10-01T10:16:49.357Z","level":"INFO","logger":"omniagent.agent","event":"agent.llm.response","message":"agent.llm.response","model":"qwen2.5-coder:7b","elapsed_ms":14097.35,"finish_reason":"stop","prompt_tokens":791,"completion_tokens":61,"session_id":"37202807c137","turn":1,"step":1}
-```
-
-One answered question produces this sequence, so a log alone explains what the
-agent did and how long each part took:
-
-| Event | Carries |
-|---|---|
-| `agent.connection.ok` | endpoint, whether the requested model is installed |
-| `agent.turn.start` | question, step budget, history size |
-| `agent.llm.request` / `.response` | model, latency, finish reason, token counts, the raw reply |
-| `agent.tool.call` / `.result` | tool, input, observation, `ok`, latency |
-| `agent.step.final_answer` | the thought and the answer |
-| `agent.turn.end` | answer, steps used, total latency |
-
-Things going wrong get their own events, at `WARNING` or `ERROR` with a
-traceback attached: `agent.format.violation`, `agent.budget.exhausted`,
-`tool.unknown`, `tool.crashed`, `agent.llm.unreachable`, `agent.llm.error`.
-
-Context is ambient — `session_id`, `turn` and `step` attach themselves through
-`observability.bind()` rather than being threaded through every call site.
-Fields whose names look like credentials (`api_key`, `token`, `password`, ...)
-are masked, including inside nested dicts, and long values such as prompts are
-truncated, so a log file stays safe to paste into a bug report.
-
-Logs never go to stdout: that belongs to the human-readable trace. Use a file,
-or `console=True` to stream JSON to stderr.
+OmniAgent keeps diagnostics in memory and can stream structured diagnostics to
+stderr with `--log-console`. Persistent run logs are disabled because they can
+contain prompts, model replies, tool inputs, and workspace observations. A
+`log_file` setting, `--log-file`, or `OMNIAGENT_LOG_FILE` request fails during
+configuration validation with an actionable error. No shipped profile enables
+a file sink. Dataset collection from run logs is
+consequently unavailable; `scripts/collect_dataset.py --dry-run` can still
+preview its question bank.
 
 ---
 
-## Training data from your own runs
+## Dataset export
 
-The log already records the exact conversation the model saw: the system
-prompt, the question, each raw reply and each Observation. That is a supervised
-fine-tuning dataset, so there is no separate collection step — just run the
-agent with `--log-file`, then replay:
+`export_dataset.py` can transform an explicitly supplied compatible run-log
+file into a dataset, but OmniAgent does not create persistent run logs. Dataset
+collection is disabled by the privacy policy; do not enable a file sink to
+work around this restriction. From a source checkout, run:
 
 ```bash
-python export_dataset.py "data/*.jsonl" -o data/dataset.jsonl --stats
+python export_dataset.py compatible.jsonl -o data/dataset.jsonl --stats
+```
+
+After installing the wheel, the equivalent module invocation is:
+
+```bash
+python -m export_dataset compatible.jsonl -o data/dataset.jsonl --stats
 ```
 
 ```
@@ -559,40 +532,17 @@ event's fields changes the dataset.
 
 ## Fine-tuning on your own runs
 
-The loop fights small models drifting out of the Thought/Action/Observation
-format. A model trained on that exact format drifts less, and the dataset for it
-is already being collected every time you pass `--log-file`.
+The loop uses the Thought/Action/Observation format. Fine-tuning workflows that
+depend on persistent OmniAgent run logs are currently disabled by the privacy
+policy.
 
-### Collecting enough of it
+### Collecting runs
 
-Four runs is not a training set. [`scripts/collect_dataset.py`](scripts/collect_dataset.py)
-walks a bank of ~46 sessions covering every tool — arithmetic, dates, file
-reading, searching, and multi-turn conversations that carry history — against a
-real local model:
-
-```bash
-python scripts/collect_dataset.py --model qwen2.5-coder:7b
-```
-
-`--resume` skips questions the log already has an answer for, so an interrupted
-run tops itself up rather than starting over. `--dry-run` lists what it would
-ask; `--questions FILE` supplies your own bank, one session per line (a plain
-question, or a JSON array for a conversation).
-
-```
-run the agent  ->  JSONL log  ->  export_dataset.py  ->  validate_dataset.py
-                                                              |
-                     LoRA (this machine)  <---------------- dataset.jsonl
-                             |
-                     merge -> GGUF -> ollama create -> python main.py --model omniagent
-```
-
-Every arrow stays on one machine. That is not convenience, it is the same rule
-the rest of the project follows: the dataset holds your questions, your system
-prompt, and the contents of any file the agent read with `read_file` or
-`search_text`. Uploading it to a hosted notebook would be the one step that
-breaks the rule — and it buys nothing, because Ollama is already here, so there
-is no GGUF to download back either.
+Transcript capture and persistent operational logs are disabled by the privacy
+policy, so `scripts/collect_dataset.py` refuses to start model preflight or a
+collection run. Use `--dry-run` to inspect the question bank. Explicit dataset
+artifacts remain supported when supplied to `export_dataset.py` or
+`validate_dataset.py`; those tools do not enable transcript capture.
 
 ### Validate before you train
 

@@ -18,7 +18,6 @@ A config file is TOML, read with the standard library -- no new dependency::
 
     [profile.demo]
     model = "qwen2.5-coder:7b"
-    log_file = "data/demo.jsonl"
     max_steps = 10
 """
 
@@ -74,6 +73,16 @@ class Settings(BaseModel):
     log_level: str = Field(default="INFO")
     log_console: bool = Field(default=False)
     verbose: bool = Field(default=True)
+
+    @field_validator("log_file")
+    @classmethod
+    def _persistent_log_file_is_disabled(cls, value: Path | None) -> Path | None:
+        if value is not None:
+            raise ValueError(
+                "persistent log files are disabled; remove log_file/--log-file or "
+                "OMNIAGENT_LOG_FILE"
+            )
+        return value
 
     @field_validator("base_url")
     @classmethod

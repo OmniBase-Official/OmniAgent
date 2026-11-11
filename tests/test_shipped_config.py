@@ -56,6 +56,10 @@ def test_shipped_config_is_present() -> None:
     assert CONFIG_PATH.is_file(), f"{CONFIG_PATH} is what --profile reads"
 
 
+def test_shipped_config_does_not_define_a_collect_profile() -> None:
+    assert "collect" not in _profile_names()
+
+
 @pytest.mark.parametrize("profile", _profile_names())
 def test_every_shipped_profile_resolves(profile: str) -> None:
     """A stale key in any profile is a crash at startup, not a warning."""
@@ -76,21 +80,13 @@ def test_demo_profile_is_deterministic() -> None:
     assert settings.temperature == 0.0
 
 
-def test_demo_profile_records_the_run() -> None:
+def test_demo_profile_does_not_enable_persistent_logging() -> None:
     settings, _ = _resolve("demo")
-    assert settings.log_file is not None
+    assert settings.log_file is None
 
 
 def test_the_demo_runs_the_step_budget_the_evaluations_measure() -> None:
-    """The demo should not be the one configuration nobody has measured.
-
-    Every figure in NEXT_CHAT.md comes from max_steps=8. The demo profile
-    shipped 12, and rehearsing it there the question "What is inside the data
-    directory?" spent all twelve steps and returned "I ran out of reasoning
-    steps before reaching an answer" -- a question that is 10/10 at 3-9 steps
-    in the evaluation. One rehearsal does not prove twelve is the cause, but
-    it is reason enough for the demo to run what was measured.
-    """
+    """The demo uses the same measured step budget as the evaluation."""
     measured = inspect.signature(run_walk).parameters["max_steps"].default
     settings, _ = _resolve("demo")
 

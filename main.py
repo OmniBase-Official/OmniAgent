@@ -129,7 +129,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--workspace", type=Path, help="Directory the file tools may read inside."
     )
     settings.add_argument(
-        "--log-file", type=Path, help="Append structured JSON-lines logs to this file."
+        "--log-file",
+        type=Path,
+        help="Disabled: persistent log files are not allowed by the privacy policy.",
     )
     settings.add_argument(
         "--log-level", choices=LOG_LEVELS, help="Minimum level for the log (default: INFO)."

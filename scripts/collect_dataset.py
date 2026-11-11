@@ -1,40 +1,21 @@
-"""Drive the agent through a bank of questions to build up training data.
+"""Preview the question bank used by the disabled transcript collector.
 
-The dataset exporter can only work with runs that happened, and four runs is
-not a training set. This walks a bank of questions against a real local model,
-logging every step, so an evening of unattended running turns into something
-worth fine-tuning on.
-
-Sessions matter. A session is a list of questions asked of one agent instance,
-so a multi-question session produces a conversation with history -- which is
-what teaches the model to use what it already knows instead of re-deriving it.
-
-Usage::
-
-    python scripts/collect_dataset.py --model qwen2.5-coder:7b
-    python scripts/collect_dataset.py --limit 5 --dry-run
-    python scripts/collect_dataset.py --resume          # top up an existing log
-
-Then::
-
-    python export_dataset.py "data/collect.jsonl" -o data/dataset.jsonl --stats
-    python validate_dataset.py data/dataset.jsonl
+Persistent operational logs and transcript capture are disabled by policy, so
+real collection cannot start. ``--dry-run`` remains available to inspect the
+questions without model preflight or persistence.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import observability as obs
-from agent import AgentError, ReActAgent, model_is_installed
 from config import resolve
-from sandbox import Workspace, set_workspace, without_own_transcripts
 
 #: Each entry is one session: the questions are asked of a single agent, in
 #: order, so later ones can refer back to earlier answers.
@@ -176,68 +157,39 @@ def load_questions(path: Path) -> list[list[str]]:
     return sessions
 
 
-def already_answered(log_file: Path) -> set[str]:
-    """Questions a previous run already got a final answer for."""
-    if not log_file.is_file():
-        return set()
-    answered: set[str] = set()
-    started: dict[tuple[str, int], str] = {}
-    for line in log_file.read_text(encoding="utf-8").splitlines():
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        key = (str(record.get("session_id", "")), int(record.get("turn", 0) or 0))
-        if record.get("event") == "agent.turn.start":
-            started[key] = str(record.get("question", ""))
-        elif record.get("event") == "agent.turn.end" and key in started:
-            answered.add(started[key])
-    return answered
-
-
-
-def collection_workspace(root: Path, log_file: Path | None) -> Workspace:
-    """The workspace a collection run may read.
-
-    Narrower than the evaluation's seal, and deliberately so. The evaluation
-    seals every file holding a held-out question or its answer, which includes
-    ``omniagent.toml`` -- and a training question asks whether any ``.toml``
-    files are here, so reusing that seal would change the answer to a question
-    being collected.
-
-    What collection needs is that a trajectory cannot record the model reading
-    an earlier answer out of a transcript, because that trajectory becomes an
-    example teaching it to search the logs. So the transcripts directory is
-    listable -- 41 collected examples are a ``list_directory`` observation of
-    it -- and nothing inside it opens. The active log is denied by name as
-    well, since it may be written outside that directory.
-    """
-    return without_own_transcripts(root, log_file)
-
-
-def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run a bank of questions through the agent to collect training data."
+        description="Preview the question bank; persistent dataset collection is disabled."
     )
     parser.add_argument("--model", help="Ollama model tag.")
     parser.add_argument(
         "--log-file",
         type=Path,
-        default=Path("data/collect.jsonl"),
-        help="Where to append the structured log (default: data/collect.jsonl).",
+        help="Disabled: persistent log files are not allowed by the privacy policy.",
     )
     parser.add_argument("--workspace", type=Path, help="Directory the file tools may read.")
     parser.add_argument("--questions", type=Path, help="Question bank file to use instead.")
     parser.add_argument("--limit", type=int, help="Only run this many sessions.")
     parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Skip questions the log already has an answer for.",
-    )
-    parser.add_argument(
         "--dry-run", action="store_true", help="List what would be asked, run nothing."
     )
     args = parser.parse_args(argv)
+
+    if args.log_file is not None:
+        parser.error(
+            "persistent log files are disabled; remove --log-file. "
+            "Dataset collection requires a persistent sink and is unavailable."
+        )
+    if os.environ.get("OMNIAGENT_LOG_FILE"):
+        parser.error(
+            "OMNIAGENT_LOG_FILE requests a persistent log, which is disabled by "
+            "the privacy policy; remove the environment variable."
+        )
+    if not args.dry_run:
+        parser.error(
+            "dataset collection requires persistent log files, which are disabled "
+            "by the privacy policy; use --dry-run to inspect the question bank."
+        )
 
     sessions = load_questions(args.questions) if args.questions else list(SESSIONS)
 
@@ -254,78 +206,16 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915
         }
     )
 
-    answered = already_answered(args.log_file) if args.resume else set()
-    if answered:
-        sessions = [[q for q in session if q not in answered] for session in sessions]
-        sessions = [session for session in sessions if session]
-        print(f"resuming: {len(answered)} question(s) already answered")
-
     if args.limit is not None:
         sessions = sessions[: args.limit]
 
     questions = sum(len(session) for session in sessions)
     print(f"{len(sessions)} session(s), {questions} question(s), model {settings.model}")
 
-    if args.dry_run:
-        for index, session in enumerate(sessions, start=1):
-            for position, question in enumerate(session, start=1):
-                marker = f"{index}.{position}"
-                print(f"  {marker:>6}  {question}")
-        return 0
-
-    if not sessions:
-        print("nothing left to ask")
-        return 0
-
-    session_id = obs.configure(level="INFO", log_file=settings.log_file)
-    set_workspace(collection_workspace(settings.workspace, settings.log_file))
-    print(f"logging to {settings.log_file} (session {session_id})")
-
-    probe = ReActAgent(config=settings.agent_config(), printer=lambda _: None)
-    try:
-        available = probe.check_connection()
-    except AgentError as exc:
-        print(f"[!] {exc}", file=sys.stderr)
-        return 1
-    if not model_is_installed(settings.model, available):
-        print(f"[!] model {settings.model!r} is not installed", file=sys.stderr)
-        print(f"    installed: {', '.join(available)}", file=sys.stderr)
-        return 1
-
-    started = time.perf_counter()
-    answers = failures = 0
-
     for index, session in enumerate(sessions, start=1):
-        # Each session is its own conversation, and each new agent restarts
-        # its turn counter at 1. Without a distinct session_id the exporter
-        # keys them all to (session, turn 1) and merges them into one mangled
-        # conversation -- which is exactly what happened the first time.
-        with obs.bind(session_id=f"{session_id}-{index:03d}"):
-            agent = ReActAgent(config=settings.agent_config(), printer=lambda _: None)
-            for position, question in enumerate(session, start=1):
-                marker = f"[{index}/{len(sessions)}.{position}]"
-                print(f"{marker:>14} {question}", flush=True)
-                turn_started = time.perf_counter()
-                try:
-                    answer = agent.run(question)
-                except AgentError as exc:
-                    failures += 1
-                    print(f"{'':>14} !! {exc}", flush=True)
-                    break
-                except KeyboardInterrupt:
-                    print("\ninterrupted; the log keeps everything answered so far")
-                    return 130
-                answers += 1
-                elapsed = time.perf_counter() - turn_started
-                print(f"{'':>14} -> {answer[:110]}  ({elapsed:.1f}s)", flush=True)
-
-    elapsed = time.perf_counter() - started
-    print()
-    print(f"answered {answers}, failed {failures}, in {elapsed / 60:.1f} min")
-    print()
-    print("next:")
-    print(f'  python export_dataset.py "{settings.log_file}" -o data/dataset.jsonl --stats')
-    print("  python validate_dataset.py data/dataset.jsonl")
+        for position, question in enumerate(session, start=1):
+            marker = f"{index}.{position}"
+            print(f"  {marker:>6}  {question}")
     return 0
 
 

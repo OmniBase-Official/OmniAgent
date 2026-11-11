@@ -45,7 +45,7 @@ claim about it was measured.
 .venv/Scripts/python.exe main.py --profile demo
 ```
 
-The banner is worth pausing on: profile, workspace, session id, log file,
+The banner is worth pausing on: profile and workspace. Persistent session logs are disabled,
 endpoint `http://127.0.0.1:11434/v1`, model `omniagent-v2`. Point at the
 endpoint — that is the whole local-only claim in one line.
 
