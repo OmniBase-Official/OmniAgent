@@ -51,6 +51,9 @@ MAX_FILE_BYTES = 100_000
 #: Largest amount of text handed back to the model from a single read.
 MAX_READ_CHARS = 16_000
 
+# A ranged read is intentionally smaller than the full-file byte limit.
+MAX_READ_RANGE_LINES = 100
+
 #: Deliberately worded so it cannot collide with the logger's own truncation
 #: marker, which would disqualify an otherwise fine turn from the dataset.
 TRUNCATION_NOTE = "\n[file truncated at {limit} characters]"
@@ -232,6 +235,55 @@ class Workspace:
                 limit=self.max_read_chars
             )
         return text
+
+    def read_text_range(self, candidate: str, start_line: int, end_line: int) -> str:
+        """Return a bounded, numbered line range from an admitted text file."""
+        if type(start_line) is not int or type(end_line) is not int:
+            raise SandboxError("line numbers must be integers")
+        if start_line < 1 or end_line < start_line:
+            raise SandboxError("line range must start at 1 or later and end after its start")
+        if end_line - start_line + 1 > MAX_READ_RANGE_LINES:
+            raise SandboxError(f"line range is too large (max {MAX_READ_RANGE_LINES} lines)")
+
+        path = self.resolve(candidate)
+        if path.is_dir():
+            raise SandboxError(f"{self.display(path)} is a directory; use list_directory")
+        if not path.is_file():
+            raise SandboxError(f"no such file: {self.display(path)}")
+
+        size = path.stat().st_size
+        if size > self.max_file_bytes:
+            raise SandboxError(
+                f"{self.display(path)} is {size} bytes, over the "
+                f"{self.max_file_bytes}-byte limit"
+            )
+
+        blob = path.read_bytes()
+        if b"\0" in blob[:_BINARY_SNIFF_BYTES]:
+            raise SandboxError(f"{self.display(path)} looks like a binary file")
+
+        text = blob.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        lines = text.splitlines()
+        if start_line > len(lines):
+            raise SandboxError(
+                f"line {start_line} is beyond the end of {self.display(path)} "
+                f"({len(lines)} lines)"
+            )
+
+        actual_end = min(end_line, len(lines))
+        selected = "\n".join(
+            f"{number:>5}  {lines[number - 1]}" for number in range(start_line, actual_end + 1)
+        )
+        rendered = (
+            f"{self.display(path)} (lines {start_line}-{actual_end} of {len(lines)}):\n"
+            f"{selected}"
+        )
+        if len(rendered) > self.max_read_chars:
+            raise SandboxError(
+                f"requested lines from {self.display(path)} exceed the "
+                f"{self.max_read_chars}-character limit; request a narrower range"
+            )
+        return rendered
 
     def describe(self, candidate: str) -> FileFacts:
         """Measure a file without returning its contents.

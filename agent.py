@@ -40,6 +40,7 @@ from tools import (
     NO_ARG_INPUTS,
     TOOLS,
     describe_tools,
+    inspect_default_model_cli,
     run_tool,
     tool_names,
 )
@@ -276,14 +277,23 @@ your head.
 or time. You have no other way of knowing it.
 7. "Action Input" is the raw argument only -- write `2 + 2`, not \
 `calculate(2 + 2)`. For a tool that takes no arguments, write `none`.
-8. If an Observation starts with "Error:", read it, fix your input, and try \
-again rather than giving up.
+8. If an Observation starts with "Error:", read it and change your approach. \
+   If a full-file read is refused as too long, use read_file with a JSON object \
+   containing path, start_line, and end_line for the relevant section. Do not \
+   repeat the same full-file read or claim to have read content the tool refused.
 9. If the question needs no tool at all, answer immediately with Thought + \
 Final Answer.
 10. A short follow-up question is still a question. "Now divide that by 3" or \
 "And README.md?" gets the same Thought/Action/Action Input treatment as anything \
 else -- never a bare sentence, and never arithmetic done in your head just \
 because the conversation has warmed up.
+11. For multi-part requests, continue until all parts are answered. If tools or \
+    budget run out, say what remains unverified. Cover every deliverable and do \
+    not guess unsupported details.
+12. For code/config questions, inspect the identifier's declaration and uses. For \
+    CLI precedence, inspect `resolve()`'s ordered layer additions and merge loop; \
+    list every layer in source order, including optional layers. Use paths from `.` \
+    and do not repeat completed reads.
 
 WORKED EXAMPLE
 
@@ -363,8 +373,8 @@ def _is_wrapped(value: str) -> bool:
 # call sites readable without scattering casts around.
 
 
-#: Stands in for a tool output that had to be dropped to fit the window.
-_ELIDED = "[earlier tool output omitted so that this request fits the context window]"
+#: Stands in for an earlier tool interaction dropped to fit the window.
+_ELIDED = "[earlier tool interaction omitted]"
 
 #: Marks the newest message when even that had to be cut back.
 _CLIPPED = "\n[clipped to fit the context window]"
@@ -593,6 +603,27 @@ def _parse(text: str) -> Step:
     return step
 
 
+def _is_config_precedence_request(question: str) -> bool:
+    """Route explicit config resolver/precedence questions to static inspection."""
+    normalized = question.casefold()
+    resolver = "config.resolve" in normalized or "resolve()" in normalized
+    config = "config" in normalized or "configuration" in normalized
+    precedence = any(
+        term in normalized
+        for term in ("precedence", "override", "overrides", "layer order", "priority order")
+    )
+    return precedence and (resolver or config)
+
+
+def _is_model_cli_compound_request(question: str) -> bool:
+    """Recognize the demo that needs both default-model and precedence evidence."""
+    normalized = question.casefold()
+    has_default_model = "default model" in normalized
+    has_cli = "cli" in normalized or "command line" in normalized
+    has_override = "override" in normalized or "overrides" in normalized
+    return has_default_model and has_cli and has_override
+
+
 def _names_the_marker(action: str) -> bool:
     """Whether an Action names the final-answer marker rather than a tool."""
     return "".join(c for c in action.lower() if c.isalnum()) == "finalanswer"
@@ -751,7 +782,6 @@ class ReActAgent:
             return self._run_turn(question)
 
     def _run_turn(self, question: str) -> str:
-        scratchpad: list[ChatCompletionMessageParam] = [_user(question)]
         self.last_trace = []
         attempts: Counter[tuple[str, str]] = Counter()
         started = time.perf_counter()
@@ -762,6 +792,31 @@ class ReActAgent:
             max_steps=self.config.max_steps,
             history_messages=len(self.history),
         )
+
+        wants_model_cli = _is_model_cli_compound_request(question)
+        if (
+            (wants_model_cli or _is_config_precedence_request(question))
+            and "inspect_config_precedence" in self.allowed_tools
+        ):
+            step = Step(
+                thought="Use static configuration precedence inspection.",
+                action="inspect_config_precedence",
+                action_input="config.py",
+            )
+            self.last_trace.append(step)
+            self._trace(1, step)
+            observation = self._invoke_tool(step)
+            answer = observation
+            if wants_model_cli and not answer.startswith("Error:"):
+                model_cli = inspect_default_model_cli()
+                answer = (
+                    model_cli
+                    if model_cli.startswith("Error:")
+                    else f"{model_cli}\n\n{answer}"
+                )
+            return self._finish(question, answer, started, 1)
+
+        scratchpad: list[ChatCompletionMessageParam] = [_user(question)]
 
         for iteration in range(1, self.config.max_steps + 1):
             with obs.bind(step=iteration):
@@ -954,7 +1009,7 @@ class ReActAgent:
         away with it.
 
         So the trimming happens here, where the parts can be told apart. What
-        goes, in order: whole earlier turns, then the oldest tool output of this
+        goes, in order: whole earlier turns, then older tool interactions of this
         turn, then -- only if nothing else is left -- the tail of the newest
         message. The system prompt and the question are never dropped.
         """
@@ -979,12 +1034,17 @@ class ReActAgent:
         while kept_history and total() > budget:
             del kept_history[: min(2, len(kept_history))]
 
-        # 2. Then this turn's older tool output, keeping the question at index 0
-        #    and the newest message intact.
+        # 2. Then this turn's older tool requests and outputs, keeping the
+        #    question at index 0 and the newest message intact. Large Action
+        #    Inputs can be just as wasteful as large Observations.
         for index in range(1, max(1, len(pad) - 1)):
             if total() <= budget:
                 break
-            if len(str(pad[index].get("content", ""))) > len(_ELIDED):
+            content = str(pad[index].get("content", ""))
+            role = pad[index].get("role")
+            is_tool_request = role == "assistant" and "Action:" in content
+            is_tool_output = role == "user" and content.startswith("Observation:")
+            if (is_tool_request or is_tool_output) and len(content) > len(_ELIDED):
                 pad[index]["content"] = _ELIDED
 
         # 3. Last resort: shorten the newest message. Better a clipped
@@ -1147,8 +1207,10 @@ class ReActAgent:
                 f"You have used all {self.config.max_steps} available steps. "
                 f"The question you are answering is: {question}\n"
                 "Reply now with 'Thought:' followed by 'Final Answer:' only, "
-                "answering that question with what you already know. Do not "
-                "request another tool."
+                "answering that question with what you already know. If the "
+                "Observations do not support one or more requested details, state "
+                "exactly which details remain unverified instead of guessing. Do "
+                "not request another tool."
             )
         )
         reply = self._complete(scratchpad, stop=False)

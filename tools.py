@@ -16,6 +16,7 @@ import ast
 import logging
 import math
 import operator
+import tomllib
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -29,6 +30,7 @@ from sandbox import (
     MAX_READ_CHARS,
     TRUNCATION_NOTE,
     SandboxError,
+    Workspace,
     get_workspace,
 )
 
@@ -246,6 +248,7 @@ class Tool[ArgsT: ToolArgs]:
     args_model: type[ArgsT]
     run: Callable[[ArgsT], str]
     example: str
+    bare_field: str | None = None
 
     @property
     def signature(self) -> str:
@@ -269,10 +272,8 @@ TOOLS: dict[str, Tool[Any]] = {
     "calculate": Tool(
         name="calculate",
         description=(
-            "Evaluate a mathematical expression. Use it for ANY arithmetic instead "
-            "of doing the maths yourself. Supports + - * / // % ** ( ), the "
-            "constants pi/e/tau and functions such as sqrt, log, log10, exp, sin, "
-            "cos, tan, floor, ceil, round, abs, min, max, factorial."
+            "Evaluate arithmetic with + - * / // % **, constants pi/e/tau, and "
+            "allowed math functions. Use for every calculation; arbitrary code is refused."
         ),
         args_model=CalculateArgs,
         run=_run_calculate,
@@ -281,9 +282,7 @@ TOOLS: dict[str, Tool[Any]] = {
     "get_current_time": Tool(
         name="get_current_time",
         description=(
-            "Return the current local date and time (and the UTC equivalent). "
-            "Takes no arguments. Use it whenever the user asks about 'now', "
-            "'today', the date, the day of the week, or the current time."
+            "Return local and UTC date/time. Use for current date, day, or time questions."
         ),
         args_model=NoArgs,
         run=_run_get_current_time,
@@ -294,7 +293,15 @@ TOOLS: dict[str, Tool[Any]] = {
 # Runtime capabilities are closed even if another module mutates the registry.
 # Task-level allowlists may narrow this set, but can never widen it.
 FIXED_TOOL_ALLOWLIST = frozenset(
-    {"calculate", "get_current_time", "read_file", "list_directory", "search_text", "file_info"}
+    {
+        "calculate",
+        "get_current_time",
+        "read_file",
+        "list_directory",
+        "search_text",
+        "file_info",
+        "inspect_config_precedence",
+    }
 )
 
 
@@ -336,7 +343,11 @@ def describe_tools() -> str:
         fields = _describe_fields(tool)
         if fields:
             block += f"\n  Arguments:\n{fields}"
-        block += f"\n  Example -> Action: {tool.name}\n             Action Input: {tool.example}"
+        if tool.example:
+            block += (
+                f"\n  Example -> Action: {tool.name}"
+                f"\n             Action Input: {tool.example}"
+            )
         blocks.append(block)
     return "\n".join(blocks)
 
@@ -397,6 +408,11 @@ def parse_tool_args[ArgsT: ToolArgs](tool: Tool[ArgsT], raw_input: str) -> ArgsT
         # No input and nothing required: the model meant "use the defaults".
         if not value and not any(field.is_required() for field in fields.values()):
             return tool.args_model()
+        required_fields = [name for name, field in fields.items() if field.is_required()]
+        if tool.bare_field is not None:
+            return tool.args_model.model_validate({tool.bare_field: value})
+        if len(required_fields) == 1 and len(fields) == 1:
+            return tool.args_model.model_validate({required_fields[0]: value})
         if len(fields) == 1:
             return tool.args_model.model_validate({next(iter(fields)): value})
     except ValidationError as exc:
@@ -513,9 +529,27 @@ MAX_SEARCH_MATCHES = 50
 MAX_SEARCH_FILES = 400
 
 
-def read_file(path: str) -> str:
+def read_file(
+    path: str, start_line: int | None = None, end_line: int | None = None
+) -> str:
     """Return a file's contents, numbered by line, from inside the workspace."""
     workspace = get_workspace()
+    if (start_line is None) != (end_line is None):
+        return "Error: provide both start_line and end_line for a ranged read."
+    if start_line is not None and end_line is not None:
+        try:
+            ranged_text = workspace.read_text_range(path, start_line, end_line)
+        except SandboxError as exc:
+            return f"Error: {exc}"
+        except OSError as exc:
+            return f"Error: could not read {path!r}: {exc.strerror or exc}"
+        if len(ranged_text) > MAX_INTACT_READ_CHARS:
+            return (
+                f"Error: requested lines from {path!r} exceed the "
+                f"{MAX_INTACT_READ_CHARS}-character tool limit; request a narrower range."
+            )
+        return ranged_text
+
     try:
         text = workspace.read_text(path)
     except SandboxError as exc:
@@ -547,8 +581,10 @@ def read_file(path: str) -> str:
     )
     return (
         f"Error: {shown} is {size_phrase}, too long to return in full. Reading the "
-        f"start of it would not tell you what the rest contains. Use file_info for its "
-        f"size, first line and last line, or search_text to find something inside it."
+        f"start of it would not tell you what the rest contains. For a relevant section, "
+        f"use read_file with JSON like {{\"path\":\"file.py\",\"start_line\":1,"
+        f"\"end_line\":20}}. Use file_info for size or line facts and search_text "
+        f"to locate relevant text."
     )
 
 
@@ -620,6 +656,12 @@ def search_text(  # noqa: PLR0912 - a guard per thing that can go wrong in a wal
                 if len(matches) >= MAX_SEARCH_MATCHES:
                     break
 
+    if not matches and scanned == 0:
+        return (
+            f"No match for {needle!r} in {workspace.display(start)} (0 files searched). "
+            "No readable files were found under this path. Check it with list_directory "
+            "or search from the workspace root '.'; do not assume a source subdirectory."
+        )
     if not matches:
         return f"No match for {needle!r} in {workspace.display(start)} ({scanned} files searched)."
     header = f"{len(matches)} match{'es' if len(matches) != 1 else ''} for {needle!r}"
@@ -633,6 +675,16 @@ class ReadFileArgs(ToolArgs):
         min_length=1,
         max_length=1_000,
         description="Path relative to the workspace root, e.g. 'README.md' or 'src/app.py'.",
+    )
+    start_line: int | None = Field(
+        default=None,
+        ge=1,
+        description="First line to return for a bounded read; provide it with end_line.",
+    )
+    end_line: int | None = Field(
+        default=None,
+        ge=1,
+        description="Last line to return for a bounded read; maximum range is 100 lines.",
     )
 
 
@@ -658,7 +710,7 @@ class SearchTextArgs(ToolArgs):
 
 
 def _run_read_file(args: ReadFileArgs) -> str:
-    return read_file(args.path)
+    return read_file(args.path, args.start_line, args.end_line)
 
 
 def _run_list_directory(args: ListDirectoryArgs) -> str:
@@ -667,6 +719,988 @@ def _run_list_directory(args: ListDirectoryArgs) -> str:
 
 def _run_search_text(args: SearchTextArgs) -> str:
     return search_text(args.query, args.path)
+
+
+_MAX_CONFIG_LAYERS = 20
+_MAX_CONFIG_CONDITION_CHARS = 200
+_MAX_CONFIG_PRECEDENCE_OUTPUT_CHARS = 2_400
+_PAIR_SIZE = 2
+_UNSUPPORTED_CONTROL_FLOW = (ast.AsyncFor, ast.AsyncWith, ast.BoolOp, ast.For, ast.IfExp,
+                             ast.Lambda, ast.ListComp, ast.Match, ast.SetComp, ast.Try,
+                             ast.TryStar, ast.While, ast.With, ast.GeneratorExp)
+
+
+def _module_string_constants(module: ast.Module) -> dict[str, str]:
+    """Collect simple top-level string constants without evaluating source."""
+    constants: dict[str, str] = {}
+    for statement in module.body:
+        if isinstance(statement, ast.AnnAssign):
+            targets = [statement.target] if isinstance(statement.target, ast.Name) else []
+            value = statement.value
+        elif isinstance(statement, ast.Assign):
+            targets = [target for target in statement.targets if isinstance(target, ast.Name)]
+            value = statement.value
+        else:
+            continue
+
+        for target in targets:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                constants[target.id] = value.value
+            else:
+                constants.pop(target.id, None)
+    return constants
+
+
+def _static_layer_label(expression: ast.expr, constants: dict[str, str]) -> str:
+    """Resolve literals/constants; retain simple f-string names symbolically."""
+    if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
+        return expression.value
+    if not isinstance(expression, ast.JoinedStr):
+        raise TypeError("layer label is not a string literal or a simple f-string")
+    parts: list[str] = []
+    for part in expression.values:
+        if isinstance(part, ast.Constant) and isinstance(part.value, str):
+            parts.append(part.value)
+        elif (
+            isinstance(part, ast.FormattedValue)
+            and isinstance(part.value, ast.Name)
+            and part.conversion == -1
+            and part.format_spec is None
+        ):
+            name = part.value.id
+            parts.append(constants.get(name, f"{{{name}}}"))
+        else:
+            raise ValueError("layer label contains an unsupported expression")
+    return "".join(parts)
+
+
+def _name_pair(target: ast.expr) -> tuple[str, str] | None:
+    if isinstance(target, ast.Tuple) and len(target.elts) == _PAIR_SIZE:
+        first, second = target.elts
+        if isinstance(first, ast.Name) and isinstance(second, ast.Name):
+            return first.id, second.id
+    return None
+
+
+def _iterates_name(expression: ast.expr, name: str) -> bool:
+    if isinstance(expression, ast.Name):
+        return expression.id == name
+    return (
+        isinstance(expression, ast.Call)
+        and not expression.args
+        and not expression.keywords
+        and isinstance(expression.func, ast.Attribute)
+        and expression.func.attr == "items"
+        and isinstance(expression.func.value, ast.Name)
+        and expression.func.value.id == name
+    )
+
+
+def _append_conditions(
+    call: ast.AST,
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    parents: dict[ast.AST, ast.AST],
+    source: str,
+) -> list[str]:
+    conditions: list[str] = []
+    node: ast.AST = call
+    while node is not function:
+        parent = parents.get(node)
+        if parent is None:
+            raise ValueError("could not determine the layer append's control flow")
+        if isinstance(parent, ast.If):
+            test = ast.get_source_segment(source, parent.test) or ast.unparse(parent.test)
+            test = " ".join(test.split())
+            if len(test) > _MAX_CONFIG_CONDITION_CHARS:
+                raise ValueError("conditional guard is too long to report safely")
+            branch = "if" if node in parent.body else "else" if node in parent.orelse else ""
+            if not branch:
+                raise ValueError("layer append appears inside an unsupported condition")
+            conditions.append(f"{branch} {test}" if branch == "if" else f"else (not {test})")
+        elif isinstance(parent, _UNSUPPORTED_CONTROL_FLOW):
+            raise TypeError("layer append is nested in unsupported control flow")
+        elif isinstance(parent, ast.FunctionDef) and parent is not function:
+            raise ValueError("nested functions inside resolve() are unsupported")
+        node = parent
+    conditions.reverse()
+    return conditions
+
+
+def _is_merge_assignment(
+    statement: ast.Assign, merged_name: str, field_name: str, value_name: str
+) -> bool:
+    if (
+        len(statement.targets) != 1
+        or not isinstance(statement.value, ast.Name)
+        or statement.value.id != value_name
+    ):
+        return False
+    target = statement.targets[0]
+    return (
+        isinstance(target, ast.Subscript)
+        and isinstance(target.value, ast.Name)
+        and target.value.id == merged_name
+        and isinstance(target.slice, ast.Name)
+        and target.slice.id == field_name
+    )
+
+
+def _function_nodes(root: ast.AST) -> list[ast.AST]:
+    return list(ast.walk(root))
+
+
+def _parent_map(root: ast.AST) -> dict[ast.AST, ast.AST]:
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(root):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    return parents
+
+
+def _named_assignment(
+    statement: ast.stmt, name: str
+) -> tuple[ast.expr, ast.expr] | None:
+    if (
+        isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+        and statement.targets[0].id == name
+    ):
+        return statement.targets[0], statement.value
+    if (
+        isinstance(statement, ast.AnnAssign)
+        and isinstance(statement.target, ast.Name)
+        and statement.target.id == name
+        and statement.value is not None
+    ):
+        return statement.target, statement.value
+    return None
+
+
+def _resolve_function(module: ast.Module) -> ast.FunctionDef:
+    functions = [
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "resolve"
+    ]
+    if len(functions) != 1:
+        raise ValueError("expected exactly one top-level resolve() function")
+    return functions[0]
+
+
+def _validate_layer_mutations(
+    function: ast.FunctionDef,
+    parents: dict[ast.AST, ast.AST],
+    initializer: ast.Assign | ast.AnnAssign,
+    append_calls: list[ast.Call],
+    outer: ast.For,
+) -> None:
+    initializer_target, _ = _named_assignment(initializer, "layers") or (None, None)
+    if initializer_target is None:
+        raise ValueError("layers must be initialized as a simple local name")
+    if initializer.lineno >= append_calls[0].lineno or initializer.lineno >= outer.lineno:
+        raise ValueError("layers must be initialized before appends and merge")
+    names = (
+        node
+        for node in _function_nodes(function)
+        if isinstance(node, ast.Name) and node.id == "layers"
+    )
+    for name in names:
+        parent = parents.get(name)
+        if parent is initializer and name is initializer_target:
+            continue
+        if parent is outer and name is outer.iter and isinstance(name.ctx, ast.Load):
+            continue
+        if (
+            isinstance(parent, ast.Attribute)
+            and parent.attr == "append"
+            and parent.value is name
+            and isinstance(parents.get(parent), ast.Call)
+            and parents[parent] in append_calls
+        ):
+            continue
+        raise ValueError("layers may only be initialized empty, appended, then iterated")
+
+
+def _validate_merged_mutations(
+    function: ast.FunctionDef,
+    assignment: ast.Assign,
+    initializer: ast.Assign | ast.AnnAssign,
+    settings_call: ast.Call | None,
+) -> None:
+    initializer_target, _ = _named_assignment(initializer, "merged") or (None, None)
+    if initializer_target is None:
+        raise ValueError("merged must be initialized as a simple local name")
+    parents = _parent_map(function)
+    names = (
+        node
+        for node in _function_nodes(function)
+        if isinstance(node, ast.Name) and node.id == "merged"
+    )
+    for name in names:
+        parent = parents.get(name)
+        if parent is initializer and name is initializer_target:
+            continue
+        if isinstance(parent, ast.Return) and isinstance(name.ctx, ast.Load):
+            continue
+        if (
+            settings_call is not None
+            and isinstance(parent, ast.keyword)
+            and parent.arg is None
+            and parent.value is name
+            and parents.get(parent) is settings_call
+        ):
+            continue
+        target = assignment.targets[0]
+        if (
+            isinstance(target, ast.Subscript)
+            and parent is target
+            and target.value is name
+            and isinstance(name.ctx, ast.Load)
+        ):
+            continue
+        raise ValueError("merged may only be initialized empty, overwritten by loop, and returned")
+
+
+def _validate_merge_loops(
+    function: ast.FunctionDef,
+    outer: ast.For,
+    inner: ast.For,
+    assignment: ast.Assign,
+) -> None:
+    if outer not in function.body or outer.orelse or inner not in outer.body or inner.orelse:
+        raise ValueError("merge loops must be unconditional canonical loops")
+    if assignment not in inner.body:
+        raise ValueError("merged[field] assignment must be unconditional in the inner loop")
+    if (
+        outer.body != [inner]
+        or inner.body.count(assignment) != 1
+        or any(not isinstance(statement, ast.Assign) for statement in inner.body)
+    ):
+        raise ValueError("merge loops contain unsupported statements")
+    if any(
+        isinstance(node, ast.If | ast.Break | ast.Continue | ast.Match | ast.Try | ast.TryStar)
+        for node in _function_nodes(outer)
+    ):
+        raise ValueError("conditional flow inside merge loops is unsupported")
+
+
+def _validate_exit_paths(
+    function: ast.FunctionDef,
+    outer: ast.For,
+    append_calls: list[ast.Call],
+    source: str,
+) -> list[str]:
+    outer_end = outer.end_lineno or outer.lineno
+    returns = [node for node in ast.walk(function) if isinstance(node, ast.Return)]
+    if (
+        len(returns) != 1
+        or not function.body
+        or function.body[-1] is not returns[0]
+        or returns[0].lineno <= outer_end
+    ):
+        raise ValueError("resolve() must have one final return after the merge completes")
+
+    parents = _parent_map(function)
+    abort_rows: list[str] = []
+    for node in (item for item in ast.walk(function) if isinstance(item, ast.Raise)):
+        if node.lineno >= outer.lineno:
+            if node.lineno <= outer_end:
+                raise ValueError("raise inside merge loops is unsupported")
+            continue
+        if not _is_profile_abort(node, parents, append_calls):
+            raise ValueError(
+                "only the guarded missing-profile validation raise is supported before merge"
+            )
+        conditions = _append_conditions(node, function, parents, source)
+        if not conditions:
+            raise ValueError("pre-merge raise must be under a static guard")
+        branch_path = _branch_path(node, parents)
+        for append in append_calls:
+            if (append.lineno, append.col_offset) >= (node.lineno, node.col_offset):
+                continue
+            if _paths_can_overlap(branch_path, _branch_path(append, parents)):
+                raise ValueError("pre-merge raise may follow a layer append on the same path")
+        abort_rows.append(
+            f"line {node.lineno}: when file_path is None and profile is set, "
+            f"raises {_raised_exception_name(node)} and returns no resolved settings"
+        )
+    return abort_rows
+
+
+def _raised_exception_name(node: ast.Raise) -> str:
+    exception = node.exc
+    if isinstance(exception, ast.Call):
+        exception = exception.func
+    if isinstance(exception, ast.Name):
+        return exception.id
+    return "an error"
+
+
+def _branch_path(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> dict[ast.If, str]:
+    branches: dict[ast.If, str] = {}
+    current = node
+    while (parent := parents.get(current)) is not None:
+        if isinstance(parent, ast.If):
+            if current in parent.body:
+                branches[parent] = "body"
+            elif current in parent.orelse:
+                branches[parent] = "orelse"
+        current = parent
+    return branches
+
+
+def _paths_can_overlap(left: dict[ast.If, str], right: dict[ast.If, str]) -> bool:
+    return all(left[branch] == right[branch] for branch in left.keys() & right.keys())
+
+
+def _is_profile_abort(
+    node: ast.Raise,
+    parents: dict[ast.AST, ast.AST],
+    append_calls: list[ast.Call],
+) -> bool:
+    current: ast.AST = node
+    while (parent := parents.get(current)) is not None:
+        if (
+            isinstance(parent, ast.If)
+            and current in parent.orelse
+            and ast.unparse(parent.test) == "file_path is not None"
+            and any(
+                call in ast.walk(statement)
+                for statement in parent.body
+                for call in append_calls
+            )
+            and any(
+                isinstance(candidate, ast.If)
+                and ast.unparse(candidate.test) == "profile"
+                and node in ast.walk(candidate)
+                for candidate in parent.orelse
+            )
+        ):
+            return True
+        current = parent
+    return False
+
+
+def _validate_static_calls(function: ast.FunctionDef) -> None:
+    allowed_calls = {
+        "dict", "_from_env", "layers.append", "_reject_unknown", "Settings",
+        "settings.model_copy", "Path.cwd", "read_config_file", "_section",
+        "discovered.is_file", "_profile", "read_env_file", "values.items",
+        "(cli or {}).items",
+        "sources.get", "sources.setdefault", "settings.log_level.upper",
+        "ConfigError", "ValidationError", "ValueError", "exc.errors", "str",
+        "'; '.join", "', '.join", "'.'.join",
+    }
+    nodes = list(ast.walk(function))
+    for node in nodes:
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            raise TypeError("imports inside resolve() are unsupported")
+        if isinstance(node, ast.Name) and node.id == "__builtins__":
+            raise ValueError("__builtins__ access is unsupported")
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name | ast.Attribute):
+            raise TypeError("dynamic callable expressions are unsupported")
+        callable_name = ast.unparse(node.func)
+        if callable_name not in allowed_calls:
+            raise ValueError(f"unsupported call in resolve(): {callable_name}")
+
+
+def _layer_row(  # noqa: PLR0913 - the context is read-only AST evidence
+    index: int,
+    call: ast.Call,
+    function: ast.FunctionDef,
+    parents: dict[ast.AST, ast.AST],
+    source: str,
+    constants: dict[str, str],
+) -> str:
+    if not isinstance(parents.get(call), ast.Expr):
+        raise TypeError("layers.append() must be a standalone statement")
+    if len(call.args) != 1 or call.keywords or not isinstance(call.args[0], ast.Tuple):
+        raise ValueError("layers.append() must receive one (label, value) tuple")
+    pair = call.args[0].elts
+    if len(pair) != _PAIR_SIZE:
+        raise ValueError("layer tuple must contain exactly a label and a value")
+    label = _static_layer_label(pair[0], constants)
+    if not label or len(label) > _MAX_CONFIG_CONDITION_CHARS:
+        raise ValueError("layer label is empty or too long to report safely")
+    conditions = _append_conditions(call, function, parents, source)
+    condition_text = "; ".join(conditions) if conditions else "unconditional"
+    if label.casefold() == "environment":
+        kind = "process environment"
+    elif label.casefold().endswith(" file") or label.casefold().startswith("file:"):
+        kind = "file layer"
+    else:
+        kind = "configuration layer"
+    return f"{index}. {label!r} ({kind}), line {call.lineno}; {condition_text}"
+
+
+def _layer_rows(function: ast.FunctionDef, source: str, constants: dict[str, str]) -> list[str]:
+    parents = _parent_map(function)
+    initializers: list[ast.Assign | ast.AnnAssign] = [
+        statement
+        for statement in function.body
+        if isinstance(statement, ast.Assign | ast.AnnAssign)
+        and _named_assignment(statement, "layers") is not None
+    ]
+    initializer_pair = (
+        _named_assignment(initializers[0], "layers") if len(initializers) == 1 else None
+    )
+    initializer_target = initializer_pair[0] if initializer_pair is not None else None
+    initializer_value = initializer_pair[1] if initializer_pair is not None else None
+    if (
+        len(initializers) != 1
+        or not isinstance(initializer_value, ast.List)
+        or initializer_value.elts
+        or initializer_target is None
+    ):
+        raise ValueError("layers must be initialized once as an empty list")
+    initializer = initializers[0]
+
+    append_calls = [
+        node for node in ast.walk(function)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "append" and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "layers"
+    ]
+    append_calls.sort(key=lambda node: (node.lineno, node.col_offset))
+    if not append_calls:
+        raise ValueError("resolve() has no static layers.append((label, value)) entries")
+    if len(append_calls) > _MAX_CONFIG_LAYERS:
+        raise ValueError(f"resolve() exceeds the {_MAX_CONFIG_LAYERS}-layer inspection limit")
+
+    outer_loops = [
+        statement
+        for statement in function.body
+        if isinstance(statement, ast.For)
+        and isinstance(statement.iter, ast.Name)
+        and statement.iter.id == "layers"
+        and _name_pair(statement.target) is not None
+    ]
+    if len(outer_loops) != 1:
+        raise ValueError("expected one top-level merge loop over layers")
+    outer = outer_loops[0]
+    if any(call.lineno >= outer.lineno for call in append_calls):
+        raise ValueError("all layer appends must precede the merge loop")
+    _validate_layer_mutations(function, parents, initializer, append_calls, outer)
+
+    return [
+        _layer_row(index, call, function, parents, source, constants)
+        for index, call in enumerate(append_calls, start=1)
+    ]
+
+
+def _merge_rows(function: ast.FunctionDef, source: str) -> list[str]:
+    append_calls = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "append"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "layers"
+    ]
+    outer_loops: list[ast.For] = [
+        node for node in _function_nodes(function)
+        if isinstance(node, ast.For)
+        if isinstance(node.iter, ast.Name)
+        and node.iter.id == "layers"
+        and _name_pair(node.target) is not None
+    ]
+    if len(outer_loops) != 1:
+        raise ValueError("expected one for-pair loop over layers")
+    outer = outer_loops[0]
+    layer_names = _name_pair(outer.target)
+    if layer_names is None:
+        raise ValueError("the layer loop target must be a two-name tuple")
+    layer_name, values_name = layer_names
+
+    inner_loops: list[ast.For] = [
+        node for node in _function_nodes(outer)
+        if isinstance(node, ast.For)
+        if node is not outer
+        and _iterates_name(node.iter, values_name)
+        and _name_pair(node.target) is not None
+    ]
+    if len(inner_loops) != 1:
+        raise ValueError("expected one nested field/value loop over each layer")
+    inner = inner_loops[0]
+    if outer not in function.body or outer.orelse or inner not in outer.body or inner.orelse:
+        raise ValueError("merge loops must be unconditional canonical loops")
+    field_names = _name_pair(inner.target)
+    if field_names is None:
+        raise ValueError("the inner loop target must be a two-name tuple")
+    field_name, value_name = field_names
+
+    merge_assignments: list[ast.Assign] = [
+        node for node in _function_nodes(inner)
+        if isinstance(node, ast.Assign)
+        if _is_merge_assignment(node, "merged", field_name, value_name)
+    ]
+    if len(merge_assignments) != 1:
+        raise ValueError("expected one merged[field] = value assignment in the nested loop")
+    assignment = merge_assignments[0]
+    initializers: list[ast.Assign | ast.AnnAssign] = [
+        statement
+        for statement in function.body
+        if isinstance(statement, ast.Assign | ast.AnnAssign)
+        and _named_assignment(statement, "merged") is not None
+    ]
+    initializer_pair = (
+        _named_assignment(initializers[0], "merged") if len(initializers) == 1 else None
+    )
+    initializer_target = initializer_pair[0] if initializer_pair is not None else None
+    initializer_value = initializer_pair[1] if initializer_pair is not None else None
+    if (
+        len(initializers) != 1
+        or not isinstance(initializer_value, ast.Dict)
+        or initializer_value.keys
+        or initializer_value.values
+        or initializers[0].lineno >= outer.lineno
+        or initializer_target is None
+    ):
+        raise ValueError("merged must start as an empty dictionary before the loops")
+    _validate_merge_loops(function, outer, inner, assignment)
+    abort_rows = _validate_exit_paths(function, outer, append_calls, source)
+
+    final_return = next(node for node in ast.walk(function) if isinstance(node, ast.Return))
+    settings_calls = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "Settings"
+        and node.lineno > (outer.end_lineno or outer.lineno)
+        and (node.end_lineno or node.lineno) < final_return.lineno
+    ]
+    if isinstance(final_return.value, ast.Name) and final_return.value.id == "merged":
+        settings_row: list[str] = []
+        settings_call = None
+    elif (
+        len(settings_calls) == 1
+        and not settings_calls[0].args
+        and any(
+            keyword.arg is None
+            and isinstance(keyword.value, ast.Name)
+            and keyword.value.id == "merged"
+            for keyword in settings_calls[0].keywords
+        )
+    ):
+        settings_call = settings_calls[0]
+        settings_row = [
+            f"line {settings_calls[0].lineno}: Settings(**merged) consumes merged after the loop"
+        ]
+    else:
+        raise ValueError("final return must use merged directly or through Settings(**merged)")
+    _validate_merged_mutations(function, assignment, initializers[0], settings_call)
+
+    return [
+        "Merge evidence:",
+        f"line {outer.lineno}: for {layer_name}, {values_name} in layers",
+        f"line {inner.lineno}: for {field_name}, {value_name} in {ast.unparse(inner.iter)}",
+        f"line {assignment.lineno}: merged[{field_name}] = {value_name}",
+        "The loops preserve append order; assigning the same dictionary key again "
+        "means a later layer overrides an earlier value.",
+        *settings_row,
+        *abort_rows,
+    ]
+
+
+def _extract_config_precedence(source: str) -> str:
+    """Describe static layer appends and the nested overwrite loop in resolve()."""
+    try:
+        module = ast.parse(source)
+    except (SyntaxError, ValueError) as exc:
+        line = getattr(exc, "lineno", None)
+        suffix = f" at line {line}" if line is not None else ""
+        raise ValueError(f"malformed Python source{suffix}") from exc
+
+    function = _resolve_function(module)
+    _validate_static_calls(function)
+    lines = [
+        "Configuration layers in append order:",
+        *_layer_rows(function, source, _module_string_constants(module)),
+        *_merge_rows(function, source),
+    ]
+    rendered = "\n".join(lines)
+    if len(rendered) > _MAX_CONFIG_PRECEDENCE_OUTPUT_CHARS:
+        raise ValueError("precedence report exceeds its output limit")
+    return rendered
+
+
+def inspect_config_precedence(path: str) -> str:
+    """Statically inspect a workspace Python resolver without executing it."""
+    workspace = get_workspace()
+    try:
+        admitted = workspace.resolve(path)
+        source = workspace.read_text(workspace.display(admitted))
+    except SandboxError as exc:
+        return f"Error: {exc}"
+    except OSError as exc:
+        return f"Error: could not read {path!r}: {exc.strerror or exc}"
+
+    truncation_marker = TRUNCATION_NOTE.format(limit=workspace.max_read_chars)
+    if truncation_marker in source:
+        return f"Error: {workspace.display(admitted)} is too large to inspect completely."
+    try:
+        report = _extract_config_precedence(source)
+    except (TypeError, ValueError) as exc:
+        return f"Error: cannot inspect config precedence in {workspace.display(admitted)}: {exc}."
+    return f"{workspace.display(admitted)}:\n{report}"
+
+
+def _read_static_source(workspace: Workspace, path: str) -> tuple[str, str]:
+    admitted = workspace.resolve(path)
+    display = workspace.display(admitted)
+    source = workspace.read_text(display)
+    marker = TRUNCATION_NOTE.format(limit=workspace.max_read_chars)
+    if marker in source:
+        raise ValueError(f"{display} is too large to inspect completely")
+    return source, display
+
+
+def _builtin_model(workspace: Workspace) -> tuple[str, int]:
+    agent_path = workspace.display(workspace.resolve("agent.py"))
+    result = search_text('DEFAULT_MODEL = "', agent_path)
+    if result.startswith(("Error:", "No match")):
+        raise ValueError("could not locate DEFAULT_MODEL in agent.py")
+    matches = []
+    for line in result.splitlines()[1:]:
+        _, _, match = line.partition(":")
+        line_text, separator, source_line = match.partition(":")
+        if separator and line_text.isdigit() and source_line.startswith(" DEFAULT_MODEL ="):
+            matches.append((int(line_text), source_line.strip()))
+    if len(matches) != 1:
+        raise ValueError("expected one DEFAULT_MODEL declaration in agent.py")
+    line_number, source_line = matches[0]
+    statement = ast.parse(source_line).body
+    if len(statement) != 1 or not isinstance(statement[0], ast.Assign):
+        raise ValueError("DEFAULT_MODEL must be a simple module assignment")
+    pair = _named_assignment(statement[0], "DEFAULT_MODEL")
+    if pair is None or not isinstance(pair[1], ast.Constant) or not isinstance(pair[1].value, str):
+        raise ValueError("DEFAULT_MODEL must be a static string")
+    return pair[1].value, line_number
+
+
+def _configured_model(source: str) -> tuple[str, int]:
+    data = tomllib.loads(source)
+    defaults = data.get("defaults")
+    if not isinstance(defaults, dict) or not isinstance(defaults.get("model"), str):
+        raise TypeError("omniagent.toml must declare a string [defaults].model")
+    in_defaults = False
+    for line_number, line in enumerate(source.splitlines(), start=1):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_defaults = stripped == "[defaults]"
+        elif in_defaults and "=" in stripped and stripped.partition("=")[0].strip() == "model":
+            return defaults["model"], line_number
+    raise ValueError("could not locate [defaults].model in omniagent.toml")
+
+
+def _is_model_mapping(node: ast.AST) -> bool:
+    if not isinstance(node, ast.DictComp) or not isinstance(node.key, ast.Name):
+        return False
+    target_name = node.key.id
+    if not isinstance(node.value, ast.Call) or not isinstance(node.value.func, ast.Name):
+        return False
+    if node.value.func.id != "getattr" or len(node.value.args) != _PAIR_SIZE:
+        return False
+    first, second = node.value.args
+    if not isinstance(first, ast.Name) or first.id != "args":
+        return False
+    if not isinstance(second, ast.Name) or second.id != node.key.id:
+        return False
+    if not any(
+        isinstance(generator.iter, ast.Tuple)
+        and any(
+            isinstance(item, ast.Constant) and item.value == "model"
+            for item in generator.iter.elts
+        )
+        and isinstance(generator.target, ast.Name)
+        and generator.target.id == target_name
+        for generator in node.generators
+    ):
+        return False
+    if len(node.generators) != 1 or len(node.generators[0].ifs) != 1:
+        return False
+    guard = node.generators[0].ifs[0]
+    return (
+        isinstance(guard, ast.Compare)
+        and isinstance(guard.left, ast.Call)
+        and isinstance(guard.left.func, ast.Name)
+        and guard.left.func.id == "getattr"
+        and len(guard.left.args) == _PAIR_SIZE
+        and isinstance(guard.left.args[0], ast.Name)
+        and guard.left.args[0].id == first.id
+        and isinstance(guard.left.args[1], ast.Name)
+        and guard.left.args[1].id == target_name
+        and len(guard.ops) == 1
+        and isinstance(guard.ops[0], ast.IsNot)
+        and len(guard.comparators) == 1
+        and isinstance(guard.comparators[0], ast.Constant)
+        and guard.comparators[0].value is None
+    )
+
+
+def _cli_model_lines(source: str) -> tuple[int, int, int]:
+    module = ast.parse(source)
+    named_functions = {
+        name: [
+            node for node in module.body
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        ]
+        for name in ("parse_args", "cli_settings", "main")
+    }
+    if any(len(functions) != 1 for functions in named_functions.values()):
+        raise ValueError("expected one top-level parse_args(), cli_settings(), and main()")
+    parse_function = named_functions["parse_args"][0]
+    cli_function = named_functions["cli_settings"][0]
+    main_function = named_functions["main"][0]
+    parser_creations = [
+        statement
+        for statement in parse_function.body
+        if isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Attribute)
+        and statement.value.func.attr == "ArgumentParser"
+        and isinstance(statement.value.func.value, ast.Name)
+        and statement.value.func.value.id == "argparse"
+    ]
+    parser_binding = None
+    if (
+        len(parser_creations) == 1
+        and isinstance(parser_creations[0].targets[0], ast.Name)
+    ):
+        parser_binding = parser_creations[0].targets[0].id
+    parser_assignments = [
+        node
+        for node in ast.walk(parse_function)
+        if isinstance(node, ast.Name)
+        and node.id == parser_binding
+        and isinstance(node.ctx, ast.Store)
+    ] if parser_binding is not None else []
+    parser_groups = [
+        statement
+        for statement in parse_function.body
+        if isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Attribute)
+        and statement.value.func.attr == "add_argument_group"
+        and isinstance(statement.value.func.value, ast.Name)
+        and parser_binding is not None
+        and statement.value.func.value.id == parser_binding
+    ]
+    group_binding = (
+        parser_groups[0].targets[0].id
+        if len(parser_groups) == 1 and isinstance(parser_groups[0].targets[0], ast.Name)
+        else None
+    )
+    group_bindings = [
+        node
+        for node in ast.walk(parse_function)
+        if isinstance(node, ast.Name)
+        and node.id == group_binding
+        and isinstance(node.ctx, ast.Store)
+    ] if group_binding is not None else []
+    flags = [
+        statement.value
+        for statement in parse_function.body
+        if isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Attribute)
+        and statement.value.func.attr == "add_argument"
+        and isinstance(statement.value.func.value, ast.Name)
+        and statement.value.func.value.id in {parser_binding, group_binding}
+        and any(
+            isinstance(arg, ast.Constant) and arg.value == "--model"
+            for arg in statement.value.args
+        )
+    ]
+    cli_parameters = [
+        argument.arg for argument in cli_function.args.args
+    ]
+    comprehensions = [node for node in ast.walk(cli_function) if isinstance(node, ast.DictComp)]
+    mappings = [node for node in comprehensions if _is_model_mapping(node)]
+    model_mapping_assignments = [
+        statement
+        for statement in cli_function.body
+        if isinstance(statement, ast.AnnAssign)
+        and isinstance(statement.target, ast.Name)
+        and statement.value in mappings
+    ]
+    model_mapping_returns = [
+        statement
+        for statement in cli_function.body
+        if isinstance(statement, ast.Return)
+        and isinstance(statement.value, ast.Name)
+        and len(model_mapping_assignments) == 1
+        and isinstance(model_mapping_assignments[0].target, ast.Name)
+        and statement.value.id == model_mapping_assignments[0].target.id
+    ]
+    if (
+        cli_parameters != ["args"]
+        or len(comprehensions) != 1
+        or len(model_mapping_assignments) != 1
+        or len(model_mapping_returns) != 1
+        or model_mapping_assignments[0].lineno >= model_mapping_returns[0].lineno
+    ):
+        mappings = []
+    parse_results = [
+        statement
+        for statement in parse_function.body
+        if isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Attribute)
+        and statement.value.func.attr == "parse_args"
+        and isinstance(statement.value.func.value, ast.Name)
+        and parser_binding is not None
+        and statement.value.func.value.id == parser_binding
+        and len(statement.value.args) == 1
+        and isinstance(statement.value.args[0], ast.Name)
+        and len(parse_function.args.args) == 1
+        and statement.value.args[0].id == parse_function.args.args[0].arg
+    ]
+    parsed_binding = (
+        parse_results[0].targets[0].id
+        if len(parse_results) == 1
+        and isinstance(parse_results[0].targets[0], ast.Name)
+        else None
+    )
+    parse_returns = [node for node in ast.walk(parse_function) if isinstance(node, ast.Return)]
+    valid_parse_return = (
+        len(parse_function.body) > 0
+        and len(parse_returns) == 1
+        and parse_function.body[-1] is parse_returns[0]
+        and isinstance(parse_returns[0].value, ast.Name)
+        and parsed_binding is not None
+        and parse_returns[0].value.id == parsed_binding
+    )
+    main_parse = (
+        main_function.body[0]
+        if main_function.body and isinstance(main_function.body[0], ast.Assign)
+        else None
+    )
+    live_binding = (
+        main_parse.targets[0].id
+        if isinstance(main_parse, ast.Assign)
+        and len(main_parse.targets) == 1
+        and isinstance(main_parse.targets[0], ast.Name)
+        and isinstance(main_parse.value, ast.Call)
+        and isinstance(main_parse.value.func, ast.Name)
+        and main_parse.value.func.id == "parse_args"
+        else None
+    )
+    resolve_calls = [
+        node for node in ast.walk(main_function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "resolve"
+    ]
+    resolve_assignment = next(
+        (
+            statement
+            for statement in main_function.body
+            if isinstance(statement, ast.Try)
+            and statement.body
+            and isinstance(statement.body[0], ast.Assign)
+            and isinstance(statement.body[0].value, ast.Call)
+            and isinstance(statement.body[0].value.func, ast.Name)
+            and statement.body[0].value.func.id == "resolve"
+        ),
+        None,
+    )
+    live_resolve = (
+        resolve_assignment.body[0].value
+        if resolve_assignment is not None
+        and isinstance(resolve_assignment.body[0], ast.Assign)
+        and isinstance(resolve_assignment.body[0].value, ast.Call)
+        else None
+    )
+    resolves = [
+        node for node in resolve_calls
+        if node is live_resolve
+        and node.args
+        and isinstance(node.args[0], ast.Call)
+        and isinstance(node.args[0].func, ast.Name)
+        and node.args[0].func.id == "cli_settings"
+        and len(node.args[0].args) == 1
+        and isinstance(node.args[0].args[0], ast.Name)
+        and live_binding is not None
+        and node.args[0].args[0].id == live_binding
+    ]
+    resolve_try_index = (
+        main_function.body.index(resolve_assignment)
+        if resolve_assignment is not None
+        else 0
+    )
+    returns_before_resolution = (
+        any(
+            isinstance(node, ast.Return)
+            for statement in main_function.body[1:resolve_try_index]
+            for node in ast.walk(statement)
+        )
+        if resolve_assignment is not None
+        else True
+    )
+    if (
+        len(flags) != 1
+        or len(mappings) != 1
+        or len(resolves) != 1
+        or len(parse_results) != 1
+        or not valid_parse_return
+        or parser_binding is None
+        or len(parser_assignments) != 1
+        or parser_assignments[0] is not parser_creations[0].targets[0]
+        or not parser_creations
+        or len(parser_groups) != 1
+        or group_binding is None
+        or len(group_bindings) != 1
+        or group_bindings[0] is not parser_groups[0].targets[0]
+        or parser_groups[0].lineno >= flags[0].lineno
+        or parser_creations[0].lineno >= flags[0].lineno
+        or flags[0].lineno >= parse_results[0].lineno
+        or live_binding is None
+        or resolve_assignment is None
+        or not resolve_assignment.body
+        or resolve_assignment.body[0].lineno <= main_function.body[0].lineno
+        or returns_before_resolution
+    ):
+        raise ValueError("could not prove --model reaches resolve() through cli_settings()")
+    return flags[0].lineno, mappings[0].lineno, resolves[0].lineno
+
+
+def inspect_default_model_cli() -> str:
+    """Read static default-model and CLI wiring evidence from the workspace."""
+    workspace = get_workspace()
+    try:
+        main_source, main_path = _read_static_source(workspace, "main.py")
+        toml_source, toml_path = _read_static_source(workspace, "omniagent.toml")
+        agent_path = workspace.display(workspace.resolve("agent.py"))
+        fallback, fallback_line = _builtin_model(workspace)
+        configured, config_line = _configured_model(toml_source)
+        flag_line, forwarding_line, resolve_line = _cli_model_lines(main_source)
+    except (SandboxError, OSError, SyntaxError, ValueError, tomllib.TOMLDecodeError) as exc:
+        return f"Error: cannot inspect default model and CLI wiring: {exc}"
+
+    return "\n".join(
+        [
+            "Default model and CLI evidence:",
+            f"{agent_path}:{fallback_line}: built-in DEFAULT_MODEL = {fallback!r}",
+            f"{toml_path}:{config_line}: configured [defaults].model = {configured!r}",
+            f"{main_path}:{flag_line}: parser declares --model",
+            f"{main_path}:{forwarding_line}: cli_settings forwards args.model",
+            f"{main_path}:{resolve_line}: resolve() receives cli_settings(args) as CLI overrides",
+            "The layer report shows command line last, so an explicit --model "
+            "overrides the configured default.",
+        ]
+    )
 
 
 def file_info(path: str) -> str:
@@ -705,19 +1739,27 @@ class FileInfoArgs(ToolArgs):
     )
 
 
+class ConfigPrecedenceArgs(ToolArgs):
+    path: str = Field(
+        min_length=1,
+        max_length=1_000,
+        description="",
+    )
+
+
 def _run_file_info(args: FileInfoArgs) -> str:
     return file_info(args.path)
+
+
+def _run_config_precedence(args: ConfigPrecedenceArgs) -> str:
+    return inspect_config_precedence(args.path)
 
 
 TOOLS["file_info"] = Tool(
     name="file_info",
     description=(
-        "Report how many lines and bytes a file has, plus its first line and its "
-        "LAST line, WITHOUT returning the file. Use this -- not read_file -- for "
-        "any question about how long or how big a file is, which of two files is "
-        "longer, or what its first or last line says. It is far cheaper than "
-        "read_file and cannot overflow the context. Only use read_file when you "
-        "need the text in the middle of the file."
+        "Report bytes, line count, and first/last lines WITHOUT returning the file. "
+        "Use this, not read_file, for size/length/edge-line questions; read_file for contents."
     ),
     args_model=FileInfoArgs,
     run=_run_file_info,
@@ -725,27 +1767,34 @@ TOOLS["file_info"] = Tool(
 )
 
 
+TOOLS["inspect_config_precedence"] = Tool(
+    name="inspect_config_precedence",
+    description="Read static config layer order.",
+    args_model=ConfigPrecedenceArgs,
+    run=_run_config_precedence,
+    example="",
+    bare_field="path",
+)
+
+
 TOOLS["read_file"] = Tool(
     name="read_file",
     description=(
-        "Read a short text file from the workspace and return it with line numbers. "
-        "Use it when the user asks what is in a file. A file too long to return in "
-        "full is refused outright rather than shortened, because the start of a file "
-        "cannot tell you what the rest of it contains: use file_info for a file's "
-        "size, first line and last line, and search_text to find something inside a "
-        "long one. Paths are relative to the workspace root; files outside it, hidden "
-        "files and credentials cannot be read."
+        "Read workspace text with line numbers. For long files, use JSON path, "
+        "start_line, and end_line to read at most 100 relevant lines; oversized full "
+        "reads are refused, not shortened. Use file_info for size facts and search_text "
+        "to locate text. Outside paths, hidden files, hard links, and credentials are refused."
     ),
     args_model=ReadFileArgs,
     run=_run_read_file,
     example="README.md",
+    bare_field="path",
 )
 
 TOOLS["list_directory"] = Tool(
     name="list_directory",
     description=(
-        "List the files and folders in a workspace directory. Use it to find "
-        "out what exists before reading a file. Defaults to the workspace root."
+        "List workspace entries; defaults to the workspace root."
     ),
     args_model=ListDirectoryArgs,
     run=_run_list_directory,
@@ -755,9 +1804,7 @@ TOOLS["list_directory"] = Tool(
 TOOLS["search_text"] = Tool(
     name="search_text",
     description=(
-        "Find a literal piece of text in the files under a path, returning "
-        "file:line matches. Use it to locate where something is mentioned. "
-        "This is a plain substring search, NOT a regular expression."
+        "Find literal text and return file:line matches. This is substring search, not regex."
     ),
     args_model=SearchTextArgs,
     run=_run_search_text,

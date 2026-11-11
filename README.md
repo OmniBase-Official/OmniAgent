@@ -94,6 +94,7 @@ the context window stays clean across a long session.
 | `read_file(path: str)` | Returns a workspace file's text, numbered by line. |
 | `list_directory(path: str)` | Lists a workspace directory, folders first, with file sizes. |
 | `search_text(query: str, path: str)` | Finds a literal substring under a path and reports `file:line` matches. |
+| `inspect_config_precedence(path: str)` | Statically reports config layer order, conditional guards, and the merge overwrite loop from Python source. |
 
 `calculate` does **not** use `eval()`. The expression is parsed into an AST and
 walked against an explicit allow-list, so `__import__('os').system(...)` and
@@ -278,6 +279,22 @@ One-shot question:
 python main.py --ask "What is 15% of 2400 plus the square root of 169?"
 ```
 
+For a deterministic tool result, bypass the model and run the tool directly:
+
+```bash
+python main.py --tool list_directory --tool-input .
+python main.py --tool calculate --tool-input "(2400 * 0.15) + sqrt(169)"
+python main.py --tool read_file --tool-input '{"path":"agent.py","start_line":48,"end_line":58}'
+python main.py --tool inspect_config_precedence --tool-input config.py
+```
+
+Direct tool mode uses the same validated tool schemas and workspace sandbox, but
+does not start or contact Ollama. In the interactive REPL, use `/tool
+list_directory .` for the same fast path. Regular questions still use the ReAct
+loop, which can call tools repeatedly in the same request; multi-part requests
+should be completed before the agent gives its final answer, subject to the
+configured step limit.
+
 Pick a different model, hide the reasoning trace:
 
 ```bash
@@ -294,6 +311,8 @@ python main.py --model qwen2.5-coder:7b --quiet
 | `--temperature` | `0.1` | Sampling temperature. Low values keep the format stable. |
 | `--quiet` | off | Hide the Thought/Action/Observation trace. |
 | `--ask` | — | Answer one question and exit. |
+| `--tool` | — | Run one allow-listed deterministic tool without an LLM request. |
+| `--tool-input` | empty | Raw input for `--tool`; JSON object input is accepted for multi-field tools. |
 | `--log-file` | — | Append structured JSON-lines logs here (env: `OMNIAGENT_LOG_FILE`). |
 | `--log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` (env: `OMNIAGENT_LOG_LEVEL`). |
 | `--log-console` | off | Also stream the JSON logs to stderr. |
@@ -309,7 +328,7 @@ variable; see [Settings](#settings) for the precedence.
 
 ### REPL commands
 
-`/help` · `/tools` · `/reset` · `/quit`
+`/help` · `/tools` · `/tool <name> [input]` · `/reset` · `/quit`
 
 ---
 
