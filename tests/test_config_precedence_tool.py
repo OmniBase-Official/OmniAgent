@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -12,7 +13,14 @@ import pytest
 from agent import AgentConfig, ReActAgent
 from sandbox import Workspace, get_workspace, set_workspace
 from tests.fakes import FakeOpenAI
-from tools import inspect_config_precedence, inspect_default_model_cli, run_tool
+from tests.log_capture import configure_memory_sink, read_lines, reset_capture
+from tools import (
+    FIXED_INTERNAL_CAPABILITY_ALLOWLIST,
+    FIXED_TOOL_ALLOWLIST,
+    inspect_config_precedence,
+    inspect_default_model_cli,
+    run_tool,
+)
 
 RESOLVER_SOURCE = dedent(
     '''\
@@ -166,7 +174,7 @@ def test_non_precedence_config_question_stays_in_the_react_loop() -> None:
 
 
 def test_compound_default_model_cli_precedence_request_gets_all_evidence(
-    config_workspace: Workspace,
+    config_workspace: Workspace, tmp_path: Path
 ) -> None:
     (config_workspace.root / "agent.py").write_text(
         'DEFAULT_MODEL = "fallback:1b"\n', encoding="utf-8"
@@ -175,11 +183,69 @@ def test_compound_default_model_cli_precedence_request_gets_all_evidence(
         '[defaults]\nmodel = "configured:2b"\n', encoding="utf-8"
     )
     (config_workspace.root / "main.py").write_text(MODEL_MAIN_SOURCE, encoding="utf-8")
+    telemetry_key = tmp_path / "capture"
+    reset_capture()
+    configure_memory_sink(telemetry_key, level=logging.INFO)
+    try:
+        fake = FakeOpenAI(replies=[])
+        agent = ReActAgent(
+            config=AgentConfig(verbose=False),
+            client=fake.as_client(),
+            printer=lambda _: None,
+        )
+
+        answer = agent.run(
+            "Trace the default model and CLI --model override precedence in config.resolve()."
+        )
+
+        expected_evidence = (
+            "DEFAULT_MODEL = 'fallback:1b'",
+            "[defaults].model = 'configured:2b'",
+            "parser declares --model",
+            "cli_settings forwards args.model",
+            "resolve() receives cli_settings(args) as CLI overrides",
+            "'command line'",
+            "later layer overrides an earlier value",
+        )
+        assert fake.calls == []
+        assert len(agent.last_trace) == 1
+        assert "inspect_default_model_cli" not in agent.system_prompt
+        assert "inspect_default_model_cli" not in agent.allowed_tools
+        assert "inspect_default_model_cli" in agent.allowed_capabilities
+        assert all(item in answer for item in expected_evidence)
+        assert all(item in (agent.last_trace[0].observation or "") for item in expected_evidence)
+        assert answer.count("Configuration layers in append order:") == 1
+        records = read_lines(telemetry_key)
+        route_results = [
+            record for record in records if record["event"] == "agent.fast_route.result"
+        ]
+        assert len(route_results) == 1
+        assert route_results[0]["status"] == "completed"
+        assert route_results[0]["step_count"] == 1
+        assert not {"answer", "observation"} & route_results[0].keys()
+    finally:
+        reset_capture()
+
+
+@pytest.mark.parametrize(
+    "missing", ["inspect_config_precedence", "inspect_default_model_cli"]
+)
+def test_compound_route_fails_closed_when_file_inspection_is_not_allowed(
+    config_workspace: Workspace, missing: str
+) -> None:
     fake = FakeOpenAI(replies=[])
+    allowed_tools = FIXED_TOOL_ALLOWLIST
+    allowed_capabilities = FIXED_INTERNAL_CAPABILITY_ALLOWLIST
+    if missing == "inspect_config_precedence":
+        allowed_tools -= {missing}
+    else:
+        allowed_capabilities -= {missing}
     agent = ReActAgent(
         config=AgentConfig(verbose=False),
         client=fake.as_client(),
         printer=lambda _: None,
+        allowed_tools=allowed_tools,
+        allowed_capabilities=allowed_capabilities,
     )
 
     answer = agent.run(
@@ -188,14 +254,31 @@ def test_compound_default_model_cli_precedence_request_gets_all_evidence(
 
     assert fake.calls == []
     assert len(agent.last_trace) == 1
-    assert "DEFAULT_MODEL = 'fallback:1b'" in answer
-    assert "[defaults].model = 'configured:2b'" in answer
-    assert "parser declares --model" in answer
-    assert "cli_settings forwards args.model" in answer
-    assert "resolve() receives cli_settings(args) as CLI overrides" in answer
-    assert "'command line'" in answer
-    assert "later layer overrides an earlier value" in answer
-    assert answer.count("Configuration layers in append order:") == 1
+    assert missing in answer
+    assert answer.startswith("Error:")
+    assert agent.last_trace[0].observation == answer
+
+
+def test_scoped_tool_allowlist_does_not_grant_internal_capabilities(
+    config_workspace: Workspace,
+) -> None:
+    fake = FakeOpenAI(replies=[])
+    agent = ReActAgent(
+        config=AgentConfig(verbose=False),
+        client=fake.as_client(),
+        printer=lambda _: None,
+        allowed_tools={"inspect_config_precedence"},
+    )
+
+    answer = agent.run(
+        "Trace the default model and CLI --model override precedence in config.resolve()."
+    )
+
+    assert fake.calls == []
+    assert agent.allowed_tools == frozenset({"inspect_config_precedence"})
+    assert agent.allowed_capabilities == frozenset()
+    assert "inspect_default_model_cli" in answer
+    assert agent.last_trace[0].observation == answer
 
 
 @pytest.mark.parametrize(
@@ -281,6 +364,23 @@ def test_default_model_cli_evidence_fails_closed_on_invalid_wiring(
     (config_workspace.root / "main.py").write_text(source, encoding="utf-8")
 
     assert inspect_default_model_cli().startswith("Error:")
+
+
+def test_default_model_cli_rejects_non_string_configured_model(
+    config_workspace: Workspace,
+) -> None:
+    (config_workspace.root / "agent.py").write_text(
+        'DEFAULT_MODEL = "fallback:1b"\n', encoding="utf-8"
+    )
+    (config_workspace.root / "main.py").write_text(MODEL_MAIN_SOURCE, encoding="utf-8")
+    (config_workspace.root / "omniagent.toml").write_text(
+        "[defaults]\nmodel = 7\n", encoding="utf-8"
+    )
+
+    result = inspect_default_model_cli()
+
+    assert result.startswith("Error:")
+    assert "must declare a string [defaults].model" in result
 
 
 @pytest.mark.parametrize("path", ["../outside.py", ".hidden.py", "credentials"])

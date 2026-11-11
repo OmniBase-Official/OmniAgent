@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import observability as obs
 from tools import (
+    FIXED_INTERNAL_CAPABILITY_ALLOWLIST,
     FIXED_TOOL_ALLOWLIST,
     NO_ARG_INPUTS,
     TOOLS,
@@ -48,6 +49,9 @@ from tools import (
 _log = obs.get_logger("agent")
 _STANDARD_CHAT_CREATE = OpenAIChatCompletions.create
 _STANDARD_MODELS_LIST = OpenAIModels.list
+
+_CONFIG_PRECEDENCE_CAPABILITIES = frozenset({"inspect_config_precedence"})
+_MODEL_CLI_CAPABILITIES = frozenset({"inspect_default_model_cli"})
 
 DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_API_KEY = "local-ollama"  # Ollama ignores it; the client demands one.
@@ -663,13 +667,15 @@ def _clean_action_input(raw: str) -> str:
 class ReActAgent:
     """A ReAct agent backed by a local Ollama model."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - tool/capability policies remain explicit
         self,
         config: AgentConfig | None = None,
         printer: Callable[[str], None] = print,
         client: OpenAI | None = None,
         allowed_tools: Collection[str] | None = None,
         before_model_request: Callable[[], None] | None = None,
+        *,
+        allowed_capabilities: Collection[str] | None = None,
     ) -> None:
         """Build an agent.
 
@@ -680,8 +686,17 @@ class ReActAgent:
         self.config = config or AgentConfig()
         self._print = printer
         self._before_model_request = before_model_request
-        requested_tools = FIXED_TOOL_ALLOWLIST if allowed_tools is None else allowed_tools
-        self.allowed_tools = frozenset(requested_tools) & FIXED_TOOL_ALLOWLIST
+        self.allowed_tools = frozenset(
+            FIXED_TOOL_ALLOWLIST if allowed_tools is None else allowed_tools
+        ) & FIXED_TOOL_ALLOWLIST
+        requested_capabilities = allowed_capabilities
+        if requested_capabilities is None:
+            requested_capabilities = (
+                FIXED_INTERNAL_CAPABILITY_ALLOWLIST if allowed_tools is None else ()
+            )
+        self.allowed_capabilities = (
+            frozenset(requested_capabilities) & FIXED_INTERNAL_CAPABILITY_ALLOWLIST
+        )
         if client is not None:
             self.client = client
         else:
@@ -794,27 +809,8 @@ class ReActAgent:
         )
 
         wants_model_cli = _is_model_cli_compound_request(question)
-        if (
-            (wants_model_cli or _is_config_precedence_request(question))
-            and "inspect_config_precedence" in self.allowed_tools
-        ):
-            step = Step(
-                thought="Use static configuration precedence inspection.",
-                action="inspect_config_precedence",
-                action_input="config.py",
-            )
-            self.last_trace.append(step)
-            self._trace(1, step)
-            observation = self._invoke_tool(step)
-            answer = observation
-            if wants_model_cli and not answer.startswith("Error:"):
-                model_cli = inspect_default_model_cli()
-                answer = (
-                    model_cli
-                    if model_cli.startswith("Error:")
-                    else f"{model_cli}\n\n{answer}"
-                )
-            return self._finish(question, answer, started, 1)
+        if wants_model_cli or _is_config_precedence_request(question):
+            return self._run_config_inspection_route(question, started, wants_model_cli)
 
         scratchpad: list[ChatCompletionMessageParam] = [_user(question)]
 
@@ -888,6 +884,51 @@ class ReActAgent:
         fallback = self._force_final_answer(scratchpad, question)
         return self._finish(question, fallback, started, self.config.max_steps)
 
+    def _run_config_inspection_route(
+        self, question: str, started: float, wants_model_cli: bool
+    ) -> str:
+        missing_capabilities = set(_CONFIG_PRECEDENCE_CAPABILITIES - self.allowed_tools)
+        if wants_model_cli:
+            missing_capabilities.update(
+                _MODEL_CLI_CAPABILITIES - self.allowed_capabilities
+            )
+        step = Step(
+            thought="Use static configuration precedence inspection.",
+            action="inspect_config_precedence",
+            action_input="config.py",
+        )
+        self.last_trace.append(step)
+        self._trace(1, step)
+        if missing_capabilities:
+            answer = (
+                "Error: this task does not allow required inspection capabilities: "
+                + ", ".join(sorted(missing_capabilities))
+            )
+            step.observation = answer
+            self._trace_observation(answer)
+            obs.event(
+                "agent.fast_route.result",
+                logger=_log,
+                status="rejected",
+                step_count=1,
+            )
+            return self._finish(question, answer, started, 1)
+
+        observation = self._invoke_tool(step, trace_observation=False)
+        answer = observation
+        if wants_model_cli and not answer.startswith("Error:"):
+            model_cli = inspect_default_model_cli()
+            answer = f"{model_cli}\n\n{observation}"
+        step.observation = answer
+        self._trace_observation(answer)
+        obs.event(
+            "agent.fast_route.result",
+            logger=_log,
+            status="error" if answer.startswith("Error:") else "completed",
+            step_count=1,
+        )
+        return self._finish(question, answer, started, 1)
+
     def _check_for_a_rut(
         self, step: Step, observation: str, attempts: Counter[tuple[str, str]]
     ) -> str | None:
@@ -939,7 +980,7 @@ class ReActAgent:
             "your Final Answer."
         )
 
-    def _invoke_tool(self, step: Step) -> str:
+    def _invoke_tool(self, step: Step, *, trace_observation: bool = True) -> str:
         """Run the tool a step asked for, logging the call and its result."""
         tool_name = step.action or ""
         permitted = tool_name in self.allowed_tools
@@ -973,7 +1014,8 @@ class ReActAgent:
             observation=observation,
             elapsed_ms=elapsed_ms,
         )
-        self._trace_observation(observation)
+        if trace_observation:
+            self._trace_observation(observation)
         return observation
 
     def _finish(self, question: str, answer: str, started: float, steps: int) -> str:

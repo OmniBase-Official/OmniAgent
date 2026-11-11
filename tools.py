@@ -304,6 +304,9 @@ FIXED_TOOL_ALLOWLIST = frozenset(
     }
 )
 
+# This bounded static inspection is an internal capability, not a tool.
+FIXED_INTERNAL_CAPABILITY_ALLOWLIST = frozenset({"inspect_default_model_cli"})
+
 
 class ToolArgumentError(ValueError):
     """Raised when an Action Input cannot be turned into a tool's arguments."""
@@ -1692,7 +1695,14 @@ def inspect_default_model_cli() -> str:
         fallback, fallback_line = _builtin_model(workspace)
         configured, config_line = _configured_model(toml_source)
         flag_line, forwarding_line, resolve_line = _cli_model_lines(main_source)
-    except (SandboxError, OSError, SyntaxError, ValueError, tomllib.TOMLDecodeError) as exc:
+    except (
+        SandboxError,
+        OSError,
+        SyntaxError,
+        TypeError,
+        ValueError,
+        tomllib.TOMLDecodeError,
+    ) as exc:
         return f"Error: cannot inspect default model and CLI wiring: {exc}"
 
     return "\n".join(

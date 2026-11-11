@@ -94,6 +94,24 @@ def test_default_model_and_cli_override_use_deterministic_evidence() -> None:
     assert "command line" in answer
 
 
+def test_react_agent_preserves_positional_before_model_request_argument() -> None:
+    fake = FakeOpenAI(replies=[])
+
+    def before_request() -> None:
+        return None
+
+    agent = ReActAgent(
+        AgentConfig(verbose=False),
+        lambda _: None,
+        fake.as_client(),
+        {"calculate"},
+        before_request,
+    )
+
+    assert agent.allowed_tools == frozenset({"calculate"})
+    assert agent._before_model_request is before_request
+
+
 def test_an_observation_is_appended_as_a_user_message() -> None:
     fake = FakeOpenAI(replies=[CALL.format(expression="2 + 2"), FINAL.format(answer="4")])
     build(fake).run("What is 2 + 2?")
