@@ -135,7 +135,24 @@ class Workspace:
             )
         if resolved.name.lower() in DENIED_NAMES or resolved.suffix.lower() in DENIED_SUFFIXES:
             raise SandboxError("that file looks like a credential and is not readable")
+        if resolved.is_file() and not self._has_single_link(resolved):
+            raise SandboxError("hard-linked files are not readable by the agent")
         return resolved
+
+    @staticmethod
+    def _has_single_link(path: Path) -> bool:
+        """Fail closed unless a regular file has exactly one filesystem link.
+
+        ``Path.resolve()`` follows symlinks and junctions, but a hard link is a
+        second name for the same inode/file record and still resolves inside
+        the workspace. Rejecting files with multiple links prevents an
+        in-workspace name from exposing bytes also reachable outside it.
+        """
+        try:
+            link_count = path.stat().st_nlink
+        except (AttributeError, OSError):
+            return False
+        return type(link_count) is int and link_count == 1
 
     def _inside(self, resolved: Path) -> bool:
         return resolved == self.root or resolved.is_relative_to(self.root)
@@ -272,6 +289,8 @@ class Workspace:
             if resolved.is_dir():
                 entries.append((0, child.name, f"{child.name}/"))
             elif resolved.is_file():
+                if not self._has_single_link(resolved):
+                    continue  # do not disclose metadata for hard-linked files
                 entries.append((1, child.name, f"{child.name} ({resolved.stat().st_size} bytes)"))
         return [label for _, _, label in sorted(entries)]
 

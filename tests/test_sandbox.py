@@ -8,6 +8,7 @@ like a credential is reachable even inside it.
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -212,6 +213,27 @@ def test_a_symlinked_directory_out_of_the_workspace_is_refused(
 
     with pytest.raises(SandboxError, match="outside the workspace"):
         workspace.resolve("elsewhere/secret.txt")
+
+
+@pytest.mark.parametrize("operation", ["read_text", "describe", "list_dir"])
+def test_hard_links_to_outside_files_are_refused_or_hidden(
+    workspace: Workspace, outside: Path, operation: str
+) -> None:
+    """An in-workspace hard link must not expose an outside file or its metadata."""
+    alias = workspace.root / "outside-secret.txt"
+    try:
+        os.link(outside, alias)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"creating a hard link is unavailable: {exc}")
+
+    if operation == "read_text":
+        with pytest.raises(SandboxError, match="hard-linked files"):
+            workspace.read_text("outside-secret.txt")
+    elif operation == "describe":
+        with pytest.raises(SandboxError, match="hard-linked files"):
+            workspace.describe("outside-secret.txt")
+    else:
+        assert all("outside-secret.txt" not in entry for entry in workspace.list_dir("."))
 
 
 # --------------------------------------------------------------------------- #
