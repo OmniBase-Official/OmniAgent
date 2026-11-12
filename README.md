@@ -613,7 +613,7 @@ the promoted tag is created. An optional JSON report is for review only and
 is never read as authorization to promote:
 
 ```bash
-python scripts/promote_model.py models/runs/<run> --tag omniagent --evaluation-report models/runs/<run>/holdout-report.json
+python scripts/promote_model.py models/runs/<run> --tag omniagent --evaluation-report models/reports/<run>-holdout-report.json
 ```
 
 The optional report records only score totals, error count, and run name.
