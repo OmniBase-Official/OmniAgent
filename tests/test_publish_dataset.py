@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -299,8 +300,6 @@ def test_verify_rejects_symlink_target_outside_bundle(tmp_path: Path) -> None:
         (dest / "dataset.jsonl").symlink_to(outside)
     except (OSError, NotImplementedError) as exc:
         pytest.skip(f"file symlinks are unavailable: {exc}")
-    from hashlib import sha256
-
     digest = sha256(outside.read_bytes()).hexdigest()
     (dest / "SHA256SUMS").write_text(f"{digest}  dataset.jsonl\n", encoding="utf-8")
 

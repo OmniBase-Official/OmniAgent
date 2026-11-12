@@ -466,7 +466,7 @@ def test_listing_refuses_to_return_partial_results_after_entry_limit(
 ) -> None:
     monkeypatch.setattr(sandbox, "MAX_LIST_DIR_ENTRIES", 3)
 
-    with pytest.raises(SandboxError, match="directory listing limit.*no partial listing"):
+    with pytest.raises(SandboxError, match=r"directory listing limit.*no partial listing"):
         workspace.list_dir(".")
 
 
@@ -475,7 +475,7 @@ def test_listing_refuses_output_over_the_byte_limit(
 ) -> None:
     monkeypatch.setattr(sandbox, "MAX_LIST_DIR_OUTPUT_BYTES", 4)
 
-    with pytest.raises(SandboxError, match="output limit.*no partial listing"):
+    with pytest.raises(SandboxError, match=r"output limit.*no partial listing"):
         workspace.list_dir(".")
 
 
