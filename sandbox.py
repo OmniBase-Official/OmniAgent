@@ -61,6 +61,15 @@ MAX_READ_CHARS = 16_000
 # A ranged read is intentionally smaller than the full-file byte limit.
 MAX_READ_RANGE_LINES = 100
 
+#: Bounds for metadata tools. The repository has no checked-in dataset or
+#: unusually large workspace directories; these limits leave ample headroom
+#: over the 47-example dataset documented in README.md.
+MAX_LIST_DIR_ENTRIES = 1_000
+MAX_LIST_DIR_OUTPUT_BYTES = 128 * 1024
+MAX_DESCRIBE_BYTES = 8 * 1024 * 1024
+MAX_DESCRIBE_LINE_BYTES = 1024 * 1024
+MAX_DESCRIBE_SNIPPET_CHARS = 4_096
+
 #: Deliberately worded so it cannot collide with the logger's own truncation
 #: marker, which would disqualify an otherwise fine turn from the dataset.
 TRUNCATION_NOTE = "\n[file truncated at {limit} characters]"
@@ -91,6 +100,17 @@ class FileFacts:
 
 class SandboxError(ValueError):
     """Raised when a path is outside the workspace or otherwise refused."""
+
+
+def _line_snippet(raw: bytes, *, from_end: bool) -> str:
+    """Decode at most the configured number of characters from one line."""
+    limit = MAX_DESCRIBE_SNIPPET_CHARS - 1
+    line = raw.rstrip(b"\r\n")
+    if len(line) <= limit:
+        return line.decode("utf-8", errors="replace")
+    if from_end:
+        return "…" + line[-limit:].decode("utf-8", errors="replace")
+    return line[:limit].decode("utf-8", errors="replace") + "…"
 
 
 @dataclass(frozen=True)
@@ -307,6 +327,11 @@ class Workspace:
             raise SandboxError(f"no such file: {self.display(path)}")
 
         size = path.stat().st_size
+        if size > MAX_DESCRIBE_BYTES:
+            raise SandboxError(
+                f"{self.display(path)} is {size} bytes, over the "
+                f"{MAX_DESCRIBE_BYTES}-byte describe limit"
+            )
         lines = 0
         first = last = ""
         binary = False
@@ -315,12 +340,23 @@ class Workspace:
             binary = b"\0" in head
             handle.seek(0)
             if not binary:
-                for raw in handle:
-                    text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                bytes_read = 0
+                while raw := handle.readline(MAX_DESCRIBE_LINE_BYTES + 1):
+                    bytes_read += len(raw)
+                    if bytes_read > MAX_DESCRIBE_BYTES:
+                        raise SandboxError(
+                            f"{self.display(path)} exceeded the "
+                            f"{MAX_DESCRIBE_BYTES}-byte describe work limit"
+                        )
+                    if len(raw) > MAX_DESCRIBE_LINE_BYTES:
+                        raise SandboxError(
+                            f"{self.display(path)} has a line over the "
+                            f"{MAX_DESCRIBE_LINE_BYTES}-byte describe line limit"
+                        )
                     lines += 1
                     if lines == 1:
-                        first = text
-                    last = text
+                        first = _line_snippet(raw, from_end=False)
+                    last = _line_snippet(raw, from_end=True)
         return FileFacts(
             path=self.display(path),
             size_bytes=size,
@@ -337,7 +373,14 @@ class Workspace:
             raise SandboxError(f"not a directory: {self.display(path)}")
 
         entries: list[tuple[int, str, str]] = []
+        entries_seen = 0
         for child in path.iterdir():
+            entries_seen += 1
+            if entries_seen > MAX_LIST_DIR_ENTRIES:
+                raise SandboxError(
+                    f"{self.display(path)} exceeds the {MAX_LIST_DIR_ENTRIES}-entry "
+                    "directory listing limit; no partial listing is returned"
+                )
             if child.name.startswith("."):
                 continue
             resolved = child.resolve()
@@ -345,13 +388,23 @@ class Workspace:
                 continue  # an outside symlink must not disclose even metadata
             if self._is_unnameable(resolved):
                 continue  # naming it is a pointer to what it holds
+            label_name = child.name.encode("utf-8", errors="replace").decode("utf-8")
             if resolved.is_dir():
-                entries.append((0, child.name, f"{child.name}/"))
+                entries.append((0, child.name, f"{label_name}/"))
             elif resolved.is_file():
                 if not self._has_single_link(resolved):
                     continue  # do not disclose metadata for hard-linked files
-                entries.append((1, child.name, f"{child.name} ({resolved.stat().st_size} bytes)"))
-        return [label for _, _, label in sorted(entries)]
+                entries.append(
+                    (1, child.name, f"{label_name} ({resolved.stat().st_size} bytes)")
+                )
+        labels = [label for _, _, label in sorted(entries)]
+        output_size = sum(len(label.encode("utf-8", errors="replace")) + 1 for label in labels)
+        if output_size > MAX_LIST_DIR_OUTPUT_BYTES:
+            raise SandboxError(
+                f"{self.display(path)} exceeds the {MAX_LIST_DIR_OUTPUT_BYTES}-byte "
+                "directory listing output limit; no partial listing is returned"
+            )
+        return labels
 
     def display(self, path: Path) -> str:
         """The path as the model should see it: relative to the workspace."""

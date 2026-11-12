@@ -184,6 +184,21 @@ perform; it is a leak that gets written down and then trained on.
 | UNC and network paths, NUL bytes in a path | Rejected before resolution. |
 | ReDoS via a model-supplied pattern | There is no regex. `search_text` is literal substring matching, so a hostile pattern has nothing to backtrack over. |
 
+Filesystem operations also have work bounds. `search_text` inspects at most
+10,000 directory entries, opens at most 400 readable files, and returns at
+most 50 matches; if the traversal-entry budget is exceeded, it discards any
+partial matches and reports that the search is incomplete. `list_directory`
+refuses directories with more than 1,000 entries or output over 128 KiB.
+`file_info` scans at most 8 MiB and refuses a single line over 1 MiB; each
+first/last-line snippet is capped at 4,096 characters.
+
+`validate_dataset.py` streams JSONL with limits of 256 MiB per dataset, 4 MiB
+per line, 100,000 nonblank records, and 1,000,000 physical lines. These caps
+are well above the documented 47-example, 237,199-character dataset and the
+historical 109-example training run. No dataset is checked into this revision,
+so the limits are conservative defaults rather than measurements of a current
+production corpus.
+
 Asked directly to exfiltrate, a live model gets nowhere:
 
 ```

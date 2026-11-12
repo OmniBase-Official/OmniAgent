@@ -13,13 +13,16 @@ from.
 from __future__ import annotations
 
 import ast
+import heapq
+import itertools
 import logging
 import math
 import operator
 import tomllib
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -533,6 +536,54 @@ MAX_SEARCH_MATCHES = 50
 #: Most files search_text will open in one call.
 MAX_SEARCH_FILES = 400
 
+#: Directory entries (files and directories, including hidden entries) that one
+#: search may inspect while walking. This bounds traversal independently of the
+#: number of readable files opened.
+MAX_SEARCH_TRAVERSAL_ENTRIES = 10_000
+
+
+class SearchTraversalLimitError(RuntimeError):
+    """The bounded search walk could not inspect every entry in its scope."""
+
+
+def _iter_search_files(start: Path, workspace: Workspace) -> Iterator[Path]:
+    """Yield files in global path order without materializing the whole tree."""
+    if start.is_file():
+        yield start
+        return
+
+    pending: list[tuple[tuple[str, ...], int, Path]] = []
+    sequence = itertools.count()
+    entries_seen = 0
+
+    def enqueue_children(directory: Path) -> None:
+        nonlocal entries_seen
+        children = []
+        for child in directory.iterdir():
+            entries_seen += 1
+            if entries_seen > MAX_SEARCH_TRAVERSAL_ENTRIES:
+                raise SearchTraversalLimitError
+            if child.name.startswith("."):
+                continue
+            children.append(child)
+        children.sort()
+        for child in children:
+            heapq.heappush(pending, (child.parts, next(sequence), child))
+
+    enqueue_children(start)
+    while pending:
+        _, _, candidate = heapq.heappop(pending)
+        try:
+            admitted = workspace.resolve(workspace.display(candidate))
+        except SandboxError:
+            continue
+        if candidate.is_symlink() and admitted.is_dir():
+            continue
+        if admitted.is_dir():
+            enqueue_children(admitted)
+        elif admitted.is_file():
+            yield candidate
+
 
 def read_file(
     path: str, start_line: int | None = None, end_line: int | None = None
@@ -627,39 +678,56 @@ def search_text(  # noqa: PLR0912 - a guard per thing that can go wrong in a wal
     except SandboxError as exc:
         return f"Error: {exc}"
 
-    candidates = [start] if start.is_file() else sorted(start.rglob("*"))
+    if not start.exists():
+        return (
+            f"No match for {needle!r} in {workspace.display(start)} (0 files searched). "
+            "No readable files were found under this path. Check it with list_directory "
+            "or search from the workspace root '.'; do not assume a source subdirectory."
+        )
+
     matches: list[str] = []
     scanned = 0
+    file_limit_hit = False
     lowered = needle.lower()
 
-    for candidate in candidates:
-        if len(matches) >= MAX_SEARCH_MATCHES or scanned >= MAX_SEARCH_FILES:
-            break
-        if not candidate.is_file():
-            continue
-        try:
-            resolved = workspace.resolve(workspace.display(candidate))
-        except SandboxError:
-            continue  # hidden, denied, or escaping: skip quietly
-        if resolved.stat().st_size > workspace.max_file_bytes:
-            continue
+    try:
+        for candidate in _iter_search_files(start, workspace):
+            if len(matches) >= MAX_SEARCH_MATCHES:
+                break
+            if scanned >= MAX_SEARCH_FILES:
+                file_limit_hit = True
+                break
+            try:
+                resolved = workspace.resolve(workspace.display(candidate))
+            except SandboxError:
+                continue  # hidden, denied, or escaping: skip quietly
+            if resolved.stat().st_size > workspace.max_file_bytes:
+                continue
 
-        scanned += 1
-        try:
-            blob = resolved.read_bytes()
-        except OSError:
-            continue
-        if b"\0" in blob[:_BINARY_SNIFF_BYTES]:
-            continue
+            scanned += 1
+            try:
+                blob = resolved.read_bytes()
+            except OSError:
+                continue
+            if b"\0" in blob[:_BINARY_SNIFF_BYTES]:
+                continue
 
-        shown = workspace.display(resolved)
-        for number, line in enumerate(
-            blob.decode("utf-8", errors="replace").splitlines(), start=1
-        ):
-            if lowered in line.lower():
-                matches.append(f"{shown}:{number}: {line.strip()[:200]}")
-                if len(matches) >= MAX_SEARCH_MATCHES:
-                    break
+            shown = workspace.display(resolved)
+            for number, line in enumerate(
+                blob.decode("utf-8", errors="replace").splitlines(), start=1
+            ):
+                if lowered in line.lower():
+                    matches.append(f"{shown}:{number}: {line.strip()[:200]}")
+                    if len(matches) >= MAX_SEARCH_MATCHES:
+                        break
+    except SearchTraversalLimitError:
+        return (
+            f"Error: search of {workspace.display(start)} exceeded the "
+            f"{MAX_SEARCH_TRAVERSAL_ENTRIES:,}-entry traversal limit; "
+            "no partial matches are shown. Narrow the search path."
+        )
+    except OSError as exc:
+        return f"Error: could not walk {workspace.display(start)}: {exc.strerror or exc}"
 
     if not matches and scanned == 0:
         return (
@@ -668,10 +736,16 @@ def search_text(  # noqa: PLR0912 - a guard per thing that can go wrong in a wal
             "or search from the workspace root '.'; do not assume a source subdirectory."
         )
     if not matches:
-        return f"No match for {needle!r} in {workspace.display(start)} ({scanned} files searched)."
+        limit_note = " (file limit reached; results may be incomplete)" if file_limit_hit else ""
+        return (
+            f"No match for {needle!r} in {workspace.display(start)} "
+            f"({scanned} files searched){limit_note}."
+        )
     header = f"{len(matches)} match{'es' if len(matches) != 1 else ''} for {needle!r}"
     if len(matches) >= MAX_SEARCH_MATCHES:
         header += " (stopped at the limit)"
+    elif file_limit_hit:
+        header += " (file limit reached; results may be incomplete)"
     return f"{header}:\n" + "\n".join(matches)
 
 

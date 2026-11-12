@@ -20,6 +20,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from collections import Counter
@@ -31,6 +32,15 @@ from trajectory_utils import actions_in as _actions_in
 
 #: Below this, a fine-tune is not worth starting. A warning, not an error.
 DEFAULT_MIN_EXAMPLES = 10
+
+#: Conservative streaming bounds for an explicit training dataset. The largest
+#: example documented in this repository has 47 examples and 237,199 content
+#: characters; the historical training note records 109 examples. These caps
+#: leave substantial headroom while bounding parser and duplicate-check work.
+MAX_DATASET_BYTES = 256 * 1024 * 1024
+MAX_DATASET_LINE_BYTES = 4 * 1024 * 1024
+MAX_DATASET_EXAMPLES = 100_000
+MAX_DATASET_LINES = 1_000_000
 
 VALID_ROLES = frozenset({"system", "user", "assistant"})
 
@@ -119,8 +129,9 @@ def check_shape(messages: Any, where: str) -> list[str]:
             problems.append(f"{where}: message {index} is not an object")
             continue
         role, content = message.get("role"), message.get("content")
-        if role not in VALID_ROLES:
-            problems.append(f"{where}: message {index} has role {role!r}")
+        if not isinstance(role, str) or role not in VALID_ROLES:
+            role_label = repr(role)[:120]
+            problems.append(f"{where}: message {index} has role {role_label}")
         if not isinstance(content, str) or not content.strip():
             problems.append(f"{where}: message {index} has empty content")
     if problems:
@@ -143,50 +154,110 @@ def check_shape(messages: Any, where: str) -> list[str]:
     return problems
 
 
-def validate_file(  # noqa: PLR0912 - one branch per thing a dataset gets wrong
+def validate_file(  # noqa: PLR0912, PLR0915 - one branch per validation failure mode
     path: Path, *, min_examples: int = DEFAULT_MIN_EXAMPLES
 ) -> Report:
     """Validate a JSON-lines chat dataset."""
     report = Report()
 
-    if not path.is_file():
-        report.errors.append(f"no such dataset: {path}")
+    try:
+        if not path.is_file():
+            report.errors.append(f"no such dataset: {path}")
+            return report
+        size = path.stat().st_size
+        if size > MAX_DATASET_BYTES:
+            report.errors.append(
+                f"dataset is {size} bytes, over the {MAX_DATASET_BYTES}-byte limit"
+            )
+            return report
+    except OSError as exc:
+        report.errors.append(f"could not inspect dataset: {exc.strerror or exc}")
         return report
 
     digests: Counter[str] = Counter()
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        where = f"line {number}"
+    total_bytes = 0
+    records_seen = 0
+    try:
+        with path.open("rb") as handle:
+            number = 0
+            while True:
+                remaining = MAX_DATASET_BYTES - total_bytes
+                raw = handle.readline(min(MAX_DATASET_LINE_BYTES + 1, remaining + 1))
+                if not raw:
+                    break
+                total_bytes += len(raw)
+                number += 1
+                if total_bytes > MAX_DATASET_BYTES:
+                    report.errors.append(
+                        f"dataset exceeded the {MAX_DATASET_BYTES}-byte read limit"
+                    )
+                    break
+                if number > MAX_DATASET_LINES:
+                    report.errors.append(
+                        f"dataset exceeded the {MAX_DATASET_LINES}-line work limit"
+                    )
+                    break
+                if len(raw) > MAX_DATASET_LINE_BYTES:
+                    report.errors.append(
+                        f"line {number}: exceeds the {MAX_DATASET_LINE_BYTES}-byte line limit"
+                    )
+                    break
+                try:
+                    line = raw.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    report.errors.append(f"line {number}: is not valid UTF-8")
+                    continue
+                if not line:
+                    continue
+                records_seen += 1
+                if records_seen > MAX_DATASET_EXAMPLES:
+                    report.errors.append(
+                        f"dataset exceeded the {MAX_DATASET_EXAMPLES}-record limit"
+                    )
+                    break
+                where = f"line {number}"
 
-        try:
-            example = json.loads(stripped)
-        except json.JSONDecodeError as exc:
-            report.errors.append(f"{where}: not valid JSON ({exc.msg})")
-            continue
-        if not isinstance(example, dict) or "messages" not in example:
-            report.errors.append(f"{where}: missing a 'messages' key")
-            continue
+                try:
+                    example = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    report.errors.append(f"{where}: not valid JSON ({exc.msg})")
+                    continue
+                except ValueError:
+                    report.errors.append(f"{where}: JSON contains an invalid or oversized integer")
+                    continue
+                except (RecursionError, MemoryError):
+                    report.errors.append(f"{where}: JSON nesting is too deep")
+                    continue
+                if not isinstance(example, dict) or "messages" not in example:
+                    report.errors.append(f"{where}: missing a 'messages' key")
+                    continue
 
-        messages = example["messages"]
-        problems = check_shape(messages, where)
-        if problems:
-            report.errors.extend(problems)
-            continue
+                messages = example["messages"]
+                problems = check_shape(messages, where)
+                if problems:
+                    report.errors.extend(problems)
+                    continue
 
-        report.examples += 1
-        report.turn_lengths.append(len(messages))
-        digests[json.dumps(messages, sort_keys=True)] += 1
+                try:
+                    canonical = json.dumps(messages, sort_keys=True).encode("utf-8")
+                except (MemoryError, RecursionError, TypeError, ValueError):
+                    report.errors.append(f"{where}: messages cannot be normalized safely")
+                    continue
 
-        for message in messages:
-            role, content = str(message["role"]), str(message["content"])
-            report.roles[role] += 1
-            report.chars += len(content)
-            for label in find_secrets(content):
-                report.errors.append(f"{where}: {label} found in the {role} turn")
-            if role == "assistant":
-                report.actions.update(_actions_in(content))
+                report.examples += 1
+                report.turn_lengths.append(len(messages))
+                digests[hashlib.sha256(canonical).hexdigest()] += 1
+
+                for message in messages:
+                    role, content = str(message["role"]), str(message["content"])
+                    report.roles[role] += 1
+                    report.chars += len(content)
+                    for label in find_secrets(content):
+                        report.errors.append(f"{where}: {label} found in the {role} turn")
+                    if role == "assistant":
+                        report.actions.update(_actions_in(content))
+    except OSError as exc:
+        report.errors.append(f"could not read dataset: {exc.strerror or exc}")
 
     if report.examples == 0 and not report.errors:
         report.errors.append("the dataset is empty")

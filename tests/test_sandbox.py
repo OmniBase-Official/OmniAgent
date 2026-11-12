@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import sandbox
 from sandbox import (
     SandboxError,
     Workspace,
@@ -458,6 +459,77 @@ def test_listing_puts_directories_first(workspace: Workspace) -> None:
     directories = [i for i, e in enumerate(entries) if e.endswith("/")]
     files = [i for i, e in enumerate(entries) if not e.endswith("/")]
     assert max(directories) < min(files)
+
+
+def test_listing_refuses_to_return_partial_results_after_entry_limit(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sandbox, "MAX_LIST_DIR_ENTRIES", 3)
+
+    with pytest.raises(SandboxError, match="directory listing limit.*no partial listing"):
+        workspace.list_dir(".")
+
+
+def test_listing_refuses_output_over_the_byte_limit(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sandbox, "MAX_LIST_DIR_OUTPUT_BYTES", 4)
+
+    with pytest.raises(SandboxError, match="output limit.*no partial listing"):
+        workspace.list_dir(".")
+
+
+def test_listing_replaces_undecodable_posix_filename_bytes(
+    workspace: Workspace,
+) -> None:
+    if os.name != "posix":
+        pytest.skip("POSIX undecodable filesystem names are unavailable on this platform")
+    raw_name = os.fsencode(workspace.root) + b"/bad-\xff.txt"
+    try:
+        descriptor = os.open(raw_name, os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600)
+    except OSError as exc:
+        pytest.skip(f"filesystem does not permit undecodable filename bytes: {exc}")
+    else:
+        os.close(descriptor)
+
+    entries = workspace.list_dir(".")
+
+    assert any("bad-�.txt" in entry for entry in entries)
+    assert all(not any(0xD800 <= ord(char) <= 0xDFFF for char in entry) for entry in entries)
+
+
+def test_describe_rejects_a_giant_single_line_with_bounded_read(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (workspace.root / "giant-line.txt").write_text("x" * 1_000_000, encoding="utf-8")
+    monkeypatch.setattr(sandbox, "MAX_DESCRIBE_LINE_BYTES", 128)
+
+    with pytest.raises(SandboxError, match="describe line limit"):
+        workspace.describe("giant-line.txt")
+
+
+def test_describe_rejects_a_file_over_the_byte_work_limit(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (workspace.root / "many-lines.txt").write_text("x\n" * 100, encoding="utf-8")
+    monkeypatch.setattr(sandbox, "MAX_DESCRIBE_BYTES", 64)
+
+    with pytest.raises(SandboxError, match="describe limit"):
+        workspace.describe("many-lines.txt")
+
+
+def test_describe_bounds_first_and_last_line_snippets(workspace: Workspace) -> None:
+    (workspace.root / "long-lines.txt").write_text(
+        "A" * 5_000 + "\n" + "B" * 5_000, encoding="utf-8"
+    )
+
+    facts = workspace.describe("long-lines.txt")
+
+    assert facts.lines == 2
+    assert len(facts.first_line) <= sandbox.MAX_DESCRIBE_SNIPPET_CHARS
+    assert len(facts.last_line) <= sandbox.MAX_DESCRIBE_SNIPPET_CHARS
+    assert facts.first_line.endswith("…")
+    assert facts.last_line.startswith("…")
 
 
 def test_display_is_relative_and_uses_forward_slashes(workspace: Workspace) -> None:

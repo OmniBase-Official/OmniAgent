@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 import main as cli
+import tools
 from agent import AgentConfig, cap_observation
 from sandbox import Workspace, get_workspace, set_workspace
 from tools import list_directory, read_file, run_tool, search_text
@@ -280,6 +281,22 @@ def test_search_text_stops_at_the_match_limit(workspace: Workspace) -> None:
 
     assert "stopped at the limit" in result
     assert result.count("many.txt:") == 50
+
+
+def test_search_traversal_limit_discards_partial_matches(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    search_root = workspace.root / "wide"
+    search_root.mkdir()
+    for index in range(8):
+        (search_root / f"{index:02}.txt").write_text("needle\n", encoding="utf-8")
+    monkeypatch.setattr(tools, "MAX_SEARCH_TRAVERSAL_ENTRIES", 4)
+
+    result = search_text("needle", "wide")
+
+    assert result.startswith("Error: search of wide exceeded the 4-entry")
+    assert "no partial matches are shown" in result
+    assert "wide/00.txt:1" not in result
 
 
 # --------------------------------------------------------------------------- #
