@@ -11,9 +11,17 @@ from typing import Any
 
 import pytest
 
+import validate_dataset
+from trajectory_utils import actions_in
 from validate_dataset import check_shape, find_secrets, main, validate_file
 
 SYSTEM = "You are OmniAgent."
+
+
+def test_actions_in_shared_parser_preserves_order_and_colons() -> None:
+    reply = "Thought: plan\naction: first\nAction: second:detail\nFinal Answer: done"
+
+    assert actions_in(reply) == ["first", "second:detail"]
 
 
 def example(*turns: tuple[str, str]) -> dict[str, Any]:
@@ -128,6 +136,109 @@ def test_a_missing_dataset_is_refused(tmp_path: Path) -> None:
 
     assert not report.ok
     assert any("no such dataset" in error for error in report.errors)
+
+
+def test_a_giant_single_line_is_refused_at_the_line_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validate_dataset, "MAX_DATASET_LINE_BYTES", 64)
+    path = tmp_path / "giant.jsonl"
+    path.write_text("{" + "x" * 128, encoding="utf-8")
+
+    report = validate_file(path)
+
+    assert not report.ok
+    assert any("line limit" in error for error in report.errors)
+
+
+def test_a_large_dataset_is_refused_at_the_total_byte_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = write(tmp_path / "large.jsonl", [clean(0), clean(1)])
+    monkeypatch.setattr(validate_dataset, "MAX_DATASET_BYTES", 32)
+
+    report = validate_file(path)
+
+    assert not report.ok
+    assert any("byte limit" in error for error in report.errors)
+
+
+def test_too_many_dataset_records_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validate_dataset, "MAX_DATASET_EXAMPLES", 2)
+    path = write(tmp_path / "many.jsonl", [clean(i) for i in range(3)])
+
+    report = validate_file(path, min_examples=1)
+
+    assert not report.ok
+    assert report.examples == 2
+    assert any("record limit" in error for error in report.errors)
+
+
+def test_deeply_nested_json_is_reported_as_a_validation_error(tmp_path: Path) -> None:
+    path = tmp_path / "deep.jsonl"
+    path.write_text("[" * 5_000 + "]" * 5_000 + "\n", encoding="utf-8")
+
+    report = validate_file(path)
+
+    assert not report.ok
+    assert any("JSON nesting is too deep" in error for error in report.errors)
+
+
+def test_json_nesting_is_rejected_before_generic_missing_messages_error(
+    tmp_path: Path,
+) -> None:
+    depth = validate_dataset.MAX_JSON_NESTING + 1
+    path = tmp_path / "nested-root.jsonl"
+    path.write_text("[" * depth + "0" + "]" * depth + "\n", encoding="utf-8")
+
+    report = validate_file(path)
+
+    assert any("JSON nesting is too deep" in error for error in report.errors)
+    assert not any("missing a 'messages' key" in error for error in report.errors)
+
+
+def test_json_nesting_check_ignores_brackets_inside_strings(tmp_path: Path) -> None:
+    record = clean()
+    record["metadata"] = {
+        "plain": "[" * (validate_dataset.MAX_JSON_NESTING * 2)
+        + "]" * (validate_dataset.MAX_JSON_NESTING * 2),
+        "escaped_quote": 'before " ['
+        + "{" * (validate_dataset.MAX_JSON_NESTING * 2)
+        + "} after",
+    }
+    path = write(tmp_path / "brackets-in-strings.jsonl", [record])
+
+    report = validate_file(path, min_examples=1)
+
+    assert report.ok
+    assert report.errors == []
+
+
+def test_invalid_utf8_is_reported_as_a_validation_error(tmp_path: Path) -> None:
+    path = tmp_path / "invalid-utf8.jsonl"
+    path.write_bytes(b'{"messages": []}\n\xff\n')
+
+    report = validate_file(path)
+
+    assert not report.ok
+    assert any("not valid UTF-8" in error for error in report.errors)
+
+
+def test_oversized_json_integer_is_a_validation_error(tmp_path: Path) -> None:
+    path = tmp_path / "large-integer.jsonl"
+    path.write_text(
+        '{"messages": [], "metadata": {"nested": {"value": '
+        + "9" * 4_301
+        + "}}}\n",
+        encoding="utf-8",
+    )
+
+    report = validate_file(path)
+
+    assert not report.ok
+    assert any("invalid or oversized integer" in error for error in report.errors)
 
 
 # --------------------------------------------------------------------------- #

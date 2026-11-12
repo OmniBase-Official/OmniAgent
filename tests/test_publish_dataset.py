@@ -13,7 +13,10 @@ missing sidecar as agreement.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -24,6 +27,26 @@ import publish_dataset
 from publish_dataset import PublishError, publish, verify
 
 from dataset_provenance import write_sidecar
+
+
+def _create_junction(link: Path, target: Path) -> None:
+    """Create a Windows directory junction or skip when the host cannot."""
+    if os.name != "nt":
+        pytest.skip("Windows directory junctions are unavailable on this platform")
+    command_processor = os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")
+    result = subprocess.run(  # noqa: S603 - fixed mklink command in a pytest temp directory
+        [command_processor, "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode or not link.is_junction():
+        detail = (
+            result.stderr.strip()
+            or result.stdout.strip()
+            or "mklink did not create a junction"
+        )
+        pytest.skip(f"Windows junction creation is unavailable: {detail}")
 
 
 @pytest.fixture
@@ -147,6 +170,140 @@ def test_publishing_twice_to_the_same_place_is_not_an_error(
     publish(dataset, dest, teacher="t")
 
     assert verify(dest) == []
+
+
+def test_publish_refuses_destination_file_symlink_escape(
+    dataset: Path, tmp_path: Path
+) -> None:
+    dest = tmp_path / "drive"
+    dest.mkdir()
+    outside = tmp_path / "outside-dataset.jsonl"
+    outside.write_text("do not overwrite\n", encoding="utf-8")
+    try:
+        (dest / dataset.name).symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"file symlinks are unavailable: {exc}")
+
+    with pytest.raises(PublishError, match="symlink or reparse point"):
+        publish(dataset, dest, teacher="t")
+
+    assert outside.read_text(encoding="utf-8") == "do not overwrite\n"
+
+
+def test_publish_refuses_destination_hardlink_alias(
+    dataset: Path, tmp_path: Path
+) -> None:
+    dest = tmp_path / "drive"
+    dest.mkdir()
+    outside = tmp_path / "outside-dataset.jsonl"
+    outside.write_text("do not overwrite\n", encoding="utf-8")
+    try:
+        os.link(outside, dest / dataset.name)
+    except OSError as exc:
+        pytest.skip(f"hard links are unavailable: {exc}")
+
+    with pytest.raises(PublishError, match="hard-linked"):
+        publish(dataset, dest, teacher="t")
+
+    assert outside.read_text(encoding="utf-8") == "do not overwrite\n"
+
+
+def test_publish_refuses_destination_directory_junction_escape(
+    dataset: Path, tmp_path: Path
+) -> None:
+    outside_bundle = tmp_path / "outside-bundle"
+    outside_bundle.mkdir()
+    dest = tmp_path / "drive-junction"
+    _create_junction(dest, outside_bundle)
+
+    with pytest.raises(PublishError, match="destination path contains a symlink or reparse point"):
+        publish(dataset, dest, teacher="t")
+
+    assert list(outside_bundle.iterdir()) == []
+
+
+def test_verify_rejects_sha256sums_path_traversal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "drive"
+    dest.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside bundle\n", encoding="utf-8")
+    (dest / "SHA256SUMS").write_text(
+        f"{'0' * 64}  ../outside.txt\n", encoding="utf-8"
+    )
+    digested: list[Path] = []
+
+    def record_digest(path: Path) -> str:
+        digested.append(path)
+        return ""
+
+    monkeypatch.setattr("publish_dataset.digest", record_digest)
+
+    assert verify(dest) == ["../outside.txt"]
+    assert digested == []
+
+
+def test_verify_refuses_oversized_sha256sums_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "drive"
+    dest.mkdir()
+    monkeypatch.setattr(publish_dataset, "MAX_SUMS_BYTES", 32)
+    (dest / "SHA256SUMS").write_bytes(b"x" * 33)
+
+    with pytest.raises(PublishError, match="byte verification limit"):
+        verify(dest)
+
+
+def test_verify_refuses_oversized_sha256sums_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "drive"
+    dest.mkdir()
+    monkeypatch.setattr(publish_dataset, "MAX_SUMS_LINE_BYTES", 8)
+    (dest / "SHA256SUMS").write_bytes(b"x" * 9)
+
+    with pytest.raises(PublishError, match="line over the 8-byte verification limit"):
+        verify(dest)
+
+
+def test_verify_refuses_too_many_sha256sums_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "drive"
+    dest.mkdir()
+    monkeypatch.setattr(publish_dataset, "MAX_SUMS_ENTRIES", 1)
+    (dest / "SHA256SUMS").write_text("\n\n", encoding="utf-8")
+
+    with pytest.raises(PublishError, match="1-entry verification limit"):
+        verify(dest)
+
+
+@pytest.mark.parametrize("name", ["/outside.txt", "C:\\outside.txt", "nested/file.txt"])
+def test_verify_rejects_absolute_or_nested_checksum_names(
+    tmp_path: Path, name: str
+) -> None:
+    dest = tmp_path / "drive"
+    dest.mkdir()
+    (dest / "SHA256SUMS").write_text(f"{'0' * 64}  {name}\n", encoding="utf-8")
+
+    assert verify(dest) == [name]
+
+
+def test_verify_rejects_symlink_target_outside_bundle(tmp_path: Path) -> None:
+    dest = tmp_path / "drive"
+    dest.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside bundle\n", encoding="utf-8")
+    try:
+        (dest / "dataset.jsonl").symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"file symlinks are unavailable: {exc}")
+    digest = sha256(outside.read_bytes()).hexdigest()
+    (dest / "SHA256SUMS").write_text(f"{digest}  dataset.jsonl\n", encoding="utf-8")
+
+    assert verify(dest) == ["dataset.jsonl"]
 
 
 def test_a_copy_that_arrives_different_fails_the_publish(

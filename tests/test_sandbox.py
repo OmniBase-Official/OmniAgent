@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import sandbox
 from sandbox import (
     SandboxError,
     Workspace,
@@ -200,6 +201,8 @@ def test_a_symlink_pointing_out_of_the_workspace_is_refused(
 
     with pytest.raises(SandboxError, match="outside the workspace"):
         workspace.resolve("innocent.txt")
+    with pytest.raises(SandboxError, match="outside the workspace"):
+        workspace.read_text_range("innocent.txt", 1, 1)
 
 
 def test_a_symlinked_directory_out_of_the_workspace_is_refused(
@@ -215,7 +218,7 @@ def test_a_symlinked_directory_out_of_the_workspace_is_refused(
         workspace.resolve("elsewhere/secret.txt")
 
 
-@pytest.mark.parametrize("operation", ["read_text", "describe", "list_dir"])
+@pytest.mark.parametrize("operation", ["read_text", "read_text_range", "describe", "list_dir"])
 def test_hard_links_to_outside_files_are_refused_or_hidden(
     workspace: Workspace, outside: Path, operation: str
 ) -> None:
@@ -229,6 +232,9 @@ def test_hard_links_to_outside_files_are_refused_or_hidden(
     if operation == "read_text":
         with pytest.raises(SandboxError, match="hard-linked files"):
             workspace.read_text("outside-secret.txt")
+    elif operation == "read_text_range":
+        with pytest.raises(SandboxError, match="hard-linked files"):
+            workspace.read_text_range("outside-secret.txt", 1, 1)
     elif operation == "describe":
         with pytest.raises(SandboxError, match="hard-linked files"):
             workspace.describe("outside-secret.txt")
@@ -329,6 +335,8 @@ def test_a_large_file_is_refused_before_it_is_read(workspace: Workspace) -> None
 
     with pytest.raises(SandboxError, match="over the"):
         workspace.read_text("big.txt")
+    with pytest.raises(SandboxError, match="over the"):
+        workspace.read_text_range("big.txt", 1, 1)
 
 
 def test_a_binary_file_is_refused(workspace: Workspace) -> None:
@@ -336,6 +344,8 @@ def test_a_binary_file_is_refused(workspace: Workspace) -> None:
 
     with pytest.raises(SandboxError, match="binary"):
         workspace.read_text("image.dat")
+    with pytest.raises(SandboxError, match="binary"):
+        workspace.read_text_range("image.dat", 1, 1)
 
 
 def test_long_text_is_capped_with_a_distinct_marker(tmp_path: Path) -> None:
@@ -374,6 +384,50 @@ def test_a_normal_file_reads(workspace: Workspace) -> None:
     assert workspace.read_text("README.md") == "# Hello\nsecond line\n"
 
 
+def test_a_ranged_read_returns_one_based_inclusive_lines(workspace: Workspace) -> None:
+    result = workspace.read_text_range("README.md", 1, 2)
+
+    assert "lines 1-2 of 2" in result
+    assert "    1  # Hello" in result
+    assert "    2  second line" in result
+
+
+@pytest.mark.parametrize(
+    ("start_line", "end_line", "message"),
+    [
+        (0, 1, "line range"),
+        (2, 1, "line range"),
+        (1, 101, "max 100 lines"),
+        (3, 3, "beyond the end"),
+        (True, 1, "must be integers"),
+    ],
+)
+def test_a_ranged_read_rejects_invalid_or_unbounded_ranges(
+    workspace: Workspace, start_line: int, end_line: int, message: str
+) -> None:
+    with pytest.raises(SandboxError, match=message):
+        workspace.read_text_range("README.md", start_line, end_line)
+
+
+def test_a_ranged_read_respects_the_output_character_limit(tmp_path: Path) -> None:
+    root = tmp_path / "work"
+    root.mkdir()
+    (root / "text.txt").write_text("content\n", encoding="utf-8")
+    workspace = Workspace.at(root, max_read_chars=20)
+
+    with pytest.raises(SandboxError, match="character"):
+        workspace.read_text_range("text.txt", 1, 1)
+
+
+def test_a_ranged_read_refuses_hidden_and_outside_paths(
+    workspace: Workspace, outside: Path
+) -> None:
+    with pytest.raises(SandboxError, match="hidden files"):
+        workspace.read_text_range(".env", 1, 1)
+    with pytest.raises(SandboxError, match="outside the workspace"):
+        workspace.read_text_range(str(outside), 1, 1)
+
+
 def test_a_nested_file_reads(workspace: Workspace) -> None:
     assert "def main" in workspace.read_text("src/app.py")
 
@@ -405,6 +459,77 @@ def test_listing_puts_directories_first(workspace: Workspace) -> None:
     directories = [i for i, e in enumerate(entries) if e.endswith("/")]
     files = [i for i, e in enumerate(entries) if not e.endswith("/")]
     assert max(directories) < min(files)
+
+
+def test_listing_refuses_to_return_partial_results_after_entry_limit(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sandbox, "MAX_LIST_DIR_ENTRIES", 3)
+
+    with pytest.raises(SandboxError, match=r"directory listing limit.*no partial listing"):
+        workspace.list_dir(".")
+
+
+def test_listing_refuses_output_over_the_byte_limit(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sandbox, "MAX_LIST_DIR_OUTPUT_BYTES", 4)
+
+    with pytest.raises(SandboxError, match=r"output limit.*no partial listing"):
+        workspace.list_dir(".")
+
+
+def test_listing_replaces_undecodable_posix_filename_bytes(
+    workspace: Workspace,
+) -> None:
+    if os.name != "posix":
+        pytest.skip("POSIX undecodable filesystem names are unavailable on this platform")
+    raw_name = os.fsencode(workspace.root) + b"/bad-\xff.txt"
+    try:
+        descriptor = os.open(raw_name, os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600)
+    except OSError as exc:
+        pytest.skip(f"filesystem does not permit undecodable filename bytes: {exc}")
+    else:
+        os.close(descriptor)
+
+    entries = workspace.list_dir(".")
+
+    assert any("bad-�.txt" in entry for entry in entries)
+    assert all(not any(0xD800 <= ord(char) <= 0xDFFF for char in entry) for entry in entries)
+
+
+def test_describe_rejects_a_giant_single_line_with_bounded_read(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (workspace.root / "giant-line.txt").write_text("x" * 1_000_000, encoding="utf-8")
+    monkeypatch.setattr(sandbox, "MAX_DESCRIBE_LINE_BYTES", 128)
+
+    with pytest.raises(SandboxError, match="describe line limit"):
+        workspace.describe("giant-line.txt")
+
+
+def test_describe_rejects_a_file_over_the_byte_work_limit(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (workspace.root / "many-lines.txt").write_text("x\n" * 100, encoding="utf-8")
+    monkeypatch.setattr(sandbox, "MAX_DESCRIBE_BYTES", 64)
+
+    with pytest.raises(SandboxError, match="describe limit"):
+        workspace.describe("many-lines.txt")
+
+
+def test_describe_bounds_first_and_last_line_snippets(workspace: Workspace) -> None:
+    (workspace.root / "long-lines.txt").write_text(
+        "A" * 5_000 + "\n" + "B" * 5_000, encoding="utf-8"
+    )
+
+    facts = workspace.describe("long-lines.txt")
+
+    assert facts.lines == 2
+    assert len(facts.first_line) <= sandbox.MAX_DESCRIBE_SNIPPET_CHARS
+    assert len(facts.last_line) <= sandbox.MAX_DESCRIBE_SNIPPET_CHARS
+    assert facts.first_line.endswith("…")
+    assert facts.last_line.startswith("…")
 
 
 def test_display_is_relative_and_uses_forward_slashes(workspace: Workspace) -> None:

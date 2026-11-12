@@ -1,205 +1,450 @@
-"""Tests for the gate between a training run and the tag the demo loads.
-
-Promotion used to be `ollama create omniagent -f Modelfile` typed by hand,
-which is how a model nobody had evaluated could end up on the tag the demo is
-pinned to. The checks return reasons rather than raising, so a refusal can
-print every problem at once instead of the first one.
-
-An empty `checkable` or a non-empty `errors` is a refusal, not a pass: an
-evaluation that could not run has not shown anything, and treating silence as
-agreement is the mistake `dataset_provenance` was written to stop.
-"""
+"""Tests for the live-evaluation gate between a run and its promoted tag."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any, NoReturn
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
+import holdout_eval
 from eval_scoring import Score
-from promote_model import check_run, check_scores, main
+from promote_model import (
+    MAX_RUN_MANIFEST_BYTES,
+    MAX_RUN_MODELFILE_BYTES,
+    PromotionEvaluationError,
+    check_run,
+    check_scores,
+    main,
+    verified_run_gguf,
+    verified_run_modelfile,
+    write_evaluation_report,
+)
 
 LIVE_PROMPT = "a" * 64
+CANONICAL_TEMPLATE = (
+    'TEMPLATE """{ if .System }<|im_start|>system\n'
+    "{ .System }<|im_end|>\n"
+    "{ end }{ if .Prompt }<|im_start|>user\n"
+    "{ .Prompt }<|im_end|>\n"
+    "{ end }<|im_start|>assistant\n"
+    "{ .Response }<|im_end|>\n"
+    '"""'
+)
 
 
-def _run_dir(
-    root: Path,
-    *,
-    system_prompt_sha256: str = LIVE_PROMPT,
-    weights: bool = True,
-    modelfile: bool = True,
-    manifest: bool = True,
-) -> Path:
-    """A run directory with everything present, spoiling one thing at a time."""
+def _canonical_modelfile(gguf_name: str) -> str:
+    return (
+        f"FROM ./{gguf_name}\n\n{CANONICAL_TEMPLATE}\n\n"
+        'PARAMETER temperature 0.1\n'
+        "PARAMETER num_ctx 16384\n"
+        'PARAMETER stop "<|im_end|>"\n'
+        'PARAMETER stop "Observation:"\n'
+    )
+
+
+def _run_dir(root: Path, *, system_prompt_sha256: str = LIVE_PROMPT) -> Path:
     run = root / "20261011T120000"
     run.mkdir(parents=True, exist_ok=True)
-    if manifest:
-        (run / "manifest.json").write_text(
-            json.dumps(
-                {
-                    "run": run.name,
-                    "base_model": "Qwen/Qwen2.5-1.5B-Instruct",
-                    "examples": 153,
-                    "strategy": "qlora-4bit",
-                    "system_prompt_sha256": system_prompt_sha256,
-                    "gguf": "model-f16.gguf",
-                }
-            )
-            + "\n",
-            encoding="utf-8",
+    gguf = b"GGUF"
+    (run / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run": run.name,
+                "base_model": "synthetic",
+                "examples": 1,
+                "strategy": "synthetic",
+                "system_prompt_sha256": system_prompt_sha256,
+                "gguf": "model-f16.gguf",
+                "gguf_sha256": hashlib.sha256(gguf).hexdigest(),
+            }
         )
-    if weights:
-        (run / "model-f16.gguf").write_bytes(b"GGUF")
-    if modelfile:
-        (run / "Modelfile").write_text("FROM ./model-f16.gguf\n", encoding="utf-8")
+        + "\n",
+        encoding="utf-8",
+    )
+    (run / "model-f16.gguf").write_bytes(gguf)
+    (run / "Modelfile").write_text(
+        _canonical_modelfile("model-f16.gguf"), encoding="utf-8"
+    )
     return run
-
-
-def _raise(error: Exception) -> Callable[..., NoReturn]:
-    def boom(*_args: Any, **_kwargs: Any) -> NoReturn:
-        raise error
-
-    return boom
 
 
 @pytest.fixture(autouse=True)
 def _pin_the_live_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The tests are about the comparison, not about today's prompt."""
     monkeypatch.setattr("promote_model.prompt_fingerprint", lambda: LIVE_PROMPT)
 
 
-# --------------------------------------------------------------------------- #
-# check_run
-# --------------------------------------------------------------------------- #
+def test_run_with_different_prompt_hash_is_refused(tmp_path: Path) -> None:
+    assert "collected under a different system prompt" in " ".join(
+        check_run(_run_dir(tmp_path, system_prompt_sha256="0" * 64))
+    )
 
 
-def test_a_run_whose_prompt_hash_differs_is_refused(tmp_path: Path) -> None:
-    run = _run_dir(tmp_path, system_prompt_sha256="0" * 64)
-
-    assert "collected under a different system prompt" in " ".join(check_run(run))
-
-
-def test_a_run_missing_its_weights_is_refused(tmp_path: Path) -> None:
-    run = _run_dir(tmp_path, weights=False)
-
-    assert any("gguf" in reason for reason in check_run(run))
-
-
-def test_a_run_missing_its_modelfile_is_refused(tmp_path: Path) -> None:
-    """Without it `ollama create` has nothing to read."""
-    run = _run_dir(tmp_path, modelfile=False)
-
-    assert any("Modelfile" in reason for reason in check_run(run))
-
-
-def test_a_run_without_a_manifest_is_refused(tmp_path: Path) -> None:
-    run = _run_dir(tmp_path, manifest=False)
-
-    assert any("manifest" in reason for reason in check_run(run))
-
-
-def test_every_problem_is_reported_at_once(tmp_path: Path) -> None:
-    """A refusal that names one problem sends the caller round the loop twice."""
-    run = _run_dir(tmp_path, weights=False, modelfile=False)
-
-    assert len(check_run(run)) >= 2
-
-
-def test_a_run_that_passes_everything_has_no_reasons(tmp_path: Path) -> None:
+def test_valid_run_has_no_preflight_reasons(tmp_path: Path) -> None:
     assert check_run(_run_dir(tmp_path)) == []
 
 
-# --------------------------------------------------------------------------- #
-# check_scores
-# --------------------------------------------------------------------------- #
-
-
-def test_an_evaluation_that_errored_is_not_a_pass() -> None:
-    """A score that would otherwise clear the floor, so only `errors` refuses it.
-
-    The first version of this test used correct=0, checkable=0, which the
-    checkable guard and the floor both refuse as well -- so removing the
-    errors guard left it green. The plan predicted that mutation should turn
-    this test red; it did not, because the guards were masking each other.
-    """
-    scored = {"holdout": Score(correct=12, checkable=16, errors=["connection lost"])}
-
-    assert check_scores(scored, {"correct": 12}) != []
-
-
-def test_an_evaluation_with_nothing_checkable_is_not_a_pass() -> None:
-    """Zero out of zero is silence, and silence is not agreement.
-
-    correct meets the floor here so that only the checkable guard can refuse
-    it, for the same reason as the test above.
-    """
-    scored = {"holdout": Score(correct=12, checkable=0)}
-
-    assert check_scores(scored, {"correct": 12}) != []
-
-
-def test_a_score_below_the_floor_is_refused() -> None:
-    scored = {"holdout": Score(correct=11, checkable=16)}
-
-    assert any("12" in reason for reason in check_scores(scored, {"correct": 12}))
-
-
-def test_a_score_at_the_floor_passes() -> None:
-    scored = {"holdout": Score(correct=12, checkable=16)}
-
-    assert check_scores(scored, {"correct": 12}) == []
-
-
-def test_no_evaluations_at_all_is_refused() -> None:
-    assert check_scores({}, {"correct": 12}) != []
-
-
-# --------------------------------------------------------------------------- #
-# main
-# --------------------------------------------------------------------------- #
-
-
-def test_a_refused_run_returns_one_and_does_not_tag(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_oversized_manifest_is_rejected_by_preflight_and_artifact_binding(
+    tmp_path: Path,
 ) -> None:
-    called: list[tuple[str, Path]] = []
-    monkeypatch.setattr(
-        "promote_model._ollama_create", lambda tag, run: called.append((tag, run))
-    )
-    run = _run_dir(tmp_path, weights=False)
-
-    assert main([str(run), "--tag", "omniagent"]) == 1
-    assert called == []
-
-
-def test_a_passing_run_is_tagged_and_recorded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    called: list[tuple[str, Path]] = []
-    monkeypatch.setattr(
-        "promote_model._ollama_create", lambda tag, run: called.append((tag, run))
-    )
     run = _run_dir(tmp_path)
+    (run / "manifest.json").write_bytes(b" " * (MAX_RUN_MANIFEST_BYTES + 1))
 
-    assert main([str(run), "--tag", "omniagent", "--record", str(tmp_path / "promoted.json")]) == 0
-    assert called == [("omniagent", run)]
-    recorded = json.loads((tmp_path / "promoted.json").read_text("utf-8"))
-    assert recorded["tag"] == "omniagent"
-    assert recorded["run"] == "20261011T120000"
+    reasons = check_run(run)
+    path, digest, error = verified_run_gguf(run)
+
+    assert any("manifest.json exceeds its " in reason for reason in reasons)
+    assert path is None
+    assert digest is None
+    assert error == "the run manifest exceeds its size limit"
 
 
-def test_a_stopped_ollama_fails_loudly_rather_than_tagging_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_oversized_modelfile_is_rejected_before_contents_are_read(tmp_path: Path) -> None:
+    run = _run_dir(tmp_path)
+    (run / "Modelfile").write_bytes(b"X" * (MAX_RUN_MODELFILE_BYTES + 1))
+
+    digest, error = verified_run_modelfile(run)
+
+    assert digest is None
+    assert error == "the run Modelfile exceeds its size limit"
+
+
+@pytest.mark.parametrize("artifact", ["manifest.json", "Modelfile", "model-f16.gguf"])
+@pytest.mark.parametrize("entrypoint", ["promote", "holdout"])
+def test_report_cli_refuses_to_replace_run_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact: str,
+    entrypoint: str,
 ) -> None:
+    run = _run_dir(tmp_path)
+    protected = {name: (run / name).read_bytes() for name in (
+        "manifest.json",
+        "Modelfile",
+        "model-f16.gguf",
+    )}
+    report = run / artifact
+    evaluation_calls: list[str] = []
+    subprocess_calls: list[list[str]] = []
     monkeypatch.setattr(
-        "promote_model._ollama_create", _raise(OSError("connection refused"))
+        holdout_eval,
+        "evaluate",
+        lambda _model: evaluation_calls.append("evaluate"),
+    )
+    monkeypatch.setattr(
+        "holdout_eval.subprocess.run",
+        lambda argv, **_kwargs: subprocess_calls.append(argv),
     )
 
-    with pytest.raises(OSError, match="connection refused"):
-        main([str(_run_dir(tmp_path)), "--tag", "omniagent"])
+    if entrypoint == "promote":
+        result = main(
+            [
+                str(run),
+                "--tag",
+                "synthetic-tag",
+                "--evaluation-report",
+                str(report),
+                "--record",
+                str(tmp_path / "promoted.json"),
+            ]
+        )
+    else:
+        result = holdout_eval.main(
+            ["--promotion-run", str(run), "--report", str(report)]
+        )
+
+    assert result == 1
+    assert evaluation_calls == []
+    assert subprocess_calls == []
+    assert {name: (run / name).read_bytes() for name in protected} == protected
+
+
+@pytest.mark.parametrize("entrypoint", ["promote", "holdout"])
+def test_report_cli_refuses_symlink_to_outside_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    run = _run_dir(tmp_path)
+    outside = tmp_path / "outside-report-target.json"
+    outside.write_bytes(b"preserve outside target\n")
+    report = tmp_path / "report-link.json"
+    try:
+        report.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"file symlinks are unavailable: {exc}")
+    source_artifacts = {
+        name: (run / name).read_bytes()
+        for name in ("manifest.json", "Modelfile", "model-f16.gguf")
+    }
+    subprocess_calls: list[list[str]] = []
+    monkeypatch.setattr("holdout_eval.evaluate", lambda _model: pytest.fail("evaluation ran"))
+    monkeypatch.setattr(
+        "holdout_eval.subprocess.run",
+        lambda argv, **_kwargs: subprocess_calls.append(argv),
+    )
+
+    if entrypoint == "promote":
+        result = main(
+            [
+                str(run),
+                "--tag",
+                "synthetic-tag",
+                "--evaluation-report",
+                str(report),
+                "--record",
+                str(tmp_path / "promoted.json"),
+            ]
+        )
+    else:
+        result = holdout_eval.main(
+            ["--promotion-run", str(run), "--report", str(report)]
+        )
+
+    assert result == 1
+    assert subprocess_calls == []
+    assert outside.read_bytes() == b"preserve outside target\n"
+    assert {name: (run / name).read_bytes() for name in source_artifacts} == source_artifacts
+
+
+def test_report_writer_does_not_overwrite_existing_destination(tmp_path: Path) -> None:
+    run = _run_dir(tmp_path)
+    report = tmp_path / "existing-report.json"
+    report.write_bytes(b"keep this file\n")
+
+    with pytest.raises(PromotionEvaluationError, match="already exists"):
+        write_evaluation_report(report, run, Score(correct=12, checkable=16))
+
+    assert report.read_bytes() == b"keep this file\n"
+
+
+def test_report_writer_refuses_symlinked_parent_without_creating_outside_file(
+    tmp_path: Path,
+) -> None:
+    run = _run_dir(tmp_path)
+    outside = tmp_path / "outside-directory"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+    with pytest.raises(PromotionEvaluationError, match="symlink or reparse point"):
+        write_evaluation_report(
+            linked_parent / "new-report.json", run, Score(correct=12, checkable=16)
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "directive",
+    [
+        'SYSTEM "attacker-controlled system prompt"',
+        'TEMPLATE """attacker-controlled template"""',
+        "ADAPTER ./attacker-adapter.gguf",
+        "PARAMETER temperature 0.9",
+    ],
+)
+def test_modelfile_rejects_extra_ollama_directives(
+    tmp_path: Path, directive: str
+) -> None:
+    run = _run_dir(tmp_path)
+    modelfile = run / "Modelfile"
+    modelfile.write_text(
+        modelfile.read_text(encoding="utf-8") + directive + "\n",
+        encoding="utf-8",
+    )
+
+    _, error = verified_run_modelfile(run)
+
+    assert error is not None
+    assert "canonical generated directives" in error
+
+
+def test_modelfile_symlink_escape_is_refused(tmp_path: Path) -> None:
+    run = _run_dir(tmp_path)
+    outside_modelfile = tmp_path / "outside-Modelfile"
+    outside_modelfile.write_text(
+        _canonical_modelfile("model-f16.gguf"), encoding="utf-8"
+    )
+    (run / "Modelfile").unlink()
+    try:
+        (run / "Modelfile").symlink_to(outside_modelfile)
+    except OSError as exc:
+        pytest.skip(f"file symlinks are unavailable on this system: {exc}")
+
+    _, error = verified_run_modelfile(run)
+
+    assert error == "the run Modelfile must not be a symlink"
+
+
+@pytest.mark.parametrize("gguf_name", ["../outside.gguf", "sub/model.gguf", "..\\outside.gguf"])
+def test_manifest_gguf_must_be_a_safe_generated_basename(
+    tmp_path: Path, gguf_name: str
+) -> None:
+    run = _run_dir(tmp_path)
+    manifest_path = run / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["gguf"] = gguf_name
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    path, digest, error = verified_run_gguf(run)
+
+    assert path is None
+    assert digest is None
+    assert error == "the run manifest does not name a gguf artifact"
+
+
+def test_evaluation_errors_refuse_score() -> None:
+    assert check_scores(
+        {"holdout": Score(correct=12, checkable=16, errors=["failed"])},
+        {"correct": 12},
+    )
+
+
+def test_empty_evaluation_refuses_score() -> None:
+    assert check_scores({}, {"correct": 12})
+
+
+def test_zero_checkable_refuses_score() -> None:
+    assert check_scores({"holdout": Score(correct=12)}, {"correct": 12})
+
+
+def test_below_floor_refuses_score() -> None:
+    assert check_scores({"holdout": Score(correct=11, checkable=16)}, {"correct": 12})
+
+
+def test_at_floor_passes_score() -> None:
+    assert check_scores({"holdout": Score(correct=12, checkable=16)}, {"correct": 12}) == []
+
+
+@pytest.mark.parametrize(
+    "score",
+    [
+        pytest.param(Score(correct=11, checkable=16), id="below-floor"),
+        pytest.param(Score(correct=12, checkable=0), id="no-checkable-answers"),
+        pytest.param(Score(correct=12, checkable=16, errors=["failed"]), id="evaluation-error"),
+    ],
+)
+def test_live_evaluation_refusal_never_promotes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, score: Score
+) -> None:
+    run = _run_dir(tmp_path)
+    calls: list[tuple[str, Path]] = []
+    monkeypatch.setattr("holdout_eval.evaluate_promotion_run", lambda *_args: score)
+    monkeypatch.setattr(
+        "promote_model._ollama_create", lambda tag, path: calls.append((tag, path))
+    )
+
+    assert main([str(run), "--tag", "omniagent", "--record", str(tmp_path / "record.json")]) == 1
+    assert calls == []
+    assert not (tmp_path / "record.json").exists()
+
+
+def test_only_qualifying_live_evaluator_score_promotes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = _run_dir(tmp_path)
+    score = Score(correct=12, checkable=16)
+    evaluation_calls: list[Path] = []
+    promotion_calls: list[tuple[str, Path]] = []
+
+    def fake_evaluate(evaluated_run: Path, _report: Path | None = None) -> Score:
+        evaluation_calls.append(evaluated_run)
+        return score
+
+    monkeypatch.setattr(
+        "holdout_eval.evaluate_promotion_run", fake_evaluate
+    )
+    monkeypatch.setattr(
+        "promote_model._ollama_create",
+        lambda tag, path: promotion_calls.append((tag, path)),
+    )
+
+    assert main(
+        [str(run), "--tag", "omniagent", "--record", str(tmp_path / "record.json")]
+    ) == 0
+    assert evaluation_calls == [run]
+    assert promotion_calls == [("omniagent", run)]
+    record = json.loads((tmp_path / "record.json").read_text(encoding="utf-8"))
+    assert record["run"] == run.name
+
+
+def test_evaluation_exception_refuses_promotion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = _run_dir(tmp_path)
+    promoted: list[Path] = []
+
+    def fail(*_args: object) -> Score:
+        raise RuntimeError("private evaluation detail")
+
+    monkeypatch.setattr("holdout_eval.evaluate_promotion_run", fail)
+    monkeypatch.setattr("promote_model._ollama_create", lambda _tag, path: promoted.append(path))
+
+    assert main([str(run), "--tag", "omniagent", "--record", str(tmp_path / "record.json")]) == 1
+    assert promoted == []
+    assert "private evaluation detail" not in capsys.readouterr().err
+    assert not (tmp_path / "record.json").exists()
+
+
+def test_failed_temporary_tag_cleanup_refuses_promotion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = _run_dir(tmp_path)
+    commands: list[list[str]] = []
+    promoted: list[Path] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> object:
+        commands.append(argv)
+        if argv[1] == "rm":
+            raise OSError("cleanup detail")
+        return object()
+
+    monkeypatch.setattr("holdout_eval.evaluate", lambda _tag: Score(correct=16, checkable=16))
+    monkeypatch.setattr("holdout_eval.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "holdout_eval.verified_run_gguf",
+        lambda path: (path / "model-f16.gguf", "a" * 64, None),
+    )
+    monkeypatch.setattr(
+        "promote_model.verified_run_gguf",
+        lambda path: (path / "model-f16.gguf", "a" * 64, None),
+    )
+    monkeypatch.setattr("holdout_eval.verified_run_modelfile", lambda _path: ("b" * 64, None))
+    monkeypatch.setattr("promote_model.verified_run_modelfile", lambda _path: ("b" * 64, None))
+    monkeypatch.setattr("promote_model._ollama_create", lambda _tag, path: promoted.append(path))
+
+    assert main([str(run), "--tag", "omniagent", "--record", str(tmp_path / "record.json")]) == 1
+    assert [command[1] for command in commands] == ["create", "rm"]
+    assert promoted == []
+    assert "temporary evaluation tag cleanup failed" in capsys.readouterr().err
+    assert not (tmp_path / "record.json").exists()
+
+
+def test_optional_evaluation_report_is_not_a_promotion_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = _run_dir(tmp_path)
+    monkeypatch.setattr("holdout_eval.evaluate_promotion_run", lambda *_args: Score(12, 16))
+    monkeypatch.setattr("promote_model._ollama_create", lambda *_args: None)
+    report = tmp_path / "report.json"
+
+    assert main(
+        [
+            str(run),
+            "--tag",
+            "omniagent",
+            "--evaluation-report",
+            str(report),
+            "--record",
+            str(tmp_path / "record.json"),
+        ]
+    ) == 0
+    assert not report.exists()

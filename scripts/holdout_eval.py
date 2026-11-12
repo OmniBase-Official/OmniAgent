@@ -19,9 +19,12 @@ this stays held out rather than becoming a re-run of the training data.
 
 from __future__ import annotations
 
+import argparse
+import subprocess
 import sys
 import time
 from pathlib import Path
+from uuid import uuid4
 
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
@@ -30,6 +33,14 @@ sys.path.insert(0, str(PROJECT / "scripts"))
 from collect_dataset import SESSIONS
 from eval_scoring import Question, Score, header, judge, row
 from eval_workspace import sealed_workspace
+from promote_model import (
+    PromotionEvaluationError,
+    check_run,
+    validate_evaluation_report_path,
+    verified_run_gguf,
+    verified_run_modelfile,
+    write_evaluation_report,
+)
 
 import observability as obs
 from agent import AgentConfig, AgentError, ReActAgent
@@ -174,9 +185,98 @@ def evaluate(model: str) -> Score:
     return score
 
 
-if __name__ == "__main__":
-    results = {model: evaluate(model) for model in sys.argv[1:]}
+def evaluate_promotion_run(run: Path, report_path: Path | None = None) -> Score:
+    """Evaluate this run's GGUF under a temporary tag and return its live score."""
+    if report_path is not None:
+        validate_evaluation_report_path(report_path, run)
+    reasons = check_run(run)
+    if reasons:
+        raise ValueError("run did not pass promotion preflight")
+    gguf_path, original_sha256, artifact_error = verified_run_gguf(run)
+    if artifact_error or gguf_path is None or original_sha256 is None:
+        raise ValueError("run GGUF cannot be verified")
+    _, modelfile_error = verified_run_modelfile(run)
+    if modelfile_error:
+        raise ValueError("run Modelfile does not load its manifest GGUF")
+
+    staging_tag = f"omniagent-eval-{uuid4().hex}"
+    subprocess.run(  # noqa: S603 - fixed argv; the run path and tag are validated/generated
+        ["ollama", "create", staging_tag, "-f", "Modelfile"],  # noqa: S607
+        cwd=run,
+        check=True,
+    )
+    score: Score | None = None
+    evaluation_error: Exception | None = None
+    try:
+        score = evaluate(staging_tag)
+    except Exception as exc:  # noqa: BLE001 - cleanup must run for every evaluator failure
+        evaluation_error = exc
+
+    try:
+        subprocess.run(  # noqa: S603 - fixed argv with a generated temporary tag
+            ["ollama", "rm", staging_tag], check=True  # noqa: S607
+        )
+    except Exception as exc:
+        raise PromotionEvaluationError(
+            "temporary evaluation tag cleanup failed; promotion is refused"
+        ) from exc
+
+    if evaluation_error is not None:
+        raise PromotionEvaluationError(
+            "holdout evaluation failed; promotion is refused"
+        ) from evaluation_error
+    if score is None:
+        raise PromotionEvaluationError(
+            "holdout evaluation returned no score; promotion is refused"
+        )
+
+    _, final_sha256, final_artifact_error = verified_run_gguf(run)
+    if final_artifact_error or final_sha256 != original_sha256:
+        raise ValueError("run GGUF changed during evaluation")
+    if report_path is not None:
+        write_evaluation_report(report_path, run, score)
+    return score
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Evaluate holdout questions or write a sanitized evaluation report."
+    )
+    parser.add_argument("models", nargs="*", help="Existing Ollama model tags to evaluate.")
+    parser.add_argument(
+        "--promotion-run",
+        type=Path,
+        help="Evaluate this run's GGUF under a temporary tag for a sanitized report.",
+    )
+    parser.add_argument("--report", type=Path, help="Destination for sanitized report JSON.")
+    args = parser.parse_args(argv)
+
+    if args.promotion_run is not None:
+        if args.models:
+            parser.error(
+                "--promotion-run cannot be combined with model tags"
+            )
+        try:
+            evaluate_promotion_run(args.promotion_run, args.report)
+        except PromotionEvaluationError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+            print(f"promotion evaluation failed ({type(exc).__name__})", file=sys.stderr)
+            return 1
+        if args.report is not None:
+            print(f"wrote evaluation report to {args.report}")
+        return 0
+
+    if args.report is not None:
+        parser.error("--report requires --promotion-run")
+    results = {model: evaluate(model) for model in args.models}
     print(f"\n{'=' * 78}\nSUMMARY\n{'=' * 78}")
     print(header())
     for model, score in results.items():
         print(row(model, score))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

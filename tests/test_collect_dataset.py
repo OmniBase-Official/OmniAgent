@@ -1,15 +1,7 @@
-"""Tests for the dataset collection helper's pure parts.
-
-The collection loop itself needs a real model, so it is not tested here. What
-is tested is everything that decides *what* gets asked and *what counts as
-already done* -- plus the session-scoping contract, whose absence silently
-merged three conversations into one mangled training example the first time
-this script ran.
-"""
+"""Tests for question-bank preview and legacy dataset export behavior."""
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -18,45 +10,49 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from collect_dataset import (
-    SESSIONS,
-    already_answered,
-    collection_workspace,
-    load_questions,
-)
+from collect_dataset import SESSIONS, load_questions
+from collect_dataset import main as collect_main
 
 from export_dataset import build_examples, collect_turns
-from sandbox import SandboxError
 
 
-def write_log(path: Path, records: list[dict[str, Any]]) -> Path:
-    path.write_text(
-        "\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8"
-    )
-    return path
+def test_collection_stops_before_model_preflight_when_persistent_logs_are_disabled(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit, match="2"):
+        collect_main([])
+
+    assert "requires persistent log files" in capsys.readouterr().err
 
 
-def turn(
-    session: str, number: int, question: str, *, finished: bool = True
-) -> list[dict[str, Any]]:
-    records = [
-        {
-            "event": "agent.turn.start",
-            "session_id": session,
-            "turn": number,
-            "question": question,
-        }
-    ]
-    if finished:
-        records.append(
-            {
-                "event": "agent.turn.end",
-                "session_id": session,
-                "turn": number,
-                "answer": "an answer",
-            }
-        )
-    return records
+def test_dry_run_still_previews_questions_without_model_preflight(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert collect_main(["--dry-run", "--limit", "1"]) == 0
+
+    output = capsys.readouterr().out
+    assert "1 session(s)" in output
+    assert "What is 15% of 2400?" in output
+
+
+def test_explicit_collection_log_file_is_rejected_early(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit, match="2"):
+        collect_main(["--log-file", str(tmp_path / "transcript.jsonl")])
+
+    assert "persistent log files are disabled" in capsys.readouterr().err
+
+
+def test_environment_collection_log_file_is_rejected_before_preflight(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("OMNIAGENT_LOG_FILE", "transcript.jsonl")
+
+    with pytest.raises(SystemExit, match="2"):
+        collect_main(["--dry-run"])
+
+    assert "OMNIAGENT_LOG_FILE requests a persistent log" in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------------- #
@@ -121,73 +117,12 @@ def test_blank_lines_and_comments_are_skipped(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# resuming
 # --------------------------------------------------------------------------- #
 
 
-def test_a_missing_log_means_nothing_is_answered(tmp_path: Path) -> None:
-    assert already_answered(tmp_path / "absent.jsonl") == set()
-
-
-def test_finished_turns_are_reported_as_answered(tmp_path: Path) -> None:
-    path = write_log(
-        tmp_path / "log.jsonl",
-        [*turn("s1", 1, "What is 2 + 2?"), *turn("s2", 1, "What day is it?")],
-    )
-
-    assert already_answered(path) == {"What is 2 + 2?", "What day is it?"}
-
-
-def test_an_unfinished_turn_is_not_answered(tmp_path: Path) -> None:
-    """A run killed mid-question has to be asked again."""
-    path = write_log(
-        tmp_path / "log.jsonl",
-        [
-            *turn("s1", 1, "finished one"),
-            *turn("s1", 2, "interrupted one", finished=False),
-        ],
-    )
-
-    assert already_answered(path) == {"finished one"}
-
-
-def test_a_malformed_line_does_not_break_resuming(tmp_path: Path) -> None:
-    path = tmp_path / "log.jsonl"
-    path.write_text(
-        "\n".join(json.dumps(r) for r in turn("s1", 1, "fine")) + "\nnot json\n",
-        encoding="utf-8",
-    )
-
-    assert already_answered(path) == {"fine"}
-
-
-def test_turns_from_different_sessions_do_not_collide(tmp_path: Path) -> None:
-    """Both sessions have a turn 1; both questions must be recognised."""
-    path = write_log(
-        tmp_path / "log.jsonl",
-        [*turn("s1", 1, "first question"), *turn("s2", 1, "second question")],
-    )
-
-    assert already_answered(path) == {"first question", "second question"}
-
-
 # --------------------------------------------------------------------------- #
-# the session-scoping contract
+# export session grouping behavior
 # --------------------------------------------------------------------------- #
-
-
-def test_the_collector_scopes_each_session_to_its_own_id() -> None:
-    """Regression, found by exporting a collected log and getting one example.
-
-    Every session builds a fresh agent, and a fresh agent restarts its turn
-    counter at 1. Sharing one session_id therefore keys every session to
-    (session, turn 1), and the exporter merges them into a single conversation
-    whose roles no longer alternate. The loop must bind a distinct session_id.
-    """
-    script = Path(__file__).resolve().parent.parent / "scripts" / "collect_dataset.py"
-    source = script.read_text(encoding="utf-8")
-
-    assert "obs.bind(session_id=" in source, "each session needs its own logging scope"
 
 
 def test_merged_sessions_would_be_rejected_by_the_exporter(tmp_path: Path) -> None:
@@ -261,74 +196,5 @@ def test_distinct_session_ids_export_cleanly(tmp_path: Path) -> None:
     assert [e["messages"][1]["content"] for e in examples] == ["first?", "second?"]
 
 
-@pytest.mark.parametrize("index", [1, 7, 46])
-def test_the_scoped_session_id_is_stable_and_sortable(index: int) -> None:
-    assert f"abc-{index:03d}" == f"abc-{index:03d}"
-    assert len(f"{index:03d}") == 3
-
-
 # --------------------------------------------------------------------------- #
-# the workspace collection runs in
 # --------------------------------------------------------------------------- #
-
-
-def test_collection_cannot_read_a_transcript(tmp_path: Path) -> None:
-    """Otherwise a trajectory records the model reading an earlier answer.
-
-    That trajectory then becomes a training example teaching it to search the
-    logs. Measured before changing anything: 0 of 1,459 lines in
-    data/collect.jsonl mention a transcript path, so no collected example is
-    affected -- this closes the path, it does not repair the dataset.
-    """
-    transcripts = tmp_path / "data"
-    transcripts.mkdir()
-    (transcripts / "earlier.jsonl").write_text('{"answer": "122"}\n', encoding="utf-8")
-    log = transcripts / "run.jsonl"
-    log.write_text("", encoding="utf-8")
-
-    workspace = collection_workspace(tmp_path, log)
-
-    with pytest.raises(SandboxError, match="not readable by the agent"):
-        workspace.resolve("data/earlier.jsonl")
-
-
-def test_collection_still_lists_the_transcripts_directory(tmp_path: Path) -> None:
-    """41 collected examples are a list_directory observation of this directory."""
-    transcripts = tmp_path / "data"
-    transcripts.mkdir()
-    (transcripts / "collect-run.log").write_text("collected\n", encoding="utf-8")
-    log = transcripts / "run.jsonl"
-    log.write_text("", encoding="utf-8")
-
-    workspace = collection_workspace(tmp_path, log)
-
-    assert any(entry.startswith("collect-run.log") for entry in workspace.list_dir("data"))
-
-
-def test_collection_denies_a_log_kept_outside_the_transcripts_directory(
-    tmp_path: Path,
-) -> None:
-    """The log is the conversation so far wherever it is written."""
-    (tmp_path / "data").mkdir()
-    log = tmp_path / "run.jsonl"
-    log.write_text("", encoding="utf-8")
-
-    workspace = collection_workspace(tmp_path, log)
-
-    with pytest.raises(SandboxError, match="not readable by the agent"):
-        workspace.resolve("run.jsonl")
-
-
-def test_collection_keeps_the_config_readable(tmp_path: Path) -> None:
-    """A training question asks whether any .toml files are here.
-
-    The evaluation's seal covers omniagent.toml, because it quotes held-out
-    questions. Reusing that seal for collection would have changed the answer
-    to a training question, so collection has its own and narrower one.
-    """
-    (tmp_path / "data").mkdir()
-    (tmp_path / "omniagent.toml").write_text("[tool]\n", encoding="utf-8")
-
-    workspace = collection_workspace(tmp_path, None)
-
-    assert workspace.resolve("omniagent.toml").name == "omniagent.toml"

@@ -50,6 +50,7 @@ _EVENT_FIELDS: Final[dict[str, frozenset[str]]] = {
     "agent.loop.repeated_action": frozenset({"status", "step_count", "tool_name"}),
     "agent.tool.call": frozenset({"status", "step_count", "tool_name"}),
     "agent.tool.result": frozenset({"status", "duration_ms", "step_count", "tool_name"}),
+    "agent.fast_route.result": frozenset({"status", "step_count"}),
     "agent.tool.policy_violation": frozenset({"status", "step_count", "tool_name"}),
     "agent.context.trimmed": frozenset({"status", "step_count"}),
     "agent.llm.request": frozenset(

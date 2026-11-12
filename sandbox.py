@@ -35,13 +35,21 @@ ReDoS via a search pattern        There is no regex: search is literal
                                   has nothing to backtrack over.
 ================================  ==========================================
 
-The workspace root defaults to the current directory and is set once at
-startup. Nothing here writes, renames or deletes -- these tools are read-only
-by construction.
+Workspace selection is scoped per execution context for agent isolation.
+``set_workspace`` remains as a current-context compatibility API; explicit
+per-agent workspaces are preferred for new callers. Context variables do not
+automatically cross arbitrary thread handoffs; bind the scope in the worker.
+Filesystem reads are not atomic against concurrent untrusted writers; TOCTOU
+attacks by such writers are outside this threat model. Nothing here writes,
+renames or deletes -- these tools are read-only by construction.
 """
 
 from __future__ import annotations
 
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -50,6 +58,18 @@ MAX_FILE_BYTES = 100_000
 
 #: Largest amount of text handed back to the model from a single read.
 MAX_READ_CHARS = 16_000
+
+# A ranged read is intentionally smaller than the full-file byte limit.
+MAX_READ_RANGE_LINES = 100
+
+#: Bounds for metadata tools. The repository has no checked-in dataset or
+#: unusually large workspace directories; these limits leave ample headroom
+#: over the 47-example dataset documented in README.md.
+MAX_LIST_DIR_ENTRIES = 1_000
+MAX_LIST_DIR_OUTPUT_BYTES = 128 * 1024
+MAX_DESCRIBE_BYTES = 8 * 1024 * 1024
+MAX_DESCRIBE_LINE_BYTES = 1024 * 1024
+MAX_DESCRIBE_SNIPPET_CHARS = 4_096
 
 #: Deliberately worded so it cannot collide with the logger's own truncation
 #: marker, which would disqualify an otherwise fine turn from the dataset.
@@ -81,6 +101,17 @@ class FileFacts:
 
 class SandboxError(ValueError):
     """Raised when a path is outside the workspace or otherwise refused."""
+
+
+def _line_snippet(raw: bytes, *, from_end: bool) -> str:
+    """Decode at most the configured number of characters from one line."""
+    limit = MAX_DESCRIBE_SNIPPET_CHARS - 1
+    line = raw.rstrip(b"\r\n")
+    if len(line) <= limit:
+        return line.decode("utf-8", errors="replace")
+    if from_end:
+        return "…" + line[-limit:].decode("utf-8", errors="replace")
+    return line[:limit].decode("utf-8", errors="replace") + "…"
 
 
 @dataclass(frozen=True)
@@ -233,6 +264,55 @@ class Workspace:
             )
         return text
 
+    def read_text_range(self, candidate: str, start_line: int, end_line: int) -> str:
+        """Return a bounded, numbered line range from an admitted text file."""
+        if type(start_line) is not int or type(end_line) is not int:
+            raise SandboxError("line numbers must be integers")
+        if start_line < 1 or end_line < start_line:
+            raise SandboxError("line range must start at 1 or later and end after its start")
+        if end_line - start_line + 1 > MAX_READ_RANGE_LINES:
+            raise SandboxError(f"line range is too large (max {MAX_READ_RANGE_LINES} lines)")
+
+        path = self.resolve(candidate)
+        if path.is_dir():
+            raise SandboxError(f"{self.display(path)} is a directory; use list_directory")
+        if not path.is_file():
+            raise SandboxError(f"no such file: {self.display(path)}")
+
+        size = path.stat().st_size
+        if size > self.max_file_bytes:
+            raise SandboxError(
+                f"{self.display(path)} is {size} bytes, over the "
+                f"{self.max_file_bytes}-byte limit"
+            )
+
+        blob = path.read_bytes()
+        if b"\0" in blob[:_BINARY_SNIFF_BYTES]:
+            raise SandboxError(f"{self.display(path)} looks like a binary file")
+
+        text = blob.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        lines = text.splitlines()
+        if start_line > len(lines):
+            raise SandboxError(
+                f"line {start_line} is beyond the end of {self.display(path)} "
+                f"({len(lines)} lines)"
+            )
+
+        actual_end = min(end_line, len(lines))
+        selected = "\n".join(
+            f"{number:>5}  {lines[number - 1]}" for number in range(start_line, actual_end + 1)
+        )
+        rendered = (
+            f"{self.display(path)} (lines {start_line}-{actual_end} of {len(lines)}):\n"
+            f"{selected}"
+        )
+        if len(rendered) > self.max_read_chars:
+            raise SandboxError(
+                f"requested lines from {self.display(path)} exceed the "
+                f"{self.max_read_chars}-character limit; request a narrower range"
+            )
+        return rendered
+
     def describe(self, candidate: str) -> FileFacts:
         """Measure a file without returning its contents.
 
@@ -248,6 +328,11 @@ class Workspace:
             raise SandboxError(f"no such file: {self.display(path)}")
 
         size = path.stat().st_size
+        if size > MAX_DESCRIBE_BYTES:
+            raise SandboxError(
+                f"{self.display(path)} is {size} bytes, over the "
+                f"{MAX_DESCRIBE_BYTES}-byte describe limit"
+            )
         lines = 0
         first = last = ""
         binary = False
@@ -256,12 +341,23 @@ class Workspace:
             binary = b"\0" in head
             handle.seek(0)
             if not binary:
-                for raw in handle:
-                    text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                bytes_read = 0
+                while raw := handle.readline(MAX_DESCRIBE_LINE_BYTES + 1):
+                    bytes_read += len(raw)
+                    if bytes_read > MAX_DESCRIBE_BYTES:
+                        raise SandboxError(
+                            f"{self.display(path)} exceeded the "
+                            f"{MAX_DESCRIBE_BYTES}-byte describe work limit"
+                        )
+                    if len(raw) > MAX_DESCRIBE_LINE_BYTES:
+                        raise SandboxError(
+                            f"{self.display(path)} has a line over the "
+                            f"{MAX_DESCRIBE_LINE_BYTES}-byte describe line limit"
+                        )
                     lines += 1
                     if lines == 1:
-                        first = text
-                    last = text
+                        first = _line_snippet(raw, from_end=False)
+                    last = _line_snippet(raw, from_end=True)
         return FileFacts(
             path=self.display(path),
             size_bytes=size,
@@ -278,7 +374,14 @@ class Workspace:
             raise SandboxError(f"not a directory: {self.display(path)}")
 
         entries: list[tuple[int, str, str]] = []
+        entries_seen = 0
         for child in path.iterdir():
+            entries_seen += 1
+            if entries_seen > MAX_LIST_DIR_ENTRIES:
+                raise SandboxError(
+                    f"{self.display(path)} exceeds the {MAX_LIST_DIR_ENTRIES}-entry "
+                    "directory listing limit; no partial listing is returned"
+                )
             if child.name.startswith("."):
                 continue
             resolved = child.resolve()
@@ -286,13 +389,23 @@ class Workspace:
                 continue  # an outside symlink must not disclose even metadata
             if self._is_unnameable(resolved):
                 continue  # naming it is a pointer to what it holds
+            label_name = os.fsencode(child.name).decode("utf-8", errors="replace")
             if resolved.is_dir():
-                entries.append((0, child.name, f"{child.name}/"))
+                entries.append((0, child.name, f"{label_name}/"))
             elif resolved.is_file():
                 if not self._has_single_link(resolved):
                     continue  # do not disclose metadata for hard-linked files
-                entries.append((1, child.name, f"{child.name} ({resolved.stat().st_size} bytes)"))
-        return [label for _, _, label in sorted(entries)]
+                entries.append(
+                    (1, child.name, f"{label_name} ({resolved.stat().st_size} bytes)")
+                )
+        labels = [label for _, _, label in sorted(entries)]
+        output_size = sum(len(label.encode("utf-8", errors="replace")) + 1 for label in labels)
+        if output_size > MAX_LIST_DIR_OUTPUT_BYTES:
+            raise SandboxError(
+                f"{self.display(path)} exceeds the {MAX_LIST_DIR_OUTPUT_BYTES}-byte "
+                "directory listing output limit; no partial listing is returned"
+            )
+        return labels
 
     def display(self, path: Path) -> str:
         """The path as the model should see it: relative to the workspace."""
@@ -303,7 +416,9 @@ class Workspace:
         return str(relative).replace("\\", "/") or "."
 
 
-_workspace: Workspace | None = None
+_workspace_context: ContextVar[Workspace | None] = ContextVar(
+    "omniagent_workspace", default=None
+)
 
 
 
@@ -340,14 +455,23 @@ def without_own_transcripts(root: Path, log_file: Path | None) -> Workspace:
 
 
 def set_workspace(workspace: Workspace) -> None:
-    """Install the workspace the file tools will use."""
-    global _workspace  # noqa: PLW0603 - module-level singleton by design
-    _workspace = workspace
+    """Set the current execution context's workspace for legacy callers."""
+    _workspace_context.set(workspace)
+
+
+@contextmanager
+def workspace_scope(workspace: Workspace) -> Iterator[None]:
+    """Temporarily select a workspace for this execution context."""
+    token = _workspace_context.set(workspace)
+    try:
+        yield
+    finally:
+        _workspace_context.reset(token)
 
 
 def get_workspace() -> Workspace:
-    """The installed workspace, defaulting to the current directory."""
-    global _workspace  # noqa: PLW0603 - module-level singleton by design
-    if _workspace is None:
-        _workspace = Workspace.at(Path.cwd())
-    return _workspace
+    """Return the current context's workspace, defaulting to the current directory."""
+    scoped = _workspace_context.get()
+    if scoped is not None:
+        return scoped
+    return Workspace.at(Path.cwd())

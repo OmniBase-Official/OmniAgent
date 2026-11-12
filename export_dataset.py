@@ -1,8 +1,8 @@
-"""Turn OmniAgent's run logs into a supervised fine-tuning dataset.
+"""Turn explicitly supplied compatible trajectory files into an SFT dataset.
 
-Every run already records the exact conversation the model saw -- the system
-prompt, the question, each raw reply, and each Observation -- so no separate
-collection step is needed. This module replays those records back into the chat
+OmniAgent does not create persistent run transcripts under its current privacy
+policy. This exporter remains available for compatible files collected through
+an independently approved process and replays those records into the chat
 format that TRL and transformers consume:
 
     {"messages": [{"role": "system", ...}, {"role": "user", ...}, ...]}
@@ -31,6 +31,7 @@ from typing import Any
 
 from dataset_provenance import write_sidecar
 from observability import TRUNCATION_MARKER
+from trajectory_utils import actions_in as _actions_in
 
 #: Events that mean the turn contains a message the log does not record
 #: verbatim -- a format correction, a rut intervention, or the forced
@@ -339,15 +340,6 @@ def _skip_reason(
     if turn.steps < min_steps:
         return f"fewer than {min_steps} steps"
     return None
-
-
-def _actions_in(reply: str) -> list[str]:
-    actions = []
-    for line in reply.splitlines():
-        stripped = line.strip()
-        if stripped.lower().startswith("action:"):
-            actions.append(stripped.split(":", 1)[1].strip())
-    return actions
 
 
 def write_examples(examples: Iterable[dict[str, list[dict[str, str]]]], path: Path) -> int:

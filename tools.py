@@ -13,22 +13,28 @@ from.
 from __future__ import annotations
 
 import ast
+import heapq
+import itertools
 import logging
 import math
 import operator
-from collections.abc import Callable, Collection
+import tomllib
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import observability as obs
+from config_inspection import inspect_config_precedence as _inspect_config_precedence
 from sandbox import (
     _BINARY_SNIFF_BYTES,
     MAX_READ_CHARS,
     TRUNCATION_NOTE,
     SandboxError,
+    Workspace,
     get_workspace,
 )
 
@@ -36,6 +42,7 @@ _log = obs.get_logger("tools")
 
 #: The stable part of the sandbox's truncation note, used to spot a capped read.
 _TRUNCATION_PREFIX = TRUNCATION_NOTE.split("{", 1)[0].rstrip()
+_PAIR_SIZE = 2
 
 # --------------------------------------------------------------------------- #
 # calculate
@@ -246,6 +253,7 @@ class Tool[ArgsT: ToolArgs]:
     args_model: type[ArgsT]
     run: Callable[[ArgsT], str]
     example: str
+    bare_field: str | None = None
 
     @property
     def signature(self) -> str:
@@ -269,10 +277,8 @@ TOOLS: dict[str, Tool[Any]] = {
     "calculate": Tool(
         name="calculate",
         description=(
-            "Evaluate a mathematical expression. Use it for ANY arithmetic instead "
-            "of doing the maths yourself. Supports + - * / // % ** ( ), the "
-            "constants pi/e/tau and functions such as sqrt, log, log10, exp, sin, "
-            "cos, tan, floor, ceil, round, abs, min, max, factorial."
+            "Evaluate arithmetic with + - * / // % **, constants pi/e/tau, and "
+            "allowed math functions. Use for every calculation; arbitrary code is refused."
         ),
         args_model=CalculateArgs,
         run=_run_calculate,
@@ -281,9 +287,7 @@ TOOLS: dict[str, Tool[Any]] = {
     "get_current_time": Tool(
         name="get_current_time",
         description=(
-            "Return the current local date and time (and the UTC equivalent). "
-            "Takes no arguments. Use it whenever the user asks about 'now', "
-            "'today', the date, the day of the week, or the current time."
+            "Return local and UTC date/time. Use for current date, day, or time questions."
         ),
         args_model=NoArgs,
         run=_run_get_current_time,
@@ -294,8 +298,19 @@ TOOLS: dict[str, Tool[Any]] = {
 # Runtime capabilities are closed even if another module mutates the registry.
 # Task-level allowlists may narrow this set, but can never widen it.
 FIXED_TOOL_ALLOWLIST = frozenset(
-    {"calculate", "get_current_time", "read_file", "list_directory", "search_text", "file_info"}
+    {
+        "calculate",
+        "get_current_time",
+        "read_file",
+        "list_directory",
+        "search_text",
+        "file_info",
+        "inspect_config_precedence",
+    }
 )
+
+# This bounded static inspection is an internal capability, not a tool.
+FIXED_INTERNAL_CAPABILITY_ALLOWLIST = frozenset({"inspect_default_model_cli"})
 
 
 class ToolArgumentError(ValueError):
@@ -336,7 +351,11 @@ def describe_tools() -> str:
         fields = _describe_fields(tool)
         if fields:
             block += f"\n  Arguments:\n{fields}"
-        block += f"\n  Example -> Action: {tool.name}\n             Action Input: {tool.example}"
+        if tool.example:
+            block += (
+                f"\n  Example -> Action: {tool.name}"
+                f"\n             Action Input: {tool.example}"
+            )
         blocks.append(block)
     return "\n".join(blocks)
 
@@ -397,6 +416,11 @@ def parse_tool_args[ArgsT: ToolArgs](tool: Tool[ArgsT], raw_input: str) -> ArgsT
         # No input and nothing required: the model meant "use the defaults".
         if not value and not any(field.is_required() for field in fields.values()):
             return tool.args_model()
+        required_fields = [name for name, field in fields.items() if field.is_required()]
+        if tool.bare_field is not None:
+            return tool.args_model.model_validate({tool.bare_field: value})
+        if len(required_fields) == 1 and len(fields) == 1:
+            return tool.args_model.model_validate({required_fields[0]: value})
         if len(fields) == 1:
             return tool.args_model.model_validate({next(iter(fields)): value})
     except ValidationError as exc:
@@ -512,10 +536,76 @@ MAX_SEARCH_MATCHES = 50
 #: Most files search_text will open in one call.
 MAX_SEARCH_FILES = 400
 
+#: Directory entries (files and directories, including hidden entries) that one
+#: search may inspect while walking. This bounds traversal independently of the
+#: number of readable files opened.
+MAX_SEARCH_TRAVERSAL_ENTRIES = 10_000
 
-def read_file(path: str) -> str:
+
+class SearchTraversalLimitError(RuntimeError):
+    """The bounded search walk could not inspect every entry in its scope."""
+
+
+def _iter_search_files(start: Path, workspace: Workspace) -> Iterator[Path]:
+    """Yield files in global path order without materializing the whole tree."""
+    if start.is_file():
+        yield start
+        return
+
+    pending: list[tuple[tuple[str, ...], int, Path]] = []
+    sequence = itertools.count()
+    entries_seen = 0
+
+    def enqueue_children(directory: Path) -> None:
+        nonlocal entries_seen
+        children = []
+        for child in directory.iterdir():
+            entries_seen += 1
+            if entries_seen > MAX_SEARCH_TRAVERSAL_ENTRIES:
+                raise SearchTraversalLimitError
+            if child.name.startswith("."):
+                continue
+            children.append(child)
+        children.sort()
+        for child in children:
+            heapq.heappush(pending, (child.parts, next(sequence), child))
+
+    enqueue_children(start)
+    while pending:
+        _, _, candidate = heapq.heappop(pending)
+        try:
+            admitted = workspace.resolve(workspace.display(candidate))
+        except SandboxError:
+            continue
+        if candidate.is_symlink() and admitted.is_dir():
+            continue
+        if admitted.is_dir():
+            enqueue_children(admitted)
+        elif admitted.is_file():
+            yield candidate
+
+
+def read_file(
+    path: str, start_line: int | None = None, end_line: int | None = None
+) -> str:
     """Return a file's contents, numbered by line, from inside the workspace."""
     workspace = get_workspace()
+    if (start_line is None) != (end_line is None):
+        return "Error: provide both start_line and end_line for a ranged read."
+    if start_line is not None and end_line is not None:
+        try:
+            ranged_text = workspace.read_text_range(path, start_line, end_line)
+        except SandboxError as exc:
+            return f"Error: {exc}"
+        except OSError as exc:
+            return f"Error: could not read {path!r}: {exc.strerror or exc}"
+        if len(ranged_text) > MAX_INTACT_READ_CHARS:
+            return (
+                f"Error: requested lines from {path!r} exceed the "
+                f"{MAX_INTACT_READ_CHARS}-character tool limit; request a narrower range."
+            )
+        return ranged_text
+
     try:
         text = workspace.read_text(path)
     except SandboxError as exc:
@@ -547,8 +637,10 @@ def read_file(path: str) -> str:
     )
     return (
         f"Error: {shown} is {size_phrase}, too long to return in full. Reading the "
-        f"start of it would not tell you what the rest contains. Use file_info for its "
-        f"size, first line and last line, or search_text to find something inside it."
+        f"start of it would not tell you what the rest contains. For a relevant section, "
+        f"use read_file with JSON like {{\"path\":\"file.py\",\"start_line\":1,"
+        f"\"end_line\":20}}. Use file_info for size or line facts and search_text "
+        f"to locate relevant text."
     )
 
 
@@ -586,45 +678,74 @@ def search_text(  # noqa: PLR0912 - a guard per thing that can go wrong in a wal
     except SandboxError as exc:
         return f"Error: {exc}"
 
-    candidates = [start] if start.is_file() else sorted(start.rglob("*"))
+    if not start.exists():
+        return (
+            f"No match for {needle!r} in {workspace.display(start)} (0 files searched). "
+            "No readable files were found under this path. Check it with list_directory "
+            "or search from the workspace root '.'; do not assume a source subdirectory."
+        )
+
     matches: list[str] = []
     scanned = 0
+    file_limit_hit = False
     lowered = needle.lower()
 
-    for candidate in candidates:
-        if len(matches) >= MAX_SEARCH_MATCHES or scanned >= MAX_SEARCH_FILES:
-            break
-        if not candidate.is_file():
-            continue
-        try:
-            resolved = workspace.resolve(workspace.display(candidate))
-        except SandboxError:
-            continue  # hidden, denied, or escaping: skip quietly
-        if resolved.stat().st_size > workspace.max_file_bytes:
-            continue
+    try:
+        for candidate in _iter_search_files(start, workspace):
+            if len(matches) >= MAX_SEARCH_MATCHES:
+                break
+            if scanned >= MAX_SEARCH_FILES:
+                file_limit_hit = True
+                break
+            try:
+                resolved = workspace.resolve(workspace.display(candidate))
+            except SandboxError:
+                continue  # hidden, denied, or escaping: skip quietly
+            if resolved.stat().st_size > workspace.max_file_bytes:
+                continue
 
-        scanned += 1
-        try:
-            blob = resolved.read_bytes()
-        except OSError:
-            continue
-        if b"\0" in blob[:_BINARY_SNIFF_BYTES]:
-            continue
+            scanned += 1
+            try:
+                blob = resolved.read_bytes()
+            except OSError:
+                continue
+            if b"\0" in blob[:_BINARY_SNIFF_BYTES]:
+                continue
 
-        shown = workspace.display(resolved)
-        for number, line in enumerate(
-            blob.decode("utf-8", errors="replace").splitlines(), start=1
-        ):
-            if lowered in line.lower():
-                matches.append(f"{shown}:{number}: {line.strip()[:200]}")
-                if len(matches) >= MAX_SEARCH_MATCHES:
-                    break
+            shown = workspace.display(resolved)
+            for number, line in enumerate(
+                blob.decode("utf-8", errors="replace").splitlines(), start=1
+            ):
+                if lowered in line.lower():
+                    matches.append(f"{shown}:{number}: {line.strip()[:200]}")
+                    if len(matches) >= MAX_SEARCH_MATCHES:
+                        break
+    except SearchTraversalLimitError:
+        return (
+            f"Error: search of {workspace.display(start)} exceeded the "
+            f"{MAX_SEARCH_TRAVERSAL_ENTRIES:,}-entry traversal limit; "
+            "no partial matches are shown. Narrow the search path."
+        )
+    except OSError as exc:
+        return f"Error: could not walk {workspace.display(start)}: {exc.strerror or exc}"
 
+    if not matches and scanned == 0:
+        return (
+            f"No match for {needle!r} in {workspace.display(start)} (0 files searched). "
+            "No readable files were found under this path. Check it with list_directory "
+            "or search from the workspace root '.'; do not assume a source subdirectory."
+        )
     if not matches:
-        return f"No match for {needle!r} in {workspace.display(start)} ({scanned} files searched)."
+        limit_note = " (file limit reached; results may be incomplete)" if file_limit_hit else ""
+        return (
+            f"No match for {needle!r} in {workspace.display(start)} "
+            f"({scanned} files searched){limit_note}."
+        )
     header = f"{len(matches)} match{'es' if len(matches) != 1 else ''} for {needle!r}"
     if len(matches) >= MAX_SEARCH_MATCHES:
         header += " (stopped at the limit)"
+    elif file_limit_hit:
+        header += " (file limit reached; results may be incomplete)"
     return f"{header}:\n" + "\n".join(matches)
 
 
@@ -633,6 +754,16 @@ class ReadFileArgs(ToolArgs):
         min_length=1,
         max_length=1_000,
         description="Path relative to the workspace root, e.g. 'README.md' or 'src/app.py'.",
+    )
+    start_line: int | None = Field(
+        default=None,
+        ge=1,
+        description="First line to return for a bounded read; provide it with end_line.",
+    )
+    end_line: int | None = Field(
+        default=None,
+        ge=1,
+        description="Last line to return for a bounded read; maximum range is 100 lines.",
     )
 
 
@@ -658,7 +789,7 @@ class SearchTextArgs(ToolArgs):
 
 
 def _run_read_file(args: ReadFileArgs) -> str:
-    return read_file(args.path)
+    return read_file(args.path, args.start_line, args.end_line)
 
 
 def _run_list_directory(args: ListDirectoryArgs) -> str:
@@ -667,6 +798,393 @@ def _run_list_directory(args: ListDirectoryArgs) -> str:
 
 def _run_search_text(args: SearchTextArgs) -> str:
     return search_text(args.query, args.path)
+
+
+def _named_assignment(
+    statement: ast.stmt, name: str
+) -> tuple[ast.expr, ast.expr] | None:
+    if (
+        isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+        and statement.targets[0].id == name
+    ):
+        return statement.targets[0], statement.value
+    if (
+        isinstance(statement, ast.AnnAssign)
+        and isinstance(statement.target, ast.Name)
+        and statement.target.id == name
+        and statement.value is not None
+    ):
+        return statement.target, statement.value
+    return None
+
+
+def inspect_config_precedence(path: str) -> str:
+    """Preserve the public tool facade for static config precedence inspection."""
+    return _inspect_config_precedence(path)
+
+
+def _read_static_source(workspace: Workspace, path: str) -> tuple[str, str]:
+    admitted = workspace.resolve(path)
+    display = workspace.display(admitted)
+    source = workspace.read_text(display)
+    marker = TRUNCATION_NOTE.format(limit=workspace.max_read_chars)
+    if marker in source:
+        raise ValueError(f"{display} is too large to inspect completely")
+    return source, display
+
+
+def _builtin_model(workspace: Workspace) -> tuple[str, int]:
+    agent_path = workspace.display(workspace.resolve("agent.py"))
+    result = search_text('DEFAULT_MODEL = "', agent_path)
+    if result.startswith(("Error:", "No match")):
+        raise ValueError("could not locate DEFAULT_MODEL in agent.py")
+    matches = []
+    for line in result.splitlines()[1:]:
+        _, _, match = line.partition(":")
+        line_text, separator, source_line = match.partition(":")
+        if separator and line_text.isdigit() and source_line.startswith(" DEFAULT_MODEL ="):
+            matches.append((int(line_text), source_line.strip()))
+    if len(matches) != 1:
+        raise ValueError("expected one DEFAULT_MODEL declaration in agent.py")
+    line_number, source_line = matches[0]
+    statement = ast.parse(source_line).body
+    if len(statement) != 1 or not isinstance(statement[0], ast.Assign):
+        raise ValueError("DEFAULT_MODEL must be a simple module assignment")
+    pair = _named_assignment(statement[0], "DEFAULT_MODEL")
+    if pair is None or not isinstance(pair[1], ast.Constant) or not isinstance(pair[1].value, str):
+        raise ValueError("DEFAULT_MODEL must be a static string")
+    return pair[1].value, line_number
+
+
+def _configured_model(source: str) -> tuple[str, int]:
+    data = tomllib.loads(source)
+    defaults = data.get("defaults")
+    if not isinstance(defaults, dict) or not isinstance(defaults.get("model"), str):
+        raise TypeError("omniagent.toml must declare a string [defaults].model")
+    in_defaults = False
+    for line_number, line in enumerate(source.splitlines(), start=1):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_defaults = stripped == "[defaults]"
+        elif in_defaults and "=" in stripped and stripped.partition("=")[0].strip() == "model":
+            return defaults["model"], line_number
+    raise ValueError("could not locate [defaults].model in omniagent.toml")
+
+
+def _is_model_mapping(node: ast.AST) -> bool:
+    if not isinstance(node, ast.DictComp) or not isinstance(node.key, ast.Name):
+        return False
+    target_name = node.key.id
+    if not isinstance(node.value, ast.Call) or not isinstance(node.value.func, ast.Name):
+        return False
+    if node.value.func.id != "getattr" or len(node.value.args) != _PAIR_SIZE:
+        return False
+    first, second = node.value.args
+    if not isinstance(first, ast.Name) or first.id != "args":
+        return False
+    if not isinstance(second, ast.Name) or second.id != node.key.id:
+        return False
+    if not any(
+        isinstance(generator.iter, ast.Tuple)
+        and any(
+            isinstance(item, ast.Constant) and item.value == "model"
+            for item in generator.iter.elts
+        )
+        and isinstance(generator.target, ast.Name)
+        and generator.target.id == target_name
+        for generator in node.generators
+    ):
+        return False
+    if len(node.generators) != 1 or len(node.generators[0].ifs) != 1:
+        return False
+    guard = node.generators[0].ifs[0]
+    return (
+        isinstance(guard, ast.Compare)
+        and isinstance(guard.left, ast.Call)
+        and isinstance(guard.left.func, ast.Name)
+        and guard.left.func.id == "getattr"
+        and len(guard.left.args) == _PAIR_SIZE
+        and isinstance(guard.left.args[0], ast.Name)
+        and guard.left.args[0].id == first.id
+        and isinstance(guard.left.args[1], ast.Name)
+        and guard.left.args[1].id == target_name
+        and len(guard.ops) == 1
+        and isinstance(guard.ops[0], ast.IsNot)
+        and len(guard.comparators) == 1
+        and isinstance(guard.comparators[0], ast.Constant)
+        and guard.comparators[0].value is None
+    )
+
+
+def _cli_model_lines(source: str) -> tuple[int, int, int]:
+    module = ast.parse(source)
+    named_functions = {
+        name: [
+            node for node in module.body
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        ]
+        for name in ("parse_args", "cli_settings", "main")
+    }
+    if any(len(functions) != 1 for functions in named_functions.values()):
+        raise ValueError("expected one top-level parse_args(), cli_settings(), and main()")
+    parse_function = named_functions["parse_args"][0]
+    cli_function = named_functions["cli_settings"][0]
+    main_function = named_functions["main"][0]
+    parser_creations = [
+        statement
+        for statement in parse_function.body
+        if isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Attribute)
+        and statement.value.func.attr == "ArgumentParser"
+        and isinstance(statement.value.func.value, ast.Name)
+        and statement.value.func.value.id == "argparse"
+    ]
+    parser_binding = None
+    if (
+        len(parser_creations) == 1
+        and isinstance(parser_creations[0].targets[0], ast.Name)
+    ):
+        parser_binding = parser_creations[0].targets[0].id
+    parser_assignments = [
+        node
+        for node in ast.walk(parse_function)
+        if isinstance(node, ast.Name)
+        and node.id == parser_binding
+        and isinstance(node.ctx, ast.Store)
+    ] if parser_binding is not None else []
+    parser_groups = [
+        statement
+        for statement in parse_function.body
+        if isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Attribute)
+        and statement.value.func.attr == "add_argument_group"
+        and isinstance(statement.value.func.value, ast.Name)
+        and parser_binding is not None
+        and statement.value.func.value.id == parser_binding
+    ]
+    group_binding = (
+        parser_groups[0].targets[0].id
+        if len(parser_groups) == 1 and isinstance(parser_groups[0].targets[0], ast.Name)
+        else None
+    )
+    group_bindings = [
+        node
+        for node in ast.walk(parse_function)
+        if isinstance(node, ast.Name)
+        and node.id == group_binding
+        and isinstance(node.ctx, ast.Store)
+    ] if group_binding is not None else []
+    flags = [
+        statement.value
+        for statement in parse_function.body
+        if isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Attribute)
+        and statement.value.func.attr == "add_argument"
+        and isinstance(statement.value.func.value, ast.Name)
+        and statement.value.func.value.id in {parser_binding, group_binding}
+        and any(
+            isinstance(arg, ast.Constant) and arg.value == "--model"
+            for arg in statement.value.args
+        )
+    ]
+    cli_parameters = [
+        argument.arg for argument in cli_function.args.args
+    ]
+    comprehensions = [node for node in ast.walk(cli_function) if isinstance(node, ast.DictComp)]
+    mappings = [node for node in comprehensions if _is_model_mapping(node)]
+    model_mapping_assignments = [
+        statement
+        for statement in cli_function.body
+        if isinstance(statement, ast.AnnAssign)
+        and isinstance(statement.target, ast.Name)
+        and statement.value in mappings
+    ]
+    model_mapping_returns = [
+        statement
+        for statement in cli_function.body
+        if isinstance(statement, ast.Return)
+        and isinstance(statement.value, ast.Name)
+        and len(model_mapping_assignments) == 1
+        and isinstance(model_mapping_assignments[0].target, ast.Name)
+        and statement.value.id == model_mapping_assignments[0].target.id
+    ]
+    if (
+        cli_parameters != ["args"]
+        or len(comprehensions) != 1
+        or len(model_mapping_assignments) != 1
+        or len(model_mapping_returns) != 1
+        or model_mapping_assignments[0].lineno >= model_mapping_returns[0].lineno
+    ):
+        mappings = []
+    parse_results = [
+        statement
+        for statement in parse_function.body
+        if isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Attribute)
+        and statement.value.func.attr == "parse_args"
+        and isinstance(statement.value.func.value, ast.Name)
+        and parser_binding is not None
+        and statement.value.func.value.id == parser_binding
+        and len(statement.value.args) == 1
+        and isinstance(statement.value.args[0], ast.Name)
+        and len(parse_function.args.args) == 1
+        and statement.value.args[0].id == parse_function.args.args[0].arg
+    ]
+    parsed_binding = (
+        parse_results[0].targets[0].id
+        if len(parse_results) == 1
+        and isinstance(parse_results[0].targets[0], ast.Name)
+        else None
+    )
+    parse_returns = [node for node in ast.walk(parse_function) if isinstance(node, ast.Return)]
+    valid_parse_return = (
+        len(parse_function.body) > 0
+        and len(parse_returns) == 1
+        and parse_function.body[-1] is parse_returns[0]
+        and isinstance(parse_returns[0].value, ast.Name)
+        and parsed_binding is not None
+        and parse_returns[0].value.id == parsed_binding
+    )
+    main_parse = (
+        main_function.body[0]
+        if main_function.body and isinstance(main_function.body[0], ast.Assign)
+        else None
+    )
+    live_binding = (
+        main_parse.targets[0].id
+        if isinstance(main_parse, ast.Assign)
+        and len(main_parse.targets) == 1
+        and isinstance(main_parse.targets[0], ast.Name)
+        and isinstance(main_parse.value, ast.Call)
+        and isinstance(main_parse.value.func, ast.Name)
+        and main_parse.value.func.id == "parse_args"
+        else None
+    )
+    resolve_calls = [
+        node for node in ast.walk(main_function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "resolve"
+    ]
+    resolve_assignment = next(
+        (
+            statement
+            for statement in main_function.body
+            if isinstance(statement, ast.Try)
+            and statement.body
+            and isinstance(statement.body[0], ast.Assign)
+            and isinstance(statement.body[0].value, ast.Call)
+            and isinstance(statement.body[0].value.func, ast.Name)
+            and statement.body[0].value.func.id == "resolve"
+        ),
+        None,
+    )
+    live_resolve = (
+        resolve_assignment.body[0].value
+        if resolve_assignment is not None
+        and isinstance(resolve_assignment.body[0], ast.Assign)
+        and isinstance(resolve_assignment.body[0].value, ast.Call)
+        else None
+    )
+    resolves = [
+        node for node in resolve_calls
+        if node is live_resolve
+        and node.args
+        and isinstance(node.args[0], ast.Call)
+        and isinstance(node.args[0].func, ast.Name)
+        and node.args[0].func.id == "cli_settings"
+        and len(node.args[0].args) == 1
+        and isinstance(node.args[0].args[0], ast.Name)
+        and live_binding is not None
+        and node.args[0].args[0].id == live_binding
+    ]
+    resolve_try_index = (
+        main_function.body.index(resolve_assignment)
+        if resolve_assignment is not None
+        else 0
+    )
+    returns_before_resolution = (
+        any(
+            isinstance(node, ast.Return)
+            for statement in main_function.body[1:resolve_try_index]
+            for node in ast.walk(statement)
+        )
+        if resolve_assignment is not None
+        else True
+    )
+    if (
+        len(flags) != 1
+        or len(mappings) != 1
+        or len(resolves) != 1
+        or len(parse_results) != 1
+        or not valid_parse_return
+        or parser_binding is None
+        or len(parser_assignments) != 1
+        or parser_assignments[0] is not parser_creations[0].targets[0]
+        or not parser_creations
+        or len(parser_groups) != 1
+        or group_binding is None
+        or len(group_bindings) != 1
+        or group_bindings[0] is not parser_groups[0].targets[0]
+        or parser_groups[0].lineno >= flags[0].lineno
+        or parser_creations[0].lineno >= flags[0].lineno
+        or flags[0].lineno >= parse_results[0].lineno
+        or live_binding is None
+        or resolve_assignment is None
+        or not resolve_assignment.body
+        or resolve_assignment.body[0].lineno <= main_function.body[0].lineno
+        or returns_before_resolution
+    ):
+        raise ValueError("could not prove --model reaches resolve() through cli_settings()")
+    return flags[0].lineno, mappings[0].lineno, resolves[0].lineno
+
+
+def inspect_default_model_cli() -> str:
+    """Read static default-model and CLI wiring evidence from the workspace."""
+    workspace = get_workspace()
+    try:
+        main_source, main_path = _read_static_source(workspace, "main.py")
+        toml_source, toml_path = _read_static_source(workspace, "omniagent.toml")
+        agent_path = workspace.display(workspace.resolve("agent.py"))
+        fallback, fallback_line = _builtin_model(workspace)
+        configured, config_line = _configured_model(toml_source)
+        flag_line, forwarding_line, resolve_line = _cli_model_lines(main_source)
+    except (
+        SandboxError,
+        OSError,
+        SyntaxError,
+        TypeError,
+        ValueError,
+        tomllib.TOMLDecodeError,
+    ) as exc:
+        return f"Error: cannot inspect default model and CLI wiring: {exc}"
+
+    return "\n".join(
+        [
+            "Default model and CLI evidence:",
+            f"{agent_path}:{fallback_line}: built-in DEFAULT_MODEL = {fallback!r}",
+            f"{toml_path}:{config_line}: configured [defaults].model = {configured!r}",
+            f"{main_path}:{flag_line}: parser declares --model",
+            f"{main_path}:{forwarding_line}: cli_settings forwards args.model",
+            f"{main_path}:{resolve_line}: resolve() receives cli_settings(args) as CLI overrides",
+            (
+                "The layer report shows command line last, so an explicit --model "
+                "overrides the configured default."
+            ),
+        ]
+    )
 
 
 def file_info(path: str) -> str:
@@ -705,19 +1223,27 @@ class FileInfoArgs(ToolArgs):
     )
 
 
+class ConfigPrecedenceArgs(ToolArgs):
+    path: str = Field(
+        min_length=1,
+        max_length=1_000,
+        description="",
+    )
+
+
 def _run_file_info(args: FileInfoArgs) -> str:
     return file_info(args.path)
+
+
+def _run_config_precedence(args: ConfigPrecedenceArgs) -> str:
+    return inspect_config_precedence(args.path)
 
 
 TOOLS["file_info"] = Tool(
     name="file_info",
     description=(
-        "Report how many lines and bytes a file has, plus its first line and its "
-        "LAST line, WITHOUT returning the file. Use this -- not read_file -- for "
-        "any question about how long or how big a file is, which of two files is "
-        "longer, or what its first or last line says. It is far cheaper than "
-        "read_file and cannot overflow the context. Only use read_file when you "
-        "need the text in the middle of the file."
+        "Report bytes, line count, and first/last lines WITHOUT returning the file. "
+        "Use this, not read_file, for size/length/edge-line questions; read_file for contents."
     ),
     args_model=FileInfoArgs,
     run=_run_file_info,
@@ -725,27 +1251,34 @@ TOOLS["file_info"] = Tool(
 )
 
 
+TOOLS["inspect_config_precedence"] = Tool(
+    name="inspect_config_precedence",
+    description="Read static config layer order.",
+    args_model=ConfigPrecedenceArgs,
+    run=_run_config_precedence,
+    example="",
+    bare_field="path",
+)
+
+
 TOOLS["read_file"] = Tool(
     name="read_file",
     description=(
-        "Read a short text file from the workspace and return it with line numbers. "
-        "Use it when the user asks what is in a file. A file too long to return in "
-        "full is refused outright rather than shortened, because the start of a file "
-        "cannot tell you what the rest of it contains: use file_info for a file's "
-        "size, first line and last line, and search_text to find something inside a "
-        "long one. Paths are relative to the workspace root; files outside it, hidden "
-        "files and credentials cannot be read."
+        "Read workspace text with line numbers. For long files, use JSON path, "
+        "start_line, and end_line to read at most 100 relevant lines; oversized full "
+        "reads are refused, not shortened. Use file_info for size facts and search_text "
+        "to locate text. Outside paths, hidden files, hard links, and credentials are refused."
     ),
     args_model=ReadFileArgs,
     run=_run_read_file,
     example="README.md",
+    bare_field="path",
 )
 
 TOOLS["list_directory"] = Tool(
     name="list_directory",
     description=(
-        "List the files and folders in a workspace directory. Use it to find "
-        "out what exists before reading a file. Defaults to the workspace root."
+        "List workspace entries; defaults to the workspace root."
     ),
     args_model=ListDirectoryArgs,
     run=_run_list_directory,
@@ -755,9 +1288,7 @@ TOOLS["list_directory"] = Tool(
 TOOLS["search_text"] = Tool(
     name="search_text",
     description=(
-        "Find a literal piece of text in the files under a path, returning "
-        "file:line matches. Use it to locate where something is mentioned. "
-        "This is a plain substring search, NOT a regular expression."
+        "Find literal text and return file:line matches. This is substring search, not regex."
     ),
     args_model=SearchTextArgs,
     run=_run_search_text,

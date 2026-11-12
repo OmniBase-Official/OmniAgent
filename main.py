@@ -22,8 +22,8 @@ from agent import (
     model_is_installed,
 )
 from config import DEFAULT_CONFIG_NAME, LOG_LEVELS, ConfigError, render, resolve
-from sandbox import SandboxError, set_workspace, without_own_transcripts
-from tools import TOOLS
+from sandbox import SandboxError, without_own_transcripts, workspace_scope
+from tools import FIXED_TOOL_ALLOWLIST, TOOLS, run_tool
 
 BANNER = r"""
   ___                  _    _                 _
@@ -39,6 +39,7 @@ HELP_TEXT = """
 Commands:
   /help     show this help
   /tools    list the tools the agent can call
+  /tool     run a deterministic tool directly: /tool list_directory .
   /reset    clear the conversation history
   /quit     exit (also: /exit, or Ctrl-C)
 
@@ -86,7 +87,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="omniagent",
         description="A local-only ReAct agent running on Ollama.",
     )
-    parser.add_argument("--ask", metavar="QUESTION", help="Answer one question and exit.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--ask", metavar="QUESTION", help="Answer one question and exit.")
+    mode.add_argument(
+        "--tool",
+        choices=sorted(FIXED_TOOL_ALLOWLIST),
+        help="Run one available tool directly without an LLM request.",
+    )
+    parser.add_argument(
+        "--tool-input",
+        default="",
+        metavar="INPUT",
+        help="Raw input for --tool; omit it for tools with optional or no arguments.",
+    )
     parser.add_argument(
         "--config", type=Path, help=f"Config file to read (default: ./{DEFAULT_CONFIG_NAME})."
     )
@@ -116,7 +129,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--workspace", type=Path, help="Directory the file tools may read inside."
     )
     settings.add_argument(
-        "--log-file", type=Path, help="Append structured JSON-lines logs to this file."
+        "--log-file",
+        type=Path,
+        help="Disabled: persistent log files are not allowed by the privacy policy.",
     )
     settings.add_argument(
         "--log-level", choices=LOG_LEVELS, help="Minimum level for the log (default: INFO)."
@@ -133,7 +148,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Hide the Thought/Action/Observation trace.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.tool_input and args.tool is None:
+        parser.error("--tool-input requires --tool.")
+    return args
 
 
 def cli_settings(args: argparse.Namespace) -> dict[str, object]:
@@ -199,6 +217,16 @@ def answer(agent: ReActAgent, question: str) -> int:
     return 0
 
 
+def direct_tool(name: str, tool_input: str) -> int:
+    """Run a deterministic, allow-listed tool without starting the model."""
+    result = run_tool(name, tool_input)
+    if result.startswith("Error:"):
+        print(Style.red(f"\nOmniAgent: {result}\n"))
+        return 2
+    print(Style.green("\nOmniAgent: ") + result + "\n")
+    return 0
+
+
 def repl(agent: ReActAgent) -> int:
     print(Style.dim(HELP_TEXT))
     while True:
@@ -222,6 +250,17 @@ def repl(agent: ReActAgent) -> int:
             for tool in TOOLS.values():
                 print(f"  {Style.bold(tool.signature)}\n    {tool.description}")
             print()
+            continue
+        if command.startswith("/tool "):
+            request = user_input[len("/tool ") :].strip()
+            name, separator, tool_input = request.partition(" ")
+            if not name:
+                print(Style.red("Usage: /tool <name> [input]"))
+                continue
+            direct_tool(name, tool_input if separator else "")
+            continue
+        if command == "/tool":
+            print(Style.red("Usage: /tool <name> [input]"))
             continue
         if command == "/reset":
             agent.reset()
@@ -268,26 +307,30 @@ def main(argv: list[str] | None = None) -> int:
     except SandboxError as exc:
         print(Style.red(f"[!] {exc}"))
         return 1
-    set_workspace(workspace)
+    with workspace_scope(workspace):
+        print(Style.cyan(BANNER))
+        if args.profile:
+            print(Style.dim(f"    profile  : {args.profile}"))
+        print(Style.dim(f"    workspace: {workspace.root}"))
+        if settings.log_file is not None or settings.log_console:
+            print(Style.dim(f"    session  : {session_id}"))
+            if settings.log_file is not None:
+                print(Style.dim(f"    log      : {settings.log_file}"))
 
-    agent = ReActAgent(
-        config=settings.agent_config(), printer=lambda text: print(Style.dim(text))
-    )
+        if args.tool is not None:
+            return direct_tool(args.tool, args.tool_input)
 
-    print(Style.cyan(BANNER))
-    if args.profile:
-        print(Style.dim(f"    profile  : {args.profile}"))
-    print(Style.dim(f"    workspace: {workspace.root}"))
-    if settings.log_file is not None or settings.log_console:
-        print(Style.dim(f"    session  : {session_id}"))
-        if settings.log_file is not None:
-            print(Style.dim(f"    log      : {settings.log_file}"))
-    if not preflight(agent):
-        return 1
+        agent = ReActAgent(
+            config=settings.agent_config(),
+            printer=lambda text: print(Style.dim(text)),
+            workspace=workspace,
+        )
+        if not preflight(agent):
+            return 1
 
-    if args.ask:
-        return answer(agent, args.ask)
-    return repl(agent)
+        if args.ask:
+            return answer(agent, args.ask)
+        return repl(agent)
 
 
 if __name__ == "__main__":

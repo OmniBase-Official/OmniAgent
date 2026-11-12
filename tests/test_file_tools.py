@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+import main as cli
+import tools
 from agent import AgentConfig, cap_observation
 from sandbox import Workspace, get_workspace, set_workspace
 from tools import list_directory, read_file, run_tool, search_text
@@ -86,6 +88,31 @@ def test_read_file_reaches_a_nested_path(workspace: Workspace) -> None:
     assert "def main() -> int:" in read_file("src/app.py")
 
 
+def test_read_file_accepts_json_ranges_and_preserves_bare_paths(workspace: Workspace) -> None:
+    assert run_tool("read_file", "README.md").startswith("README.md (")
+
+    result = run_tool(
+        "read_file", '{"path":"src/app.py","start_line":1,"end_line":2}'
+    )
+
+    assert "lines 1-2 of 5" in result
+    assert "    1  def main() -> int:" in result
+    assert "    2      return 0" in result
+
+
+def test_read_file_requires_both_range_fields(workspace: Workspace) -> None:
+    result = run_tool("read_file", '{"path":"README.md","start_line":1}')
+
+    assert result.startswith("Error:")
+    assert "provide both start_line and end_line" in result
+
+
+def test_read_file_rejects_malformed_range_json(workspace: Workspace) -> None:
+    result = run_tool("read_file", '{"path":"README.md","start_line":1')
+
+    assert result.startswith("Error: invalid arguments")
+
+
 def test_read_file_reports_an_empty_file(workspace: Workspace) -> None:
     (workspace.root / "blank.txt").write_text("", encoding="utf-8")
     assert read_file("blank.txt") == "blank.txt is empty."
@@ -116,6 +143,29 @@ def test_read_file_refuses_a_directory(workspace: Workspace) -> None:
 
 def test_read_file_reports_a_missing_file(workspace: Workspace) -> None:
     assert read_file("nope.txt").startswith("Error:")
+
+
+def test_direct_cli_tool_mode_skips_model_preflight(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fail_if_called(_agent: object) -> bool:
+        pytest.fail("direct tool mode must not run model preflight")
+
+    monkeypatch.setattr(cli, "preflight", fail_if_called)
+
+    result = cli.main(
+        [
+            "--workspace",
+            str(workspace.root),
+            "--tool",
+            "search_text",
+            "--tool-input",
+            '{"query":"TODO"}',
+        ]
+    )
+
+    assert result == 0
+    assert "2 matches for 'TODO'" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------- #
@@ -183,6 +233,14 @@ def test_search_text_reports_no_match(workspace: Workspace) -> None:
     assert "files searched" in result
 
 
+def test_search_text_suggests_checking_an_empty_or_wrong_directory(workspace: Workspace) -> None:
+    observation = search_text("DEFAULT_MODEL", "missing_source")
+
+    assert "No readable files were found" in observation
+    assert "list_directory" in observation
+    assert "workspace root '.'" in observation
+
+
 def test_search_text_needs_something_to_search_for(workspace: Workspace) -> None:
     assert search_text("   ").startswith("Error: no search text")
 
@@ -223,6 +281,22 @@ def test_search_text_stops_at_the_match_limit(workspace: Workspace) -> None:
 
     assert "stopped at the limit" in result
     assert result.count("many.txt:") == 50
+
+
+def test_search_traversal_limit_discards_partial_matches(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    search_root = workspace.root / "wide"
+    search_root.mkdir()
+    for index in range(8):
+        (search_root / f"{index:02}.txt").write_text("needle\n", encoding="utf-8")
+    monkeypatch.setattr(tools, "MAX_SEARCH_TRAVERSAL_ENTRIES", 4)
+
+    result = search_text("needle", "wide")
+
+    assert result.startswith("Error: search of wide exceeded the 4-entry")
+    assert "no partial matches are shown" in result
+    assert "wide/00.txt:1" not in result
 
 
 # --------------------------------------------------------------------------- #
@@ -285,6 +359,8 @@ def test_a_file_too_long_to_return_intact_is_refused(
 
     assert observation.startswith("Error:")
     assert "line 1" not in observation, "a refusal must not smuggle contents out"
+    assert '"start_line":1' in observation
+    assert '"end_line":20' in observation
     assert "file_info" in observation
     assert "search_text" in observation
 

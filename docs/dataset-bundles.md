@@ -87,6 +87,14 @@ the reason this is a script and not a copy command: the destination is
 removable media, and a dataset is only worth training on if what arrived is
 what was collected.
 
+The publisher checks the destination directory and each output entry for
+symlinks and platform reparse points before writing; regular files from an
+earlier publish can still be overwritten. Verification accepts only
+single-component filenames from `SHA256SUMS` and refuses symlink or reparse
+targets, so a checksum entry cannot read outside the bundle. Verification
+streams that file and caps it at 16 MiB, 4 KiB per line, and 100,000 entries;
+an exceeded cap is an explicit verification error.
+
 ## Do not pool bundles
 
 One bundle, one teacher, one workspace rule, one prompt fingerprint. Exporting

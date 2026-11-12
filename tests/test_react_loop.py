@@ -79,6 +79,39 @@ def test_the_system_prompt_lists_every_tool() -> None:
     assert "get_current_time()" in system
 
 
+def test_default_model_and_cli_override_use_deterministic_evidence() -> None:
+    fake = FakeOpenAI(replies=[])
+    agent = build(fake)
+
+    answer = agent.run("Trace the default model and CLI override.")
+
+    assert fake.calls == []
+    assert agent.last_trace[0].action == "inspect_config_precedence"
+    assert "DEFAULT_MODEL" in answer
+    assert "[defaults].model" in answer
+    assert "parser declares --model" in answer
+    assert "cli_settings forwards args.model" in answer
+    assert "command line" in answer
+
+
+def test_react_agent_preserves_positional_before_model_request_argument() -> None:
+    fake = FakeOpenAI(replies=[])
+
+    def before_request() -> None:
+        return None
+
+    agent = ReActAgent(
+        AgentConfig(verbose=False),
+        lambda _: None,
+        fake.as_client(),
+        {"calculate"},
+        before_request,
+    )
+
+    assert agent.allowed_tools == frozenset({"calculate"})
+    assert agent._before_model_request is before_request
+
+
 def test_an_observation_is_appended_as_a_user_message() -> None:
     fake = FakeOpenAI(replies=[CALL.format(expression="2 + 2"), FINAL.format(answer="4")])
     build(fake).run("What is 2 + 2?")
@@ -281,6 +314,7 @@ def test_the_forced_prompt_tells_the_model_to_stop_asking_for_tools() -> None:
     # Case-insensitive: the clause moved into the middle of the sentence when
     # the prompt was given the question and told to use the Observations.
     assert "do not request another tool" in last.lower()
+    assert "remain unverified instead of guessing" in last.lower()
 
 
 def test_a_stubborn_model_still_yields_something_usable() -> None:

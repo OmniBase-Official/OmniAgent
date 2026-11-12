@@ -5,16 +5,16 @@ on:
   schedule:
     - cron: "0 0 * * *"
 
-permissions:
-  contents: write
-
 jobs:
   update-readme:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
 
     steps:
       - name: Update WakaTime Statistics
-        uses: athul/waka-readme@master
+        # Pin to the reviewed upstream commit; update only after reviewing its action metadata.
+        uses: athul/waka-readme@8991b596d85696d98ea96f775390a1bbe266c8c9
         with:
           WAKATIME_API_KEY: ${{ secrets.WAKATIME_API_KEY }}
           TIME_RANGE: all_time
