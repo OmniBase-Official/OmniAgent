@@ -11,13 +11,18 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
+import holdout_eval
 from eval_scoring import Score
 from promote_model import (
+    MAX_RUN_MANIFEST_BYTES,
+    MAX_RUN_MODELFILE_BYTES,
+    PromotionEvaluationError,
     check_run,
     check_scores,
     main,
     verified_run_gguf,
     verified_run_modelfile,
+    write_evaluation_report,
 )
 
 LIVE_PROMPT = "a" * 64
@@ -81,6 +86,160 @@ def test_run_with_different_prompt_hash_is_refused(tmp_path: Path) -> None:
 
 def test_valid_run_has_no_preflight_reasons(tmp_path: Path) -> None:
     assert check_run(_run_dir(tmp_path)) == []
+
+
+def test_oversized_manifest_is_rejected_by_preflight_and_artifact_binding(
+    tmp_path: Path,
+) -> None:
+    run = _run_dir(tmp_path)
+    (run / "manifest.json").write_bytes(b" " * (MAX_RUN_MANIFEST_BYTES + 1))
+
+    reasons = check_run(run)
+    path, digest, error = verified_run_gguf(run)
+
+    assert any("manifest.json exceeds its " in reason for reason in reasons)
+    assert path is None
+    assert digest is None
+    assert error == "the run manifest exceeds its size limit"
+
+
+def test_oversized_modelfile_is_rejected_before_contents_are_read(tmp_path: Path) -> None:
+    run = _run_dir(tmp_path)
+    (run / "Modelfile").write_bytes(b"X" * (MAX_RUN_MODELFILE_BYTES + 1))
+
+    digest, error = verified_run_modelfile(run)
+
+    assert digest is None
+    assert error == "the run Modelfile exceeds its size limit"
+
+
+@pytest.mark.parametrize("artifact", ["manifest.json", "Modelfile", "model-f16.gguf"])
+@pytest.mark.parametrize("entrypoint", ["promote", "holdout"])
+def test_report_cli_refuses_to_replace_run_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact: str,
+    entrypoint: str,
+) -> None:
+    run = _run_dir(tmp_path)
+    protected = {name: (run / name).read_bytes() for name in (
+        "manifest.json",
+        "Modelfile",
+        "model-f16.gguf",
+    )}
+    report = run / artifact
+    evaluation_calls: list[str] = []
+    subprocess_calls: list[list[str]] = []
+    monkeypatch.setattr(
+        holdout_eval,
+        "evaluate",
+        lambda _model: evaluation_calls.append("evaluate"),
+    )
+    monkeypatch.setattr(
+        "holdout_eval.subprocess.run",
+        lambda argv, **_kwargs: subprocess_calls.append(argv),
+    )
+
+    if entrypoint == "promote":
+        result = main(
+            [
+                str(run),
+                "--tag",
+                "synthetic-tag",
+                "--evaluation-report",
+                str(report),
+                "--record",
+                str(tmp_path / "promoted.json"),
+            ]
+        )
+    else:
+        result = holdout_eval.main(
+            ["--promotion-run", str(run), "--report", str(report)]
+        )
+
+    assert result == 1
+    assert evaluation_calls == []
+    assert subprocess_calls == []
+    assert {name: (run / name).read_bytes() for name in protected} == protected
+
+
+@pytest.mark.parametrize("entrypoint", ["promote", "holdout"])
+def test_report_cli_refuses_symlink_to_outside_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    run = _run_dir(tmp_path)
+    outside = tmp_path / "outside-report-target.json"
+    outside.write_bytes(b"preserve outside target\n")
+    report = tmp_path / "report-link.json"
+    try:
+        report.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"file symlinks are unavailable: {exc}")
+    source_artifacts = {
+        name: (run / name).read_bytes()
+        for name in ("manifest.json", "Modelfile", "model-f16.gguf")
+    }
+    subprocess_calls: list[list[str]] = []
+    monkeypatch.setattr("holdout_eval.evaluate", lambda _model: pytest.fail("evaluation ran"))
+    monkeypatch.setattr(
+        "holdout_eval.subprocess.run",
+        lambda argv, **_kwargs: subprocess_calls.append(argv),
+    )
+
+    if entrypoint == "promote":
+        result = main(
+            [
+                str(run),
+                "--tag",
+                "synthetic-tag",
+                "--evaluation-report",
+                str(report),
+                "--record",
+                str(tmp_path / "promoted.json"),
+            ]
+        )
+    else:
+        result = holdout_eval.main(
+            ["--promotion-run", str(run), "--report", str(report)]
+        )
+
+    assert result == 1
+    assert subprocess_calls == []
+    assert outside.read_bytes() == b"preserve outside target\n"
+    assert {name: (run / name).read_bytes() for name in source_artifacts} == source_artifacts
+
+
+def test_report_writer_does_not_overwrite_existing_destination(tmp_path: Path) -> None:
+    run = _run_dir(tmp_path)
+    report = tmp_path / "existing-report.json"
+    report.write_bytes(b"keep this file\n")
+
+    with pytest.raises(PromotionEvaluationError, match="already exists"):
+        write_evaluation_report(report, run, Score(correct=12, checkable=16))
+
+    assert report.read_bytes() == b"keep this file\n"
+
+
+def test_report_writer_refuses_symlinked_parent_without_creating_outside_file(
+    tmp_path: Path,
+) -> None:
+    run = _run_dir(tmp_path)
+    outside = tmp_path / "outside-directory"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+    with pytest.raises(PromotionEvaluationError, match="symlink or reparse point"):
+        write_evaluation_report(
+            linked_parent / "new-report.json", run, Score(correct=12, checkable=16)
+        )
+
+    assert list(outside.iterdir()) == []
 
 
 @pytest.mark.parametrize(

@@ -36,6 +36,7 @@ from eval_workspace import sealed_workspace
 from promote_model import (
     PromotionEvaluationError,
     check_run,
+    validate_evaluation_report_path,
     verified_run_gguf,
     verified_run_modelfile,
     write_evaluation_report,
@@ -186,6 +187,8 @@ def evaluate(model: str) -> Score:
 
 def evaluate_promotion_run(run: Path, report_path: Path | None = None) -> Score:
     """Evaluate this run's GGUF under a temporary tag and return its live score."""
+    if report_path is not None:
+        validate_evaluation_report_path(report_path, run)
     reasons = check_run(run)
     if reasons:
         raise ValueError("run did not pass promotion preflight")

@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import stat
 import subprocess
@@ -48,6 +49,8 @@ RECORD = PROJECT / "models" / "promoted.json"
 DEFAULT_FLOOR: Mapping[str, int] = {"correct": 12}
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _GGUF_BASENAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.gguf\Z")
+MAX_RUN_MANIFEST_BYTES = 1 * 1024 * 1024
+MAX_RUN_MODELFILE_BYTES = 64 * 1024
 _EXPECTED_TEMPLATE = (
     'TEMPLATE """{ if .System }<|im_start|>system\n'
     "{ .System }<|im_end|>\n"
@@ -61,6 +64,62 @@ _EXPECTED_TEMPLATE = (
 
 class PromotionEvaluationError(RuntimeError):
     """A fixed, safe-to-display reason a holdout run cannot authorize promotion."""
+
+
+class _InputTooLargeError(ValueError):
+    """Raised when a preflight input exceeds its explicit byte limit."""
+
+
+def _read_limited(path: Path, limit: int) -> bytes:
+    """Read at most one byte beyond ``limit`` to bound untrusted preflight input."""
+    with path.open("rb") as handle:
+        content = handle.read(limit + 1)
+    if len(content) > limit:
+        raise _InputTooLargeError
+    return content
+
+
+def _is_link_or_reparse_point(metadata: os.stat_result) -> bool:
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(metadata, "st_file_attributes", 0) & reparse_attribute)
+
+
+def validate_evaluation_report_path(path: Path, run: Path) -> Path:
+    """Refuse reports that overwrite run files or traverse link-like paths."""
+    try:
+        # resolve() would hide the symlink components this check must reject.
+        destination = Path(os.path.abspath(path))  # noqa: PTH100
+        resolved_run = run.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise PromotionEvaluationError(
+            "evaluation report destination cannot be inspected safely"
+        ) from exc
+
+    if destination.is_relative_to(resolved_run):
+        raise PromotionEvaluationError(
+            "evaluation report destination must be outside the promotion run"
+        )
+
+    for component in (destination, *destination.parents):
+        try:
+            metadata = component.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise PromotionEvaluationError(
+                "evaluation report destination cannot be inspected safely"
+            ) from exc
+        if _is_link_or_reparse_point(metadata):
+            raise PromotionEvaluationError(
+                "evaluation report destination traverses a symlink or reparse point"
+            )
+        if component == destination:
+            raise PromotionEvaluationError(
+                "evaluation report destination already exists; refusing to overwrite"
+            )
+    return destination
 
 
 def _ollama_create(tag: str, run: Path) -> None:
@@ -86,8 +145,14 @@ def _sha256_file(path: Path) -> str:
 def verified_run_gguf(run: Path) -> tuple[Path | None, str | None, str | None]:
     """Return the in-run GGUF and verified digest, or a fixed refusal reason."""
     try:
-        manifest = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        manifest_bytes = _read_limited(run / "manifest.json", MAX_RUN_MANIFEST_BYTES)
+    except _InputTooLargeError:
+        return None, None, "the run manifest exceeds its size limit"
+    except OSError:
+        return None, None, "the run manifest cannot bind evaluation to a GGUF"
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
         return None, None, "the run manifest cannot bind evaluation to a GGUF"
     if not isinstance(manifest, dict):
         return None, None, "the run manifest cannot bind evaluation to a GGUF"
@@ -132,8 +197,10 @@ def verified_run_modelfile(run: Path) -> tuple[str | None, str | None]:
             or not stat.S_ISREG(resolved_modelfile.stat().st_mode)
         ):
             return None, "the run Modelfile must be a regular file inside the run directory"
-        modelfile_bytes = resolved_modelfile.read_bytes()
+        modelfile_bytes = _read_limited(resolved_modelfile, MAX_RUN_MODELFILE_BYTES)
         modelfile_text = modelfile_bytes.decode("utf-8").replace("\r\n", "\n")
+    except _InputTooLargeError:
+        return None, "the run Modelfile exceeds its size limit"
     except (OSError, UnicodeError, RuntimeError):
         return None, "the run Modelfile cannot be verified"
     expected = (
@@ -160,8 +227,26 @@ def write_evaluation_report(path: Path, run: Path, score: Score) -> None:
             "error_count": len(score.errors),
         },
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    destination = validate_evaluation_report_path(path, run)
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise PromotionEvaluationError(
+            "evaluation report destination cannot be prepared safely"
+        ) from exc
+    destination = validate_evaluation_report_path(destination, run)
+    serialized = json.dumps(payload, indent=2) + "\n"
+    try:
+        with destination.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(serialized)
+    except FileExistsError as exc:
+        raise PromotionEvaluationError(
+            "evaluation report destination already exists; refusing to overwrite"
+        ) from exc
+    except OSError as exc:
+        raise PromotionEvaluationError(
+            "evaluation report could not be written safely"
+        ) from exc
 
 
 def check_run(run: Path) -> list[str]:
@@ -174,8 +259,14 @@ def check_run(run: Path) -> list[str]:
         return [f"{run.name} has no manifest.json, so nothing about it can be checked"]
 
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        manifest_bytes = _read_limited(manifest_path, MAX_RUN_MANIFEST_BYTES)
+    except _InputTooLargeError:
+        return [f"{manifest_path.name} exceeds its {MAX_RUN_MANIFEST_BYTES}-byte size limit"]
+    except OSError:
+        return [f"{manifest_path.name} is unreadable or is not valid JSON"]
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
         return [f"{manifest_path.name} is unreadable or is not valid JSON"]
     if not isinstance(manifest, dict):
         return [f"{manifest_path.name} must contain a JSON object"]
