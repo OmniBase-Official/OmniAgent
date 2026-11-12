@@ -589,6 +589,23 @@ which is Apache-2.0. The 3B of the same family is released under a different,
 more restrictive licence. Read the model card of whatever you put in
 `BASE_MODEL` before you train, not after.
 
+### Promotion gate
+
+Promotion runs the held-out evaluator against the exact run artifact by
+staging its GGUF under a temporary Ollama tag, running the holdout suite, and
+removing the temporary tag. The returned in-process score is checked before
+the promoted tag is created. An optional JSON report is for review only and
+is never read as authorization to promote:
+
+```bash
+python scripts/promote_model.py models/runs/<run> --tag omniagent --evaluation-report models/runs/<run>/holdout-report.json
+```
+
+The optional report records only score totals, error count, and run name.
+Promotion refuses evaluation failures, failed temporary-tag cleanup, errored
+scores, and below-floor scores. The `correct` floor remains 12 and
+`checkable` must be nonzero.
+
 ### What is actually verified
 
 Running the notebook needs a GPU, a 3 GB download and a quarter of an hour, so
