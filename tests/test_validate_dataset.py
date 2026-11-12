@@ -186,6 +186,36 @@ def test_deeply_nested_json_is_reported_as_a_validation_error(tmp_path: Path) ->
     assert any("JSON nesting is too deep" in error for error in report.errors)
 
 
+def test_json_nesting_is_rejected_before_generic_missing_messages_error(
+    tmp_path: Path,
+) -> None:
+    depth = validate_dataset.MAX_JSON_NESTING + 1
+    path = tmp_path / "nested-root.jsonl"
+    path.write_text("[" * depth + "0" + "]" * depth + "\n", encoding="utf-8")
+
+    report = validate_file(path)
+
+    assert any("JSON nesting is too deep" in error for error in report.errors)
+    assert not any("missing a 'messages' key" in error for error in report.errors)
+
+
+def test_json_nesting_check_ignores_brackets_inside_strings(tmp_path: Path) -> None:
+    record = clean()
+    record["metadata"] = {
+        "plain": "[" * (validate_dataset.MAX_JSON_NESTING * 2)
+        + "]" * (validate_dataset.MAX_JSON_NESTING * 2),
+        "escaped_quote": 'before " ['
+        + "{" * (validate_dataset.MAX_JSON_NESTING * 2)
+        + "} after",
+    }
+    path = write(tmp_path / "brackets-in-strings.jsonl", [record])
+
+    report = validate_file(path, min_examples=1)
+
+    assert report.ok
+    assert report.errors == []
+
+
 def test_invalid_utf8_is_reported_as_a_validation_error(tmp_path: Path) -> None:
     path = tmp_path / "invalid-utf8.jsonl"
     path.write_bytes(b'{"messages": []}\n\xff\n')

@@ -46,6 +46,7 @@ renames or deletes -- these tools are read-only by construction.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -388,7 +389,7 @@ class Workspace:
                 continue  # an outside symlink must not disclose even metadata
             if self._is_unnameable(resolved):
                 continue  # naming it is a pointer to what it holds
-            label_name = child.name.encode("utf-8", errors="replace").decode("utf-8")
+            label_name = os.fsencode(child.name).decode("utf-8", errors="replace")
             if resolved.is_dir():
                 entries.append((0, child.name, f"{label_name}/"))
             elif resolved.is_file():

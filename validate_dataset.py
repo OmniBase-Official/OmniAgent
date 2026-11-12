@@ -41,6 +41,7 @@ MAX_DATASET_BYTES = 256 * 1024 * 1024
 MAX_DATASET_LINE_BYTES = 4 * 1024 * 1024
 MAX_DATASET_EXAMPLES = 100_000
 MAX_DATASET_LINES = 1_000_000
+MAX_JSON_NESTING = 128
 
 VALID_ROLES = frozenset({"system", "user", "assistant"})
 
@@ -154,6 +155,34 @@ def check_shape(messages: Any, where: str) -> list[str]:
     return problems
 
 
+def _json_nesting_is_too_deep(text: str) -> bool:
+    """Bound JSON container depth before parsing an untrusted dataset line."""
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for character in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > MAX_JSON_NESTING:
+                return True
+        elif character in "]}" and depth:
+            depth -= 1
+
+    return False
+
+
 def validate_file(  # noqa: PLR0912, PLR0915 - one branch per validation failure mode
     path: Path, *, min_examples: int = DEFAULT_MIN_EXAMPLES
 ) -> Report:
@@ -216,6 +245,10 @@ def validate_file(  # noqa: PLR0912, PLR0915 - one branch per validation failure
                     )
                     break
                 where = f"line {number}"
+
+                if _json_nesting_is_too_deep(line):
+                    report.errors.append(f"{where}: JSON nesting is too deep")
+                    continue
 
                 try:
                     example = json.loads(line)
