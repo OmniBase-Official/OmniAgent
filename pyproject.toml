@@ -53,6 +53,7 @@ py-modules = [
     "export_dataset",
     "dataset_provenance",
     "sandbox",
+    "securefs",
     "validate_dataset",
     "config",
 ]
@@ -73,6 +74,7 @@ files = [
     "observability.py",
     "export_dataset.py",
     "sandbox.py",
+    "securefs.py",
     "validate_dataset.py",
     "config.py",
     "dataset_provenance.py",

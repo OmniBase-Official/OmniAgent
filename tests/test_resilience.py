@@ -10,12 +10,14 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import pytest
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 from agent import AgentConfig, AgentError, ReActAgent
+from sandbox import Workspace
 from tests.fakes import FakeOpenAI
 from tests.log_capture import configure_memory_sink, read_lines, reset_capture
 
@@ -48,7 +50,12 @@ def events_named(path: Path, name: str) -> list[dict[str, Any]]:
 def build(fake: FakeOpenAI, **overrides: Any) -> ReActAgent:
     overrides.setdefault("retry_backoff", 0.0)
     config = AgentConfig(verbose=False, **overrides)
-    return ReActAgent(config=config, client=fake.as_client(), printer=lambda _: None)
+    return ReActAgent(
+        config=config,
+        client=fake.as_client(),
+        printer=lambda _: None,
+        workspace=Workspace.at(Path.cwd()),
+    )
 
 
 def connection_error() -> APIConnectionError:
@@ -176,6 +183,133 @@ def test_the_backoff_doubles_while_retry_events_stay_sanitized(
     assert len(retries) == 2
     assert delays == [0.5, 1.0]
     assert all(set(record) <= {"record_type", "event", "runtime_version"} for record in retries)
+
+
+def test_the_absolute_request_deadline_is_shared_by_all_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClock:
+        now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def sleep(self, delay: float) -> None:
+            self.now += delay
+
+    clock = FakeClock()
+    monkeypatch.setattr("agent.time.monotonic", clock.monotonic)
+    monkeypatch.setattr("agent.time.sleep", clock.sleep)
+    fake = FakeOpenAI(completion_error=connection_error())
+    agent = build(fake, timeout=0.75, max_retries=5, retry_backoff=0.5)
+
+    with pytest.raises(AgentError, match="deadline exceeded"):
+        agent.run("hi")
+
+    assert len(fake.calls) == 2
+    assert [call["timeout"] for call in fake.calls] == [0.75, 0.25]
+    assert clock.now == 0.75
+
+
+def test_slow_model_error_past_deadline_does_not_start_another_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClock:
+        now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+    clock = FakeClock()
+    monkeypatch.setattr("agent.time.monotonic", clock.monotonic)
+    fake = FakeOpenAI()
+    agent = build(fake, timeout=1.0, max_retries=5, retry_backoff=0.0)
+    calls = 0
+
+    def slow_failure(**kwargs: Any) -> Any:
+        nonlocal calls
+        _ = kwargs
+        calls += 1
+        clock.now = 1.1
+        raise connection_error()
+
+    monkeypatch.setattr(agent, "_create_completion", slow_failure)
+
+    with pytest.raises(AgentError, match="deadline exceeded"):
+        agent.run("hi")
+
+    assert calls == 1
+
+
+def test_cancellation_during_backoff_prevents_another_model_attempt() -> None:
+    class CancelDuringWait(Event):
+        def wait(self, timeout: float | None = None) -> bool:
+            self.set()
+            return super().wait(timeout=timeout)
+
+    cancellation = CancelDuringWait()
+    fake = FakeOpenAI(completion_error=connection_error())
+    agent = build(fake, max_retries=5, retry_backoff=1.0)
+
+    with pytest.raises(AgentError, match="cancelled"):
+        agent.run("hi", cancel_event=cancellation)
+
+    assert len(fake.calls) == 1
+
+
+def test_deadline_expiring_during_model_response_prevents_tool_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClock:
+        now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+    clock = FakeClock()
+    monkeypatch.setattr("agent.time.monotonic", clock.monotonic)
+    fake = FakeOpenAI(
+        replies=["Thought: read the file\nAction: read_file\nAction Input: README.md"]
+    )
+    fake.completions.after_create = lambda: setattr(clock, "now", 1.1)
+    agent = build(fake, timeout=1.0, allowed_tools={"read_file"})
+    calls: list[str] = []
+
+    def record_dispatch(*args: Any, **kwargs: Any) -> str:
+        _ = args, kwargs
+        calls.append("called")
+        return "ok"
+
+    monkeypatch.setattr("agent.run_tool", record_dispatch)
+
+    with pytest.raises(AgentError, match="deadline exceeded"):
+        agent.run("read README")
+
+    assert len(fake.calls) == 1
+    assert calls == []
+
+
+def test_cancellation_after_model_response_prevents_tool_dispatch() -> None:
+    cancellation = Event()
+    fake = FakeOpenAI(
+        replies=["Thought: read the file\nAction: read_file\nAction Input: README.md"]
+    )
+    fake.completions.after_create = cancellation.set
+    agent = build(fake, allowed_tools={"read_file"})
+    dispatched: list[str] = []
+
+    def record_dispatch(*args: Any, **kwargs: Any) -> str:
+        _ = args, kwargs
+        dispatched.append("called")
+        return "ok"
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("agent.run_tool", record_dispatch)
+        with pytest.raises(AgentError, match="cancelled"):
+            agent.run("read README", cancel_event=cancellation)
+
+    assert len(fake.calls) == 1
+    assert dispatched == []
 
 
 def test_a_successful_first_attempt_logs_no_retry(log_file: Path) -> None:

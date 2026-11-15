@@ -85,7 +85,7 @@ def test_a_clean_dataset_passes(tmp_path: Path) -> None:
         ),
         (
             [{"role": "system", "content": SYSTEM}, {"role": "wizard", "content": "hi"}],
-            "has role 'wizard'",
+            "invalid role",
         ),
         (
             [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "   "}],
@@ -119,6 +119,85 @@ def test_a_line_without_messages_is_an_error(tmp_path: Path) -> None:
 
     assert not report.ok
     assert any("missing a 'messages' key" in error for error in report.errors)
+
+
+def test_duplicate_top_level_messages_key_is_rejected(tmp_path: Path) -> None:
+    secret = clean()
+    secret["messages"][1]["content"] = "API_KEY=sk-abcdefghijklmnop12345"
+    raw = (
+        '{"messages":'
+        + json.dumps(secret["messages"])
+        + ',"messages":'
+        + json.dumps(clean()["messages"])
+        + "}\n"
+    )
+    path = tmp_path / "duplicate-top-level.jsonl"
+    path.write_text(raw, encoding="utf-8")
+
+    report = validate_file(path, min_examples=1)
+
+    assert not report.ok
+    assert report.examples == 0
+    assert any("duplicate object key" in error for error in report.errors)
+
+
+def test_validator_cli_does_not_echo_secret_from_invalid_role(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    poisoned = clean()
+    credential_text = "API_KEY=sk-abcdefghijklmnop12345"
+    poisoned["messages"][1]["role"] = credential_text
+    path = write(tmp_path / "secret-role.jsonl", [poisoned])
+
+    result = main([str(path), "--min-examples", "1"])
+
+    assert result == 1
+    assert credential_text not in capsys.readouterr().out
+
+
+def test_duplicate_nested_content_key_is_rejected(tmp_path: Path) -> None:
+    messages = clean()["messages"]
+    duplicate_assistant = (
+        '{"role":"assistant","content":"API_KEY=sk-abcdefghijklmnop12345",'
+        '"content":"Final Answer: safe"}'
+    )
+    raw = (
+        '{"messages":['
+        + json.dumps(messages[0])
+        + ","
+        + json.dumps(messages[1])
+        + ","
+        + duplicate_assistant
+        + "]}\n"
+    )
+    path = tmp_path / "duplicate-nested.jsonl"
+    path.write_text(raw, encoding="utf-8")
+
+    report = validate_file(path, min_examples=1)
+
+    assert not report.ok
+    assert report.examples == 0
+    assert any("duplicate object key" in error for error in report.errors)
+
+
+@pytest.mark.parametrize("location", ["top-level", "message"])
+def test_secret_in_unsupported_fields_is_refused_without_echoing_value(
+    tmp_path: Path, location: str
+) -> None:
+    poisoned = clean()
+    credential_text = "API_KEY=sk-abcdefghijklmnop12345"
+    if location == "top-level":
+        poisoned["metadata"] = credential_text
+    else:
+        poisoned["messages"][1]["metadata"] = credential_text
+    path = write(tmp_path / f"extra-{location}-field.jsonl", [poisoned])
+
+    report = validate_file(path, min_examples=1)
+    rendered = report.render()
+
+    assert not report.ok
+    assert "unsupported" in rendered
+    assert credential_text not in rendered
 
 
 def test_an_empty_dataset_is_refused(tmp_path: Path) -> None:
@@ -201,13 +280,13 @@ def test_json_nesting_is_rejected_before_generic_missing_messages_error(
 
 def test_json_nesting_check_ignores_brackets_inside_strings(tmp_path: Path) -> None:
     record = clean()
-    record["metadata"] = {
-        "plain": "[" * (validate_dataset.MAX_JSON_NESTING * 2)
-        + "]" * (validate_dataset.MAX_JSON_NESTING * 2),
-        "escaped_quote": 'before " ['
+    record["messages"][1]["content"] = (
+        "[" * (validate_dataset.MAX_JSON_NESTING * 2)
+        + ' before " '
         + "{" * (validate_dataset.MAX_JSON_NESTING * 2)
-        + "} after",
-    }
+        + "} after "
+        + "]" * (validate_dataset.MAX_JSON_NESTING * 2)
+    )
     path = write(tmp_path / "brackets-in-strings.jsonl", [record])
 
     report = validate_file(path, min_examples=1)

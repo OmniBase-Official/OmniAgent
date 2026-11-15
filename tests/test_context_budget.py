@@ -20,8 +20,8 @@ from typing import Any
 import pytest
 
 import observability as obs
-from agent import AgentConfig, ReActAgent, cap_observation
-from sandbox import SandboxError, Workspace, get_workspace, set_workspace
+from agent import MAX_QUESTION_BYTES, AgentConfig, ReActAgent, cap_observation
+from sandbox import SandboxError, Workspace, workspace_scope
 from tests.fakes import FakeOpenAI
 from tests.log_capture import configure_memory_sink, read_lines, reset_capture
 from tools import describe_tools, file_info, run_tool
@@ -39,7 +39,12 @@ def _clean_logging() -> Iterator[None]:
 def build(fake: FakeOpenAI, **overrides: Any) -> ReActAgent:
     overrides.setdefault("retry_backoff", 0.0)
     config = AgentConfig(verbose=False, **overrides)
-    return ReActAgent(config=config, client=fake.as_client(), printer=lambda _: None)
+    return ReActAgent(
+        config=config,
+        client=fake.as_client(),
+        printer=lambda _: None,
+        workspace=Workspace.at(Path.cwd()),
+    )
 
 
 def sent(fake: FakeOpenAI, call: int = 0) -> list[dict[str, Any]]:
@@ -162,16 +167,17 @@ def test_the_question_survives_being_surrounded_by_bulk() -> None:
 
 
 def test_the_newest_message_is_clipped_only_as_a_last_resort() -> None:
-    """A question too big for the window on its own still gets sent, clipped."""
+    """An allowed question too big for the window still gets clipped."""
     fake = FakeOpenAI(replies=[FINAL])
     agent = build(fake, context_window=1024)
+    question = "x" * MAX_QUESTION_BYTES
 
-    agent.run("x" * 30_000)
+    agent.run(question)
 
     contents = [str(m["content"]) for m in sent(fake)]
     assert contents[0].startswith("You are OmniAgent")
     assert contents[-1].endswith("[clipped to fit the context window]")
-    assert len(contents[-1]) < 30_000
+    assert len(contents[-1]) < len(question)
 
 
 def test_trimming_emits_only_closed_schema_telemetry(tmp_path: Path) -> None:
@@ -226,10 +232,8 @@ def workspace(tmp_path: Path) -> Iterator[Workspace]:
     (root / "sub").mkdir()
 
     installed = Workspace.at(root)
-    original = get_workspace()
-    set_workspace(installed)
-    yield installed
-    set_workspace(original)
+    with workspace_scope(installed):
+        yield installed
 
 
 def test_file_info_reports_lines_and_bytes(workspace: Workspace) -> None:
@@ -423,6 +427,7 @@ def test_the_console_trace_shows_what_the_model_was_given(
         config=AgentConfig(verbose=True, retry_backoff=0.0),
         client=fake.as_client(),
         printer=printed.append,
+        workspace=workspace,
     )
 
     agent.run("Where is the needle in big.py?")

@@ -164,10 +164,7 @@ def calculate(expression: str) -> str:
     try:
         tree = ast.parse(expression, mode="eval")
     except SyntaxError as exc:
-        return (
-            f"Error: could not parse {expression!r} as an arithmetic "
-            f"expression ({exc.msg})."
-        )
+        return f"Error: could not parse {expression!r} as an arithmetic " f"expression ({exc.msg})."
 
     try:
         result = _eval_node(tree)
@@ -183,7 +180,6 @@ def calculate(expression: str) -> str:
     elif isinstance(result, float):
         result = round(result, 10)
     return f"{expression} = {result}"
-
 
 
 # --------------------------------------------------------------------------- #
@@ -221,9 +217,7 @@ class CalculateArgs(ToolArgs):
     expression: str = Field(
         min_length=1,
         max_length=_MAX_EXPRESSION_LEN,
-        description=(
-            "The arithmetic expression to evaluate, e.g. '(1250 * 0.07) + sqrt(144)'."
-        ),
+        description=("The arithmetic expression to evaluate, e.g. '(1250 * 0.07) + sqrt(144)'."),
     )
 
 
@@ -234,6 +228,7 @@ class NoArgs(ToolArgs):
 # --------------------------------------------------------------------------- #
 # registry
 # --------------------------------------------------------------------------- #
+
 
 def _type_name(annotation: object) -> str:
     return str(getattr(annotation, "__name__", annotation))
@@ -319,9 +314,7 @@ class ToolArgumentError(ValueError):
 
 #: What a model writes when it means "this tool takes nothing". Canonical here
 #: rather than in the agent, so run_tool() is correct when called on its own.
-NO_ARG_INPUTS = frozenset(
-    {"", "none", "null", "n/a", "na", "-", "nothing", "()", "no input"}
-)
+NO_ARG_INPUTS = frozenset({"", "none", "null", "n/a", "na", "-", "nothing", "()", "no input"})
 
 
 # --------------------------------------------------------------------------- #
@@ -353,8 +346,7 @@ def describe_tools() -> str:
             block += f"\n  Arguments:\n{fields}"
         if tool.example:
             block += (
-                f"\n  Example -> Action: {tool.name}"
-                f"\n             Action Input: {tool.example}"
+                f"\n  Example -> Action: {tool.name}" f"\n             Action Input: {tool.example}"
             )
         blocks.append(block)
     return "\n".join(blocks)
@@ -585,9 +577,7 @@ def _iter_search_files(start: Path, workspace: Workspace) -> Iterator[Path]:
             yield candidate
 
 
-def read_file(
-    path: str, start_line: int | None = None, end_line: int | None = None
-) -> str:
+def read_file(path: str, start_line: int | None = None, end_line: int | None = None) -> str:
     """Return a file's contents, numbered by line, from inside the workspace."""
     workspace = get_workspace()
     if (start_line is None) != (end_line is None):
@@ -607,21 +597,17 @@ def read_file(
         return ranged_text
 
     try:
-        text = workspace.read_text(path)
+        text, size, shown = workspace.read_text_with_metadata(path)
     except SandboxError as exc:
         return f"Error: {exc}"
     except OSError as exc:
         return f"Error: could not read {path!r}: {exc.strerror or exc}"
 
-    resolved = workspace.resolve(path)
-    shown = workspace.display(resolved)
     if not text.strip():
         return f"{shown} is empty."
 
     lines = text.splitlines()
     numbered = "\n".join(f"{number:>5}  {line}" for number, line in enumerate(lines, start=1))
-    size = resolved.stat().st_size
-
     # State the line count rather than leaving the model to work it out. Asked
     # how many lines a 278-line file had, a 1.5B model read the whole thing and
     # answered 10,306 -- the number was in the output and it still guessed.
@@ -638,8 +624,8 @@ def read_file(
     return (
         f"Error: {shown} is {size_phrase}, too long to return in full. Reading the "
         f"start of it would not tell you what the rest contains. For a relevant section, "
-        f"use read_file with JSON like {{\"path\":\"file.py\",\"start_line\":1,"
-        f"\"end_line\":20}}. Use file_info for size or line facts and search_text "
+        f'use read_file with JSON like {{"path":"file.py","start_line":1,'
+        f'"end_line":20}}. Use file_info for size or line facts and search_text '
         f"to locate relevant text."
     )
 
@@ -675,10 +661,11 @@ def search_text(  # noqa: PLR0912 - a guard per thing that can go wrong in a wal
 
     try:
         start = workspace.resolve(path or ".")
+        start_exists = workspace.secure_exists(workspace.display(start))
     except SandboxError as exc:
         return f"Error: {exc}"
 
-    if not start.exists():
+    if not start_exists:
         return (
             f"No match for {needle!r} in {workspace.display(start)} (0 files searched). "
             "No readable files were found under this path. Check it with list_directory "
@@ -691,28 +678,23 @@ def search_text(  # noqa: PLR0912 - a guard per thing that can go wrong in a wal
     lowered = needle.lower()
 
     try:
-        for candidate in _iter_search_files(start, workspace):
+        for candidate in workspace.secure_files(
+            workspace.display(start), max_entries=MAX_SEARCH_TRAVERSAL_ENTRIES
+        ):
             if len(matches) >= MAX_SEARCH_MATCHES:
                 break
             if scanned >= MAX_SEARCH_FILES:
                 file_limit_hit = True
                 break
             try:
-                resolved = workspace.resolve(workspace.display(candidate))
-            except SandboxError:
-                continue  # hidden, denied, or escaping: skip quietly
-            if resolved.stat().st_size > workspace.max_file_bytes:
+                blob = workspace.read_bytes(workspace.display(candidate))
+            except (OSError, SandboxError):
                 continue
-
             scanned += 1
-            try:
-                blob = resolved.read_bytes()
-            except OSError:
-                continue
             if b"\0" in blob[:_BINARY_SNIFF_BYTES]:
                 continue
 
-            shown = workspace.display(resolved)
+            shown = workspace.display(candidate)
             for number, line in enumerate(
                 blob.decode("utf-8", errors="replace").splitlines(), start=1
             ):
@@ -726,6 +708,14 @@ def search_text(  # noqa: PLR0912 - a guard per thing that can go wrong in a wal
             f"{MAX_SEARCH_TRAVERSAL_ENTRIES:,}-entry traversal limit; "
             "no partial matches are shown. Narrow the search path."
         )
+    except OverflowError:
+        return (
+            f"Error: search of {workspace.display(start)} exceeded the "
+            f"{MAX_SEARCH_TRAVERSAL_ENTRIES:,}-entry traversal limit; "
+            "no partial matches are shown. Narrow the search path."
+        )
+    except SandboxError as exc:
+        return f"Error: {exc}"
     except OSError as exc:
         return f"Error: could not walk {workspace.display(start)}: {exc.strerror or exc}"
 
@@ -800,9 +790,7 @@ def _run_search_text(args: SearchTextArgs) -> str:
     return search_text(args.query, args.path)
 
 
-def _named_assignment(
-    statement: ast.stmt, name: str
-) -> tuple[ast.expr, ast.expr] | None:
+def _named_assignment(statement: ast.stmt, name: str) -> tuple[ast.expr, ast.expr] | None:
     if (
         isinstance(statement, ast.Assign)
         and len(statement.targets) == 1
@@ -889,8 +877,7 @@ def _is_model_mapping(node: ast.AST) -> bool:
     if not any(
         isinstance(generator.iter, ast.Tuple)
         and any(
-            isinstance(item, ast.Constant) and item.value == "model"
-            for item in generator.iter.elts
+            isinstance(item, ast.Constant) and item.value == "model" for item in generator.iter.elts
         )
         and isinstance(generator.target, ast.Name)
         and generator.target.id == target_name
@@ -922,8 +909,7 @@ def _cli_model_lines(source: str) -> tuple[int, int, int]:
     module = ast.parse(source)
     named_functions = {
         name: [
-            node for node in module.body
-            if isinstance(node, ast.FunctionDef) and node.name == name
+            node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == name
         ]
         for name in ("parse_args", "cli_settings", "main")
     }
@@ -945,18 +931,19 @@ def _cli_model_lines(source: str) -> tuple[int, int, int]:
         and statement.value.func.value.id == "argparse"
     ]
     parser_binding = None
-    if (
-        len(parser_creations) == 1
-        and isinstance(parser_creations[0].targets[0], ast.Name)
-    ):
+    if len(parser_creations) == 1 and isinstance(parser_creations[0].targets[0], ast.Name):
         parser_binding = parser_creations[0].targets[0].id
-    parser_assignments = [
-        node
-        for node in ast.walk(parse_function)
-        if isinstance(node, ast.Name)
-        and node.id == parser_binding
-        and isinstance(node.ctx, ast.Store)
-    ] if parser_binding is not None else []
+    parser_assignments = (
+        [
+            node
+            for node in ast.walk(parse_function)
+            if isinstance(node, ast.Name)
+            and node.id == parser_binding
+            and isinstance(node.ctx, ast.Store)
+        ]
+        if parser_binding is not None
+        else []
+    )
     parser_groups = [
         statement
         for statement in parse_function.body
@@ -975,13 +962,17 @@ def _cli_model_lines(source: str) -> tuple[int, int, int]:
         if len(parser_groups) == 1 and isinstance(parser_groups[0].targets[0], ast.Name)
         else None
     )
-    group_bindings = [
-        node
-        for node in ast.walk(parse_function)
-        if isinstance(node, ast.Name)
-        and node.id == group_binding
-        and isinstance(node.ctx, ast.Store)
-    ] if group_binding is not None else []
+    group_bindings = (
+        [
+            node
+            for node in ast.walk(parse_function)
+            if isinstance(node, ast.Name)
+            and node.id == group_binding
+            and isinstance(node.ctx, ast.Store)
+        ]
+        if group_binding is not None
+        else []
+    )
     flags = [
         statement.value
         for statement in parse_function.body
@@ -992,13 +983,10 @@ def _cli_model_lines(source: str) -> tuple[int, int, int]:
         and isinstance(statement.value.func.value, ast.Name)
         and statement.value.func.value.id in {parser_binding, group_binding}
         and any(
-            isinstance(arg, ast.Constant) and arg.value == "--model"
-            for arg in statement.value.args
+            isinstance(arg, ast.Constant) and arg.value == "--model" for arg in statement.value.args
         )
     ]
-    cli_parameters = [
-        argument.arg for argument in cli_function.args.args
-    ]
+    cli_parameters = [argument.arg for argument in cli_function.args.args]
     comprehensions = [node for node in ast.walk(cli_function) if isinstance(node, ast.DictComp)]
     mappings = [node for node in comprehensions if _is_model_mapping(node)]
     model_mapping_assignments = [
@@ -1044,8 +1032,7 @@ def _cli_model_lines(source: str) -> tuple[int, int, int]:
     ]
     parsed_binding = (
         parse_results[0].targets[0].id
-        if len(parse_results) == 1
-        and isinstance(parse_results[0].targets[0], ast.Name)
+        if len(parse_results) == 1 and isinstance(parse_results[0].targets[0], ast.Name)
         else None
     )
     parse_returns = [node for node in ast.walk(parse_function) if isinstance(node, ast.Return)]
@@ -1073,7 +1060,8 @@ def _cli_model_lines(source: str) -> tuple[int, int, int]:
         else None
     )
     resolve_calls = [
-        node for node in ast.walk(main_function)
+        node
+        for node in ast.walk(main_function)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "resolve"
@@ -1099,7 +1087,8 @@ def _cli_model_lines(source: str) -> tuple[int, int, int]:
         else None
     )
     resolves = [
-        node for node in resolve_calls
+        node
+        for node in resolve_calls
         if node is live_resolve
         and node.args
         and isinstance(node.args[0], ast.Call)
@@ -1111,9 +1100,7 @@ def _cli_model_lines(source: str) -> tuple[int, int, int]:
         and node.args[0].args[0].id == live_binding
     ]
     resolve_try_index = (
-        main_function.body.index(resolve_assignment)
-        if resolve_assignment is not None
-        else 0
+        main_function.body.index(resolve_assignment) if resolve_assignment is not None else 0
     )
     returns_before_resolution = (
         any(
@@ -1277,9 +1264,7 @@ TOOLS["read_file"] = Tool(
 
 TOOLS["list_directory"] = Tool(
     name="list_directory",
-    description=(
-        "List workspace entries; defaults to the workspace root."
-    ),
+    description=("List workspace entries; defaults to the workspace root."),
     args_model=ListDirectoryArgs,
     run=_run_list_directory,
     example=".",

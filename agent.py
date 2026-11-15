@@ -22,6 +22,7 @@ import time
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable
 from importlib import import_module
+from threading import Event, Lock
 from typing import Any, cast
 from urllib.parse import urlsplit
 
@@ -35,7 +36,7 @@ from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 from pydantic import BaseModel, Field, field_validator
 
 import observability as obs
-from sandbox import Workspace, workspace_scope
+from sandbox import Workspace, current_workspace, workspace_scope
 from tools import (
     FIXED_INTERNAL_CAPABILITY_ALLOWLIST,
     FIXED_TOOL_ALLOWLIST,
@@ -475,7 +476,15 @@ class AgentConfig(BaseModel):
     api_key: str = Field(default=DEFAULT_API_KEY, description="Placeholder; Ollama ignores it.")
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     max_steps: int = Field(default=8, ge=1, le=50, description="Max ReAct iterations per question.")
-    timeout: float = Field(default=180.0, gt=0, description="Per-request timeout in seconds.")
+    timeout: float = Field(
+        default=180.0,
+        gt=0,
+        description=(
+            "Absolute per-question budget in seconds. Synchronous HTTP calls "
+            "cannot be interrupted; "
+            "expiration or cancellation is observed when the call returns."
+        ),
+    )
     verbose: bool = Field(default=True, description="Stream the reasoning trace to the console.")
     max_retries: int = Field(
         default=2,
@@ -538,6 +547,12 @@ class Step(BaseModel):
 
 class AgentError(RuntimeError):
     """Raised when the loop cannot continue (e.g. the model is unreachable)."""
+
+
+_WORKSPACE_TOOLS = frozenset({"read_file", "list_directory", "search_text", "file_info"})
+MAX_HISTORY_TURNS = 20
+MAX_HISTORY_BYTES = 64 * 1024
+MAX_QUESTION_BYTES = 16 * 1024
 
 
 def model_is_installed(requested: str, available: Iterable[str]) -> bool:
@@ -708,11 +723,16 @@ class ReActAgent:
         self.system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             tools=describe_tools(), tool_names=tool_names()
         )
-        # Long-term memory: only user questions and final answers, so the
-        # scratchpad from an earlier turn never pollutes the next one.
+        # One instance is one local operator session. A server must create a
+        # separate instance per authenticated user; this class is not an auth
+        # adapter and does not accept caller-selected identity labels.
         self.history: list[ChatCompletionMessageParam] = []
         self.last_trace: list[Step] = []
         self._turn = 0
+        self._bound_workspace = workspace
+        self._run_lock = Lock()
+        self._request_deadline: float | None = None
+        self._request_cancel_event: Event | None = None
 
         obs.event(
             "agent.created",
@@ -736,9 +756,14 @@ class ReActAgent:
 
     def reset(self) -> None:
         """Forget the conversation history."""
-        obs.event("agent.reset", logger=_log, level=logging.DEBUG, turns=self._turn)
-        self.history.clear()
-        self.last_trace.clear()
+        if not self._run_lock.acquire(blocking=False):
+            raise AgentError("cannot reset while this agent session has an active turn")
+        try:
+            obs.event("agent.reset", logger=_log, level=logging.DEBUG, turns=self._turn)
+            self.history.clear()
+            self.last_trace.clear()
+        finally:
+            self._run_lock.release()
 
     def _create_completion(self, **kwargs: Any) -> Any:
         """Revalidate the client path before dispatching the pinned method."""
@@ -793,14 +818,70 @@ class ReActAgent:
         )
         return available
 
-    def run(self, question: str) -> str:
-        """Answer one question, running the ReAct loop until it settles."""
-        self._turn += 1
-        if self.workspace is not None:
-            with workspace_scope(self.workspace), obs.bind(turn=self._turn):
+    def run(self, question: str, *, cancel_event: Event | None = None) -> str:
+        """Answer one question in this single local operator session.
+
+        Each local user must own a separate agent instance and workspace.
+        Concurrent reuse of one instance is refused. This API does not
+        authenticate callers and shared multi-tenant service use is unsupported.
+        """
+        if not isinstance(question, str):
+            raise AgentError("question must be text")
+        try:
+            question_bytes = len(question.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise AgentError("question must be valid UTF-8 text") from exc
+        if question_bytes > MAX_QUESTION_BYTES:
+            raise AgentError(
+                f"question exceeds the {MAX_QUESTION_BYTES}-byte UTF-8 limit"
+            )
+        if not self._run_lock.acquire(blocking=False):
+            raise AgentError("this agent session already has an active turn")
+        try:
+            self._request_deadline = time.monotonic() + self.config.timeout
+            self._request_cancel_event = cancel_event
+            self._check_request_budget()
+            requested_workspace = self.workspace or current_workspace() or self._bound_workspace
+            if (
+                self._bound_workspace is not None
+                and requested_workspace is not None
+                and self._bound_workspace != requested_workspace
+            ):
+                raise AgentError(
+                    "this agent session cannot change its workspace or security policy"
+                )
+            active_workspace = self._bound_workspace or requested_workspace
+            if self.allowed_tools & _WORKSPACE_TOOLS and active_workspace is None:
+                raise AgentError(
+                    "an explicit workspace is required when filesystem tools are enabled"
+                )
+            if self._bound_workspace is None and requested_workspace is not None:
+                self._bound_workspace = requested_workspace
+                active_workspace = requested_workspace
+
+            self._turn += 1
+            if active_workspace is not None:
+                with workspace_scope(active_workspace), obs.bind(turn=self._turn):
+                    return self._run_turn(question)
+            with obs.bind(turn=self._turn):
                 return self._run_turn(question)
-        with obs.bind(turn=self._turn):
-            return self._run_turn(question)
+        finally:
+            self._request_deadline = None
+            self._request_cancel_event = None
+            self._run_lock.release()
+
+    def _check_request_budget(self) -> float:
+        """Fail closed when cancellation is set or this run's absolute budget expires."""
+        cancel_event = self._request_cancel_event
+        if cancel_event is not None and cancel_event.is_set():
+            raise AgentError("request was cancelled")
+        deadline = self._request_deadline
+        if deadline is None:
+            return self.config.timeout
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AgentError("request deadline exceeded")
+        return remaining
 
     def _run_turn(self, question: str) -> str:
         self.last_trace = []
@@ -988,6 +1069,7 @@ class ReActAgent:
 
     def _invoke_tool(self, step: Step, *, trace_observation: bool = True) -> str:
         """Run the tool a step asked for, logging the call and its result."""
+        self._check_request_budget()
         tool_name = step.action or ""
         permitted = tool_name in self.allowed_tools
         obs.event(
@@ -1000,6 +1082,7 @@ class ReActAgent:
 
         started = time.perf_counter()
         if permitted:
+            self._check_request_budget()
             observation = run_tool(
                 tool_name,
                 step.action_input or "",
@@ -1159,24 +1242,30 @@ class ReActAgent:
         """
         attempts = self.config.max_retries + 1
         for attempt in range(1, attempts + 1):
+            remaining = self._check_request_budget()
             if self._before_model_request is not None:
                 self._before_model_request()
+            remaining = self._check_request_budget()
             try:
-                return cast(
+                response = cast(
                     ChatCompletion,
                     self._create_completion(
                         model=self.config.model,
                         messages=messages,
                         temperature=self.config.temperature,
                         stop=["\nObservation:", "Observation:"] if stop else None,
+                        timeout=remaining,
                     ),
                 )
+                self._check_request_budget()
             except APIConnectionError as exc:
                 self._handle_attempt_failure(exc, attempt, attempts, retryable=True)
             except APIStatusError as exc:
                 self._handle_attempt_failure(
                     exc, attempt, attempts, retryable=exc.status_code in _RETRYABLE_STATUS
                 )
+            else:
+                return response
 
         raise AssertionError("unreachable: the retry loop either returns or raises")
 
@@ -1190,6 +1279,7 @@ class ReActAgent:
     ) -> None:
         """Log an attempt, then either sleep for the next one or give up."""
         status_code = exc.status_code if isinstance(exc, APIStatusError) else None
+        self._check_request_budget()
 
         if retryable and attempt < attempts:
             delay = self.config.retry_backoff * (2 ** (attempt - 1))
@@ -1204,7 +1294,14 @@ class ReActAgent:
                 reason=type(exc).__name__,
             )
             if delay:
-                time.sleep(delay)
+                remaining = self._check_request_budget()
+                wait_for = min(delay, remaining)
+                cancel_event = self._request_cancel_event
+                if cancel_event is not None:
+                    cancel_event.wait(wait_for)
+                else:
+                    time.sleep(wait_for)
+                self._check_request_budget()
             return
 
         if isinstance(exc, APIConnectionError):
@@ -1278,7 +1375,18 @@ class ReActAgent:
         return "I ran out of reasoning steps before reaching an answer."
 
     def _remember(self, question: str, answer: str) -> str:
-        self.history.append(_user(question))
+        user_message = _user(question)
+        assistant_message = _assistant(f"Final Answer: {answer}")
+        exchange_bytes = sum(
+            len(str(message["role"]).encode("utf-8"))
+            + len(str(message["content"]).encode("utf-8"))
+            for message in (user_message, assistant_message)
+        )
+        if exchange_bytes > MAX_HISTORY_BYTES:
+            # Keep the response intact; this exchange is simply not retained.
+            return answer
+
+        self.history.extend((user_message, assistant_message))
         # Stored in the shape the next turn is required to reply in. The
         # history held plain prose, and the longer it grew the harder it pulled
         # the model into answering conversationally -- which the format guard
@@ -1294,7 +1402,16 @@ class ReActAgent:
         # Every past turn now demonstrates the format rather than arguing
         # against it. Nothing unverified is reintroduced, and the answer handed
         # back to the caller is unchanged.
-        self.history.append(_assistant(f"Final Answer: {answer}"))
+        while (
+            len(self.history) > (2 * MAX_HISTORY_TURNS)
+            or sum(
+                len(str(message["role"]).encode("utf-8"))
+                + len(str(message["content"]).encode("utf-8"))
+                for message in self.history
+            )
+            > MAX_HISTORY_BYTES
+        ):
+            del self.history[:2]
         return answer
 
     def _trace(self, iteration: int, step: Step) -> None:

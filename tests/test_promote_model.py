@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -17,12 +18,14 @@ from promote_model import (
     MAX_RUN_MANIFEST_BYTES,
     MAX_RUN_MODELFILE_BYTES,
     PromotionEvaluationError,
+    PromotionRecordError,
     check_run,
     check_scores,
     main,
     verified_run_gguf,
     verified_run_modelfile,
     write_evaluation_report,
+    write_promotion_record,
 )
 
 LIVE_PROMPT = "a" * 64
@@ -240,6 +243,96 @@ def test_report_writer_refuses_symlinked_parent_without_creating_outside_file(
         )
 
     assert list(outside.iterdir()) == []
+
+
+def test_promote_cli_refuses_record_symlink_before_evaluation_or_model_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = _run_dir(tmp_path)
+    outside = tmp_path / "outside-record.json"
+    original = b"preserve outside record\n"
+    outside.write_bytes(original)
+    record = tmp_path / "record-link.json"
+    try:
+        record.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"file symlinks are unavailable: {exc}")
+    monkeypatch.setattr(
+        holdout_eval,
+        "evaluate_promotion_run",
+        lambda *_args: pytest.fail("evaluation ran before record-path validation"),
+    )
+    monkeypatch.setattr(
+        "promote_model._ollama_create",
+        lambda *_args: pytest.fail("model tag was created before record-path validation"),
+    )
+
+    result = main(
+        [str(run), "--tag", "synthetic-tag", "--record", str(record)]
+    )
+
+    assert result == 1
+    assert "symlink or reparse point" in capsys.readouterr().err
+    assert outside.read_bytes() == original
+
+
+def test_promote_cli_refuses_hardlinked_record_before_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = _run_dir(tmp_path)
+    outside = tmp_path / "outside-record.json"
+    original = b"preserve outside record\n"
+    outside.write_bytes(original)
+    record = tmp_path / "record-hardlink.json"
+    try:
+        os.link(outside, record)
+    except OSError as exc:
+        pytest.skip(f"hard links are unavailable: {exc}")
+    monkeypatch.setattr(
+        holdout_eval,
+        "evaluate_promotion_run",
+        lambda *_args: pytest.fail("evaluation ran before record-path validation"),
+    )
+    monkeypatch.setattr(
+        "promote_model._ollama_create",
+        lambda *_args: pytest.fail("model tag was created before record-path validation"),
+    )
+
+    result = main([str(run), "--tag", "synthetic-tag", "--record", str(record)])
+
+    assert result == 1
+    assert outside.read_bytes() == original
+
+
+def test_promotion_record_writer_atomically_updates_regular_file(tmp_path: Path) -> None:
+    record = tmp_path / "promoted.json"
+    record.write_text('{"old": true}\n', encoding="utf-8")
+
+    write_promotion_record(record, {"tag": "synthetic-tag", "run": "run-1"})
+
+    assert json.loads(record.read_text(encoding="utf-8")) == {
+        "tag": "synthetic-tag",
+        "run": "run-1",
+    }
+    assert list(tmp_path.glob(".promoted.json.*.tmp")) == []
+
+
+def test_promotion_record_writer_preserves_old_file_on_replace_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = tmp_path / "promoted.json"
+    original = b'{"old": true}\n'
+    record.write_bytes(original)
+
+    def fail_replace(_source: Path, _destination: Path) -> None:
+        raise OSError("synthetic replace failure")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    with pytest.raises(PromotionRecordError, match="could not be written safely"):
+        write_promotion_record(record, {"tag": "synthetic-tag"})
+
+    assert record.read_bytes() == original
+    assert list(tmp_path.glob(".promoted.json.*.tmp")) == []
 
 
 @pytest.mark.parametrize(

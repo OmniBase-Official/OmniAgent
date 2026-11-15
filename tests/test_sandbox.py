@@ -8,21 +8,30 @@ like a credential is reachable even inside it.
 
 from __future__ import annotations
 
+import errno
 import os
+import stat
+import subprocess
 import sys
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 import sandbox
+import securefs
 from sandbox import (
     SandboxError,
     Workspace,
     get_workspace,
     set_workspace,
     without_own_transcripts,
+    workspace_scope,
 )
+from securefs import DirectoryLimitError, SecureFSError, SecureRoot
+from tools import read_file, search_text
 
 
 @pytest.fixture
@@ -107,9 +116,7 @@ def test_a_windows_style_traversal_is_outside_the_workspace(
         workspace.resolve(escape)
 
 
-def test_no_escape_attempt_ever_returns_the_secret(
-    workspace: Workspace, outside: Path
-) -> None:
+def test_no_escape_attempt_ever_returns_the_secret(workspace: Workspace, outside: Path) -> None:
     """The property that has to hold on every platform, whatever the message."""
     assert outside.read_text(encoding="utf-8") == "TOP SECRET"
 
@@ -440,6 +447,177 @@ def test_listing_hides_dot_entries(workspace: Workspace) -> None:
     assert not any(entry.startswith(".") for entry in entries)
 
 
+def test_secure_directory_enumerator_stops_at_requested_limit(workspace: Workspace) -> None:
+    handle = workspace._open_admitted(workspace.root)
+    try:
+        names = workspace._secure_root.iter_names(handle, max_entries=1)
+        next(names)
+        with pytest.raises(DirectoryLimitError, match="entry limit"):
+            next(names)
+    finally:
+        workspace._secure_root.close_handle(handle)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux openat2 fd cleanup")
+def test_linux_secure_root_closes_root_fd_when_pinning_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failure before finalizer registration does not leak the initial root fd."""
+    before = len(list(Path("/proc/self/fd").iterdir()))
+
+    def fail_openat2(*_args: object, **_kwargs: object) -> int:
+        raise OSError("injected openat2 failure")
+
+    monkeypatch.setattr(SecureRoot, "_openat2", staticmethod(fail_openat2))
+    with pytest.raises(OSError, match="injected openat2 failure"):
+        SecureRoot(tmp_path)
+    after = len(list(Path("/proc/self/fd").iterdir()))
+    assert after == before
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux openat2 O_PATH flags")
+def test_linux_o_path_handles_do_not_request_nonblocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """openat2 rejects O_NONBLOCK combined with O_PATH on supported Linux."""
+    (tmp_path / "file.txt").write_text("content", encoding="utf-8")
+    root = SecureRoot(tmp_path)
+    openat2_name = "_openat2"
+    original_openat2 = cast(Callable[..., int], getattr(SecureRoot, openat2_name))
+    path_flags: list[int] = []
+    path_flag = int(getattr(os, "O_PATH", 0))
+    nonblocking_flag = int(getattr(os, "O_NONBLOCK", 0))
+
+    def capture_flags(
+        parent: int,
+        path: str,
+        *,
+        directory: bool = False,
+        no_xdev: bool = True,
+        flags: int | None = None,
+    ) -> int:
+        if flags is not None and flags & path_flag:
+            path_flags.append(flags)
+        return original_openat2(
+            parent, path, directory=directory, no_xdev=no_xdev, flags=flags
+        )
+
+    monkeypatch.setattr(SecureRoot, "_openat2", staticmethod(capture_flags))
+    try:
+        handle = root.open("file.txt")
+        root.close_handle(handle)
+        root_fd_name = "fd"
+        root_fd = cast(int, getattr(root, root_fd_name))
+        list(root.iter_names(root_fd, max_entries=10))
+        handle = root.open_child(root_fd, "file.txt")
+        root.close_handle(handle)
+    finally:
+        root.close()
+
+    assert len(path_flags) == 3
+    assert all(not flags & nonblocking_flag for flags in path_flags)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux procfs reopening")
+def test_linux_regular_file_open_fails_closed_without_procfs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "data.txt"
+    path.write_text("content", encoding="utf-8")
+    root = SecureRoot(tmp_path)
+    original_open = os.open
+
+    def hide_procfs(path_arg: object, *args: object, **kwargs: object) -> int:
+        if str(path_arg).startswith("/proc/self/fd/"):
+            raise OSError(errno.ENOENT, "procfs unavailable")
+        return original_open(path_arg, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(securefs.os, "open", hide_procfs)
+    try:
+        with pytest.raises(SecureFSError, match="procfs handle reopening is unavailable"):
+            root.open(path.name)
+    finally:
+        root.close()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux inode identity conversion")
+def test_linux_regular_file_open_rejects_identity_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "data.txt"
+    path.write_text("content", encoding="utf-8")
+    root = SecureRoot(tmp_path)
+    original_fstat = os.fstat
+    calls = 0
+
+    def mismatch_second_stat(fd: int) -> object:
+        nonlocal calls
+        calls += 1
+        result = original_fstat(fd)
+        if calls == 2:
+            return type("Stat", (), {"st_dev": result.st_dev + 1, "st_ino": result.st_ino})()
+        return result
+
+    monkeypatch.setattr(securefs.os, "fstat", mismatch_second_stat)
+    try:
+        with pytest.raises(SecureFSError, match="object changed during handle conversion"):
+            root.open(path.name)
+    finally:
+        root.close()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux source permission policy")
+def test_linux_source_owned_by_other_uid_rejects_owner_write_permission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = SecureRoot(tmp_path)
+    handle = root.open(".", directory=True)
+    get_effective_uid_name = "geteuid"
+    metadata = os.stat_result(
+        (
+            stat.S_IFREG | stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP,
+            1,
+            1,
+            1,
+            cast(Callable[[], int], getattr(os, get_effective_uid_name))() + 1,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    )
+    monkeypatch.setattr(securefs.os, "fstat", lambda _handle: metadata)
+    try:
+        assert not root.immutable_to_other_users(handle)
+    finally:
+        root.close_handle(handle)
+        root.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="NTFS stage share-mode probe")
+def test_windows_held_staging_handle_blocks_parent_path_rename_and_delete(
+    tmp_path: Path,
+) -> None:
+    parent = SecureRoot(tmp_path, writable=True)
+    stage_name = "held-stage-share-probe"
+    moved_name = "held-stage-share-probe-moved"
+    stage = parent.create_directory(stage_name)
+    original = tmp_path / stage_name
+    moved = tmp_path / moved_name
+    try:
+        for operation in (lambda: original.rename(moved), original.rmdir):
+            with pytest.raises(PermissionError) as raised:
+                operation()
+            assert getattr(raised.value, "winerror", None) == 32
+        assert original.is_dir()
+        assert not moved.exists()
+    finally:
+        parent.remove_directory(stage, stage_name)
+        parent.close_handle(stage)
+        parent.close()
+
+
 def test_listing_hides_outside_symlink_metadata(workspace: Workspace, outside: Path) -> None:
     alias = workspace.root / "alias.txt"
     try:
@@ -450,6 +628,323 @@ def test_listing_hides_outside_symlink_metadata(workspace: Workspace, outside: P
     entries = workspace.list_dir(".")
 
     assert not any(entry.startswith("alias.txt") for entry in entries)
+
+
+def test_leaf_swap_after_admission_never_reads_outside_canary(
+    workspace: Workspace, outside: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leaf replaced after path admission is rejected at handle-relative open."""
+    target = workspace.root / "race.txt"
+    target.write_text("inside-original", encoding="utf-8")
+    admitted = threading.Event()
+    swapped = threading.Event()
+    original_open = workspace._secure_root.open
+
+    def paused_open(relative: str, *, directory: bool = False) -> int:
+        if relative == "race.txt":
+            admitted.set()
+            assert swapped.wait(timeout=5)
+        return original_open(relative, directory=directory)
+
+    monkeypatch.setattr(workspace._secure_root, "open", paused_open)
+    result: list[str] = []
+
+    def read() -> None:
+        try:
+            result.append(workspace.read_text("race.txt"))
+        except SandboxError as exc:
+            result.append(str(exc))
+
+    worker = threading.Thread(target=read)
+    worker.start()
+    assert admitted.wait(timeout=5)
+    target.unlink()
+    try:
+        target.symlink_to(outside)
+    except OSError as exc:
+        swapped.set()
+        worker.join(timeout=5)
+        pytest.skip(f"file symlink creation unavailable: {exc}")
+    swapped.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert len(result) == 1
+    assert "TOP SECRET" not in result[0]
+    assert result[0] != "inside-original"
+
+
+def test_read_file_size_comes_from_the_opened_object(
+    workspace: Workspace, outside: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Swapping the name after handle inspection cannot change reported size or bytes."""
+    original = "inside-object"
+    target = workspace.root / "same-handle.txt"
+    target.write_text(original, encoding="utf-8")
+    inspected = threading.Event()
+    swapped = threading.Event()
+    original_info = workspace._secure_root.info
+
+    def paused_info(handle: int) -> tuple[int, int, bool]:
+        result = original_info(handle)
+        if not inspected.is_set():
+            inspected.set()
+            assert swapped.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(workspace._secure_root, "info", paused_info)
+    result: list[str] = []
+
+    def read() -> None:
+        with workspace_scope(workspace):
+            result.append(read_file("same-handle.txt"))
+
+    worker = threading.Thread(target=read)
+    worker.start()
+    assert inspected.wait(timeout=5)
+    target.unlink()
+    try:
+        target.symlink_to(outside)
+    except OSError as exc:
+        swapped.set()
+        worker.join(timeout=5)
+        pytest.skip(f"file symlink creation unavailable: {exc}")
+    swapped.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert result == [f"same-handle.txt (1 lines, {len(original)} bytes):\n    1  {original}"]
+    assert "TOP SECRET" not in result[0]
+
+
+def test_search_existence_check_uses_a_secure_handle(
+    workspace: Workspace, outside: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leaf swapped after search admission is never read to establish existence."""
+    canary = "OUTSIDE-SEARCH-CANARY-9381"
+    outside.write_text(canary, encoding="utf-8")
+    target = workspace.root / "search-race.txt"
+    target.write_text("inside-only", encoding="utf-8")
+    admitted = threading.Event()
+    swapped = threading.Event()
+    original_open = workspace._secure_root.open
+
+    def paused_open(relative: str, *, directory: bool = False) -> int:
+        if relative == "search-race.txt":
+            admitted.set()
+            assert swapped.wait(timeout=5)
+        return original_open(relative, directory=directory)
+
+    monkeypatch.setattr(workspace._secure_root, "open", paused_open)
+    result: list[str] = []
+
+    def search() -> None:
+        with workspace_scope(workspace):
+            result.append(search_text(canary, "search-race.txt"))
+
+    worker = threading.Thread(target=search)
+    worker.start()
+    assert admitted.wait(timeout=5)
+    target.unlink()
+    try:
+        target.symlink_to(outside)
+    except OSError as exc:
+        swapped.set()
+        worker.join(timeout=5)
+        pytest.skip(f"file symlink creation unavailable: {exc}")
+    swapped.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert len(result) == 1
+    assert "search-race.txt:1:" not in result[0]
+    assert "(0 files searched)" in result[0]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows junction race test")
+def test_parent_junction_swap_after_admission_never_reads_outside_canary(
+    workspace: Workspace, outside: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replacing a parent directory with a junction cannot redirect a read."""
+    parent = workspace.root / "race-parent"
+    parent.mkdir()
+    (parent / outside.name).write_text("inside-original", encoding="utf-8")
+    admitted = threading.Event()
+    swapped = threading.Event()
+    original_open = workspace._secure_root.open
+
+    def paused_open(relative: str, *, directory: bool = False) -> int:
+        if relative == f"race-parent/{outside.name}":
+            admitted.set()
+            assert swapped.wait(timeout=5)
+        return original_open(relative, directory=directory)
+
+    monkeypatch.setattr(workspace._secure_root, "open", paused_open)
+    result: list[str] = []
+
+    def read() -> None:
+        try:
+            result.append(workspace.read_text(f"race-parent/{outside.name}"))
+        except SandboxError as exc:
+            result.append(str(exc))
+
+    worker = threading.Thread(target=read)
+    worker.start()
+    assert admitted.wait(timeout=5)
+    parent.rename(workspace.root / "race-parent-old")
+    proc = subprocess.run(  # noqa: S603 - fixed cmd with fixture-controlled paths
+        ["cmd", "/c", "mklink", "/J", str(parent), str(outside.parent)],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode:
+        swapped.set()
+        worker.join(timeout=5)
+        (workspace.root / "race-parent-old").rename(parent)
+        pytest.skip(f"junction creation unavailable: {proc.stderr or proc.stdout}")
+    swapped.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert len(result) == 1
+    assert "TOP SECRET" not in result[0]
+    assert result[0] != "inside-original"
+    parent.rmdir()
+    (workspace.root / "race-parent-old").rename(parent)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows junction race test")
+def test_root_swap_after_admission_stays_on_pinned_workspace(
+    workspace: Workspace, outside: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root path replaced by a junction cannot replace the retained root handle."""
+    (workspace.root / outside.name).write_text("inside-root", encoding="utf-8")
+    admitted = threading.Event()
+    swapped = threading.Event()
+    original_open = workspace._secure_root.open
+
+    def paused_open(relative: str, *, directory: bool = False) -> int:
+        if relative == outside.name:
+            admitted.set()
+            assert swapped.wait(timeout=5)
+        return original_open(relative, directory=directory)
+
+    monkeypatch.setattr(workspace._secure_root, "open", paused_open)
+    result: list[str] = []
+
+    def read() -> None:
+        try:
+            result.append(workspace.read_text(outside.name))
+        except SandboxError as exc:
+            result.append(str(exc))
+
+    worker = threading.Thread(target=read)
+    worker.start()
+    assert admitted.wait(timeout=5)
+    root = workspace.root
+    moved = root.with_name(root.name + "-pinned")
+    root.rename(moved)
+    proc = subprocess.run(  # noqa: S603 - fixed cmd with fixture-controlled paths
+        ["cmd", "/c", "mklink", "/J", str(root), str(outside.parent)],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode:
+        swapped.set()
+        worker.join(timeout=5)
+        moved.rename(root)
+        pytest.skip(f"junction creation unavailable: {proc.stderr or proc.stdout}")
+    swapped.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert result == ["inside-root"]
+    root.rmdir()
+    moved.rename(root)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux root-handle race test")
+def test_linux_root_swap_stays_on_pinned_workspace(
+    workspace: Workspace, outside: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replacing the configured root path cannot redirect its pinned fd."""
+    (workspace.root / outside.name).write_text("inside-linux-root", encoding="utf-8")
+    admitted = threading.Event()
+    swapped = threading.Event()
+    original_open = workspace._secure_root.open
+
+    def paused_open(relative: str, *, directory: bool = False) -> int:
+        if relative == outside.name:
+            admitted.set()
+            assert swapped.wait(timeout=5)
+        return original_open(relative, directory=directory)
+
+    monkeypatch.setattr(workspace._secure_root, "open", paused_open)
+    result: list[str] = []
+
+    def read() -> None:
+        try:
+            result.append(workspace.read_text(outside.name))
+        except SandboxError as exc:
+            result.append(str(exc))
+
+    worker = threading.Thread(target=read)
+    worker.start()
+    assert admitted.wait(timeout=5)
+    root = workspace.root
+    moved = root.with_name(root.name + "-pinned-linux")
+    root.rename(moved)
+    root.symlink_to(outside.parent, target_is_directory=True)
+    swapped.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert result == ["inside-linux-root"]
+    root.unlink()
+    moved.rename(root)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux parent-handle race test")
+def test_linux_parent_swap_never_reads_outside_canary(
+    workspace: Workspace, outside: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A parent symlink swapped after admission is rejected during relative walk."""
+    parent = workspace.root / "linux-race-parent"
+    parent.mkdir()
+    (parent / outside.name).write_text("inside-parent", encoding="utf-8")
+    outside_canary = outside.read_text(encoding="utf-8")
+    admitted = threading.Event()
+    swapped = threading.Event()
+    original_open = workspace._secure_root.open
+    returned: list[str] = []
+    errors: list[str] = []
+
+    def paused_open(relative: str, *, directory: bool = False) -> int:
+        if relative == f"linux-race-parent/{outside.name}":
+            admitted.set()
+            assert swapped.wait(timeout=5)
+        return original_open(relative, directory=directory)
+
+    monkeypatch.setattr(workspace._secure_root, "open", paused_open)
+
+    def read() -> None:
+        try:
+            returned.append(workspace.read_text(f"linux-race-parent/{outside.name}"))
+        except SandboxError as exc:
+            errors.append(str(exc))
+
+    worker = threading.Thread(target=read)
+    worker.start()
+    assert admitted.wait(timeout=5)
+    parent.rename(workspace.root / "linux-race-parent-old")
+    parent.symlink_to(outside.parent, target_is_directory=True)
+    swapped.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert swapped.is_set()
+    assert parent.is_symlink()
+    assert parent.resolve(strict=True) == outside.parent.resolve()
+    assert returned == []
+    assert len(errors) == 1
+    assert outside_canary not in errors[0]
+    parent.unlink()
+    (workspace.root / "linux-race-parent-old").rename(parent)
 
 
 def test_listing_puts_directories_first(workspace: Workspace) -> None:
@@ -552,9 +1047,8 @@ def test_a_root_that_is_not_a_directory_is_refused(tmp_path: Path) -> None:
 
 @pytest.fixture
 def _restore_workspace() -> Iterator[None]:
-    original = get_workspace()
-    yield
-    set_workspace(original)
+    with workspace_scope(Workspace.at(Path.cwd())):
+        yield
 
 
 @pytest.mark.usefixtures("_restore_workspace")
@@ -563,8 +1057,9 @@ def test_the_workspace_can_be_replaced(workspace: Workspace) -> None:
     assert get_workspace().root == workspace.root
 
 
-def test_the_default_workspace_is_the_current_directory() -> None:
-    assert get_workspace().root == Path.cwd().resolve()
+def test_an_unconfigured_workspace_is_refused() -> None:
+    with workspace_scope(None), pytest.raises(SandboxError, match="explicit workspace is required"):
+        get_workspace()
 
 
 # --------------------------------------------------------------------------- #
@@ -634,7 +1129,7 @@ def test_an_agent_cannot_read_its_earlier_transcripts(tmp_path: Path) -> None:
     (logs / "earlier.jsonl").write_text('{"answer": "from last time"}\n', encoding="utf-8")
     active = logs / "run.jsonl"
     active.write_text("", encoding="utf-8")
-    (tmp_path / "agent.py") .write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "agent.py").write_text("x = 1\n", encoding="utf-8")
 
     workspace = without_own_transcripts(tmp_path, active)
 

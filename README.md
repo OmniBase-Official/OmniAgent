@@ -161,9 +161,29 @@ TOOLS["reverse_text"] = Tool(
 ## The filesystem boundary
 
 `read_file`, `list_directory` and `search_text` work inside one **workspace**
-directory — the current directory by default, or `--workspace PATH`. They are
+directory, which must be set explicitly with `--workspace PATH`,
+`OMNIAGENT_WORKSPACE`, or the config file. They are
 read-only by construction: nothing in [`sandbox.py`](sandbox.py) writes, renames
 or deletes.
+
+This beta supports one local operator session per `ReActAgent` instance. The
+instance owns one workspace, history, trace, and turn counter; create a separate
+agent and workspace for each local user. Questions larger than 16 KiB in UTF-8
+are rejected before a model request. Remembered history retains at most 20
+completed turns and 64 KiB of role/content text. Older complete turns are
+removed first. If one completed exchange cannot fit, its answer is returned
+unchanged but that exchange is not remembered. `reset()` clears the retained
+history and trace and refuses to run during an active turn. The agent API does
+not authenticate callers or derive tenant identity. Shared multi-tenant service
+use is unsupported until an authentication adapter binds a server-derived user
+identity to its workspace and agent instance.
+
+The beta threat boundary assumes one trusted local operator with exclusive
+control of the workspace and any local destination paths, and no concurrent
+untrusted process mutating those files. Path containment and symlink checks do
+not claim protection against TOCTOU races. Descriptor-relative hardening for
+hostile or concurrent filesystem writers is deferred; this checkout is not
+approved for that threat model.
 
 This matters more than it looks. Every path a tool receives was chosen by a
 language model, and everything a tool returns becomes an Observation — which
@@ -331,9 +351,9 @@ python main.py --model qwen2.5-coder:7b --quiet
 | `--log-file` | Disabled | Rejected with a privacy-policy error; persistent logs are not supported. |
 | `--log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` (env: `OMNIAGENT_LOG_LEVEL`). |
 | `--log-console` | off | Also stream the JSON logs to stderr. |
-| `--workspace` | cwd | Directory the file tools may read inside. |
+| `--workspace` | required | Tenant directory the file tools may read inside. |
 | `--max-retries` | `2` | Retries after a transient model-server failure. |
-| `--timeout` | `180` | Per-request timeout in seconds. |
+| `--timeout` | `180` | One absolute per-question budget shared by requests, retries, backoff, and tools. A synchronous HTTP call cannot be interrupted and may return after the budget expires. |
 | `--config` | `./omniagent.toml` | Config file to read. |
 | `--profile` | — | Named `[profile.NAME]` section to apply. |
 | `--print-config` | — | Show every resolved setting and its source, then exit. |
@@ -464,7 +484,15 @@ tool, or answer -- instead of handing back the same Observation again.
 | `max_retries` | `2` | Extra attempts after a transient failure. |
 | `retry_backoff` | `1.0` | Seconds before the first retry, doubled thereafter. |
 | `max_repeated_actions` | `2` | Identical failing Actions tolerated before intervening. |
-| `timeout` | `180.0` | Per-request timeout in seconds. |
+| `timeout` | `180.0` | One absolute per-question budget shared by requests, retries, backoff, and tools. Synchronous HTTP calls cannot be interrupted and may return after expiration. |
+
+Each `run()` starts one absolute monotonic per-question deadline shared by
+model requests, retry backoff, and tools. Each request is given the remaining
+budget, but the synchronous HTTP call cannot currently be interrupted by the
+deadline or by cancellation. If it returns after expiration or after the
+cancellation event is set, the agent observes that immediately on return and
+will not dispatch another tool or model request. Cancellation can interrupt
+retry backoff; the deadline is checked again before any retry.
 
 ---
 

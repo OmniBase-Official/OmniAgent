@@ -123,7 +123,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--max-retries", type=int, help="Retries after a transient failure (default: 2)."
     )
     settings.add_argument(
-        "--timeout", type=float, help="Per-request timeout in seconds (default: 180)."
+        "--timeout",
+        type=float,
+        help=(
+            "Absolute per-question budget in seconds (default: 180); a synchronous HTTP "
+            "call is checked after it returns and cannot be interrupted."
+        ),
     )
     settings.add_argument(
         "--workspace", type=Path, help="Directory the file tools may read inside."
@@ -289,6 +294,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_config:
         print(render(settings, sources))
         return 0
+
+    if settings.workspace is None:
+        print(
+            Style.red(
+                "[!] Set an explicit tenant workspace with --workspace, "
+                "OMNIAGENT_WORKSPACE, or the config file."
+            )
+        )
+        return 2
 
     # Structured logging must be live before the agent is built, so that even
     # construction and preflight end up in the log.

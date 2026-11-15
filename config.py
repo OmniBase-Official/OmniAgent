@@ -64,11 +64,19 @@ class Settings(BaseModel):
     api_key: str = Field(default=DEFAULT_API_KEY)
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     max_steps: int = Field(default=8, ge=1, le=50)
-    timeout: float = Field(default=180.0, gt=0)
+    timeout: float = Field(
+        default=180.0,
+        gt=0,
+        description=(
+            "Absolute per-question budget in seconds; a synchronous HTTP call "
+            "cannot be interrupted "
+            "and is checked when it returns."
+        ),
+    )
     max_retries: int = Field(default=2, ge=0, le=10)
     retry_backoff: float = Field(default=1.0, ge=0.0)
     max_repeated_actions: int = Field(default=2, ge=1, le=10)
-    workspace: Path = Field(default_factory=Path.cwd)
+    workspace: Path | None = Field(default=None)
     log_file: Path | None = Field(default=None)
     log_level: str = Field(default="INFO")
     log_console: bool = Field(default=False)

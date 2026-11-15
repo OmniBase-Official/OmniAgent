@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 from agent import AgentConfig, ReActAgent
+from sandbox import Workspace
 from tests.fakes import FakeOpenAI
 from tests.log_capture import configure_memory_sink, read_lines, reset_capture
 
@@ -21,6 +22,7 @@ def test_raw_turn_content_never_reaches_persisted_telemetry(tmp_path: Path) -> N
         config=AgentConfig(verbose=False),
         client=FakeOpenAI(replies=[reply]).as_client(),
         printer=lambda _: None,
+        workspace=Workspace.at(tmp_path),
     )
 
     assert agent.run(question) == "PRIVATE_ANSWER_CANARY"

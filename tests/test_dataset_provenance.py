@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+import dataset_provenance as provenance
+import validate_dataset
 from agent import AgentConfig, ReActAgent
 from dataset_provenance import (
     ProvenanceError,
@@ -24,6 +26,7 @@ from dataset_provenance import (
     render_system_prompt,
     write_sidecar,
 )
+from export_dataset import Turn, build_examples
 from tests.fakes import FakeOpenAI
 
 
@@ -158,3 +161,254 @@ def test_a_current_dataset_is_recorded_as_matching(tmp_path: Path) -> None:
 
     assert recorded["matches_live_prompt"] is True
     assert recorded["system_prompt_sha256"] == prompt_fingerprint()
+
+
+def test_provenance_caps_match_the_dataset_validator() -> None:
+    assert provenance.MAX_DATASET_BYTES == validate_dataset.MAX_DATASET_BYTES
+    assert provenance.MAX_DATASET_LINE_BYTES == validate_dataset.MAX_DATASET_LINE_BYTES
+    assert provenance.MAX_DATASET_LINES == validate_dataset.MAX_DATASET_LINES
+    assert provenance.MAX_DATASET_EXAMPLES == validate_dataset.MAX_DATASET_EXAMPLES
+    assert provenance.MAX_JSON_NESTING == validate_dataset.MAX_JSON_NESTING
+
+
+def test_line_and_record_count_limits_are_enforced_before_sidecar_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blank_lines = tmp_path / "many-lines.jsonl"
+    blank_lines.write_text("\n\n", encoding="utf-8")
+    monkeypatch.setattr(provenance, "MAX_DATASET_LINES", 1)
+    with pytest.raises(ProvenanceError, match="line limit"):
+        write_sidecar(blank_lines)
+    assert not provenance.sidecar_path(blank_lines).exists()
+
+    records = tmp_path / "many-records.jsonl"
+    row = _example("PROMPT A")
+    records.write_text(row + "\n" + row + "\n", encoding="utf-8")
+    monkeypatch.setattr(provenance, "MAX_DATASET_LINES", 10)
+    monkeypatch.setattr(provenance, "MAX_DATASET_EXAMPLES", 1)
+    with pytest.raises(ProvenanceError, match="record limit"):
+        write_sidecar(records)
+    assert not provenance.sidecar_path(records).exists()
+
+
+def test_an_oversized_dataset_is_rejected_before_sidecar_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "large.jsonl"
+    dataset.write_bytes(b"x" * 33)
+    monkeypatch.setattr(provenance, "MAX_DATASET_BYTES", 32)
+
+    with pytest.raises(ProvenanceError, match="dataset limit"):
+        write_sidecar(dataset)
+
+    assert not provenance.sidecar_path(dataset).exists()
+
+
+def test_a_giant_line_is_rejected_before_sidecar_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "wide.jsonl"
+    dataset.write_bytes(b" " * 17)
+    monkeypatch.setattr(provenance, "MAX_DATASET_BYTES", 128)
+    monkeypatch.setattr(provenance, "MAX_DATASET_LINE_BYTES", 16)
+
+    with pytest.raises(ProvenanceError, match="line limit"):
+        write_sidecar(dataset)
+
+    assert not provenance.sidecar_path(dataset).exists()
+
+
+def test_deep_json_is_rejected_before_sidecar_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "deep.jsonl"
+    row = json.loads(_example("PROMPT A"))
+    row["extra"] = [[[[[]]]]]
+    dataset.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    monkeypatch.setattr(provenance, "MAX_JSON_NESTING", 4)
+
+    with pytest.raises(ProvenanceError, match="nesting limit"):
+        write_sidecar(dataset)
+
+    assert not provenance.sidecar_path(dataset).exists()
+
+
+def test_malformed_later_row_does_not_mutate_existing_sidecar(tmp_path: Path) -> None:
+    dataset = tmp_path / "malformed.jsonl"
+    dataset.write_text(_example("PROMPT A") + "\n{" + "\n", encoding="utf-8")
+    sidecar = provenance.sidecar_path(dataset)
+    sidecar.write_text("previous sidecar\n", encoding="utf-8")
+
+    with pytest.raises(ProvenanceError, match="line 2 is not valid JSON"):
+        write_sidecar(dataset)
+
+    assert sidecar.read_text(encoding="utf-8") == "previous sidecar\n"
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_exporter_produced_dataset_gets_streamed_provenance(tmp_path: Path) -> None:
+    turn = Turn(
+        session_id="synthetic",
+        turn=1,
+        question="hi",
+        answer="hello",
+        exchange=[{"role": "assistant", "content": "hello"}],
+    )
+    examples, stats = build_examples([turn], {"synthetic": "PROMPT A"})
+    dataset = tmp_path / "exported.jsonl"
+    dataset.write_text(
+        "".join(json.dumps(example) + "\n" for example in examples), encoding="utf-8"
+    )
+
+    assert stats.exported == 1
+    assert dataset_fingerprint(dataset) == sha256(b"PROMPT A").hexdigest()
+    write_sidecar(dataset)
+    written = read_sidecar(dataset)
+    assert written["examples"] == 1
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        '{"messages":[],"messages":[{"role":"system","content":"PROMPT A"}]}',
+        '{"messages":[{"role":"system","role":"user","content":"PROMPT A"}]}',
+        (
+            '{"messages":[{"role":"system","content":"PROMPT A",'
+            '"content":"PROMPT B"}]}'
+        ),
+    ],
+    ids=["top-level-messages", "nested-role", "nested-content"],
+)
+def test_duplicate_json_keys_are_refused_without_changing_sidecar(
+    tmp_path: Path, row: str
+) -> None:
+    dataset = tmp_path / "ambiguous.jsonl"
+    dataset.write_text(row + "\n", encoding="utf-8")
+    sidecar = provenance.sidecar_path(dataset)
+    sidecar.write_text("previous sidecar\n", encoding="utf-8")
+
+    with pytest.raises(ProvenanceError, match="duplicate object key") as caught:
+        dataset_fingerprint(dataset)
+    assert "PROMPT A" not in str(caught.value)
+    assert "PROMPT B" not in str(caught.value)
+
+    with pytest.raises(ProvenanceError, match="duplicate object key") as caught:
+        write_sidecar(dataset)
+    assert "PROMPT A" not in str(caught.value)
+    assert "PROMPT B" not in str(caught.value)
+    assert sidecar.read_text(encoding="utf-8") == "previous sidecar\n"
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        (
+            '{"messages":[{"role":"system","content":"PROMPT A"},'
+            '{"role":"user","content":"hi"},'
+            '{"role":"assistant","content":"hello"}],"extra":"PRIVATE_VALUE"}'
+        ),
+        (
+            '{"messages":[{"role":"system","content":"PROMPT A"},'
+            '{"role":"user","content":"hi","extra":"PRIVATE_VALUE"},'
+            '{"role":"assistant","content":"hello"}]}'
+        ),
+        (
+            '{"messages":[{"role":"system","content":"PROMPT A"},'
+            '{"role":"other","content":"hi"},'
+            '{"role":"assistant","content":"hello"}]}'
+        ),
+        (
+            '{"messages":[{"role":"system","content":"PROMPT A"},'
+            '{"role":"user","content":"  "},'
+            '{"role":"assistant","content":"hello"}]}'
+        ),
+        (
+            '{"messages":[{"role":"system","content":"  "},'
+            '{"role":"user","content":"hi"},'
+            '{"role":"assistant","content":"hello"}]}'
+        ),
+    ],
+    ids=[
+        "unexpected-top-level-field",
+        "unexpected-message-field",
+        "unsupported-role",
+        "blank-message-content",
+        "blank-system-prompt",
+    ],
+)
+def test_schema_invalid_rows_are_refused_without_changing_sidecar(
+    tmp_path: Path, row: str
+) -> None:
+    dataset = tmp_path / "invalid-schema.jsonl"
+    dataset.write_text(row + "\n", encoding="utf-8")
+    sidecar = provenance.sidecar_path(dataset)
+    sidecar.write_text("previous sidecar\n", encoding="utf-8")
+
+    with pytest.raises(ProvenanceError, match=r"invalid|unsupported|exported") as caught:
+        dataset_fingerprint(dataset)
+    assert "PRIVATE_VALUE" not in str(caught.value)
+
+    with pytest.raises(ProvenanceError, match=r"invalid|unsupported|exported") as caught:
+        write_sidecar(dataset)
+    assert "PRIVATE_VALUE" not in str(caught.value)
+    assert sidecar.read_text(encoding="utf-8") == "previous sidecar\n"
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing-key",
+        "extra-key",
+        "example-count-type",
+        "example-count-zero",
+        "dataset-identity",
+        "system-digest",
+        "live-digest",
+        "match-consistency",
+    ],
+)
+def test_read_sidecar_rejects_invalid_schema(
+    tmp_path: Path, mutation: str
+) -> None:
+    dataset = tmp_path / "schema.jsonl"
+    dataset.write_text(_example(render_system_prompt()) + "\n", encoding="utf-8")
+    sidecar = write_sidecar(dataset)
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    if mutation == "missing-key":
+        del payload["matches_live_prompt"]
+    elif mutation == "extra-key":
+        payload["extra"] = "PRIVATE_VALUE"
+    elif mutation == "example-count-type":
+        payload["examples"] = True
+    elif mutation == "example-count-zero":
+        payload["examples"] = 0
+    elif mutation == "dataset-identity":
+        payload["dataset"] = "different.jsonl"
+    elif mutation == "system-digest":
+        payload["system_prompt_sha256"] = "not-a-sha256"
+    elif mutation == "live-digest":
+        payload["live_prompt_sha256"] = "g" * 64
+    else:
+        payload["matches_live_prompt"] = not payload["matches_live_prompt"]
+    sidecar.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ProvenanceError):
+        read_sidecar(dataset)
+
+
+def test_read_sidecar_rejects_symlink(tmp_path: Path) -> None:
+    dataset = tmp_path / "linked.jsonl"
+    dataset.write_text(_example(render_system_prompt()) + "\n", encoding="utf-8")
+    sidecar = write_sidecar(dataset)
+    external = tmp_path / "external-provenance.json"
+    external.write_bytes(sidecar.read_bytes())
+    sidecar.unlink()
+    try:
+        sidecar.symlink_to(external)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"file symlinks are unavailable: {exc}")
+
+    with pytest.raises(ProvenanceError, match="regular non-link"):
+        read_sidecar(dataset)

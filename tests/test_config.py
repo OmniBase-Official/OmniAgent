@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from agent import AgentConfig
 from config import (
     DEFAULT_CONFIG_NAME,
     ConfigError,
@@ -52,6 +53,30 @@ def settings_at(
 # --------------------------------------------------------------------------- #
 # precedence
 # --------------------------------------------------------------------------- #
+
+
+def test_timeout_help_and_config_describe_the_absolute_question_budget(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli_main(["--help"])
+
+    assert exit_info.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.lower().split())
+    assert "absolute per-question budget" in help_text
+    assert "synchronous http call is checked after it returns" in help_text
+    for model in (AgentConfig, Settings):
+        description = model.model_fields["timeout"].description
+        assert description is not None
+        assert "absolute per-question budget" in description.lower()
+        assert "cannot be interrupted" in description.lower()
+
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(
+        encoding="utf-8"
+    ).lower()
+    assert "one absolute monotonic per-question deadline" in readme
+    assert "the synchronous http call cannot currently be interrupted" in readme
+    assert "will not dispatch another tool or model request" in readme
 
 
 def test_built_in_defaults_when_there_is_nothing_else(tmp_path: Path) -> None:
@@ -361,10 +386,10 @@ def test_the_agent_config_carries_the_resolved_values(project: Path) -> None:
     assert agent_config.temperature == pytest.approx(0.0)
 
 
-def test_the_workspace_defaults_to_the_current_directory(tmp_path: Path) -> None:
+def test_the_workspace_is_unset_without_an_explicit_value(tmp_path: Path) -> None:
     settings, _ = settings_at(tmp_path)
 
-    assert settings.workspace == Path.cwd()
+    assert settings.workspace is None
 
 
 # --------------------------------------------------------------------------- #

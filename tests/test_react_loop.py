@@ -8,12 +8,14 @@ these red.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
 from openai import APIConnectionError
 
 from agent import AgentConfig, AgentError, ReActAgent
+from sandbox import Workspace
 from tests.fakes import FakeOpenAI
 
 FINAL = "Thought: done\nFinal Answer: {answer}"
@@ -25,7 +27,12 @@ def build(fake: FakeOpenAI, **overrides: Any) -> ReActAgent:
     # making the suite wait for them.
     overrides.setdefault("retry_backoff", 0.0)
     config = AgentConfig(verbose=False, **overrides)
-    return ReActAgent(config=config, client=fake.as_client(), printer=lambda _: None)
+    return ReActAgent(
+        config=config,
+        client=fake.as_client(),
+        printer=lambda _: None,
+        workspace=Workspace.at(Path.cwd()),
+    )
 
 
 def sent_messages(fake: FakeOpenAI, call_index: int) -> list[dict[str, Any]]:

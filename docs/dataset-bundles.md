@@ -1,14 +1,17 @@
 # Dataset bundles — what gets stored, and how to train from one
 
-A bundle is a directory holding one exported dataset together with enough
-record to reproduce it and enough proof to trust it. `scripts/publish_dataset.py`
-writes one; `--verify-only` re-checks it later.
+A bundle is a directory holding one exported dataset together with metadata
+to describe it and checksums to detect internal inconsistencies.
+`scripts/publish_dataset.py` writes one; `--verify-only` checks it later.
 
-The store is `G:\OmniAgent\datasets\<date>\`. G: is a removable exFAT volume
-(checked: `DriveType Removable`, 2 TB) — **local hardware, not a cloud sync
-folder**, which is what keeps this inside the project's local-only rule.
-If G: is ever replaced by a synced folder, stop: publishing there would send
-the dataset off the machine.
+The configured store is `G:\OmniAgent\datasets\<date>\`. G: is a removable
+exFAT volume (checked: `DriveType Removable`, 2 TB) — **local hardware, not a
+cloud sync folder**, which keeps this inside the project's local-only rule.
+The publisher now requires a filesystem that enforces private staging through
+persistent ACLs (Windows) or private directory permissions (Linux). exFAT does
+not provide that guarantee, so publishing to G: fails closed until the store is
+moved to a supported filesystem. Do not use a synced folder; publishing there
+would send the dataset off the machine.
 
 ## What is in a bundle
 
@@ -21,6 +24,14 @@ the dataset off the machine.
 | `MANIFEST.json` | the teacher model, the workspace rule, the source commit, and a sha256 per file |
 | `SHA256SUMS` | the same digests in `sha256sum` format |
 | `README.md` | this file |
+
+The provenance sidecar has exactly five keys: `dataset` (the dataset filename),
+`examples` (a positive integer), `system_prompt_sha256` and
+`live_prompt_sha256` (64 lowercase hexadecimal characters each), and
+`matches_live_prompt` (a boolean equal to whether those two digests match).
+The publisher validates this schema and checks the sidecar's dataset identity,
+record count, and data fingerprint against the validated source before it
+creates or changes anything in the destination.
 
 ## Why MANIFEST.json exists next to the sidecar
 
@@ -36,6 +47,13 @@ data just as much and it records neither:
   answer copied out of a log rather than worked out. Sealed, it cannot. A
   dataset collected on either side of that is a different dataset, and nothing
   in the file itself says which side it came from.
+
+The manifest has an exact schema, and its dataset name, example count and
+prompt fingerprint are checked against the validated dataset and provenance
+sidecar. The teacher model, workspace rule, source commit and publication time
+are self-reported metadata. Without an external trust anchor or signature,
+verification does not authenticate those claims, the bundle publisher, or who
+produced the bundle.
 
 ## Verify a bundle before you train on it
 
@@ -87,13 +105,43 @@ the reason this is a script and not a copy command: the destination is
 removable media, and a dataset is only worth training on if what arrived is
 what was collected.
 
-The publisher checks the destination directory and each output entry for
-symlinks and platform reparse points before writing; regular files from an
-earlier publish can still be overwritten. Verification accepts only
-single-component filenames from `SHA256SUMS` and refuses symlink or reparse
+The publisher opens source files once and validates, hashes, and copies the
+bytes read from those pinned handles. It pins the destination parent, creates
+and verifies a private staging directory through handles, and promotes with an
+atomic no-replace operation relative to the pinned parent. It fails closed
+when the OS or filesystem cannot provide those operations or enforce private
+staging. Linux source files must not grant group or other write permission,
+and files owned by another UID must not grant owner-write permission.
+Windows source handles deny concurrent write and delete sharing. The publisher
+captures extras into bounded memory snapshots before producing hashes or
+staging output, so manifest and published bytes match the captured bytes; it
+does not claim a point-in-time snapshot against a writer sharing the same
+publisher identity. The staging directory DACL is restricted, but the Windows
+destination parent's effective `DELETE_CHILD` access has not been tested under a distinct
+identity. Cross-identity move/delete isolation is therefore an open blocker;
+do not use a shared multi-user destination until that check is verified.
+On NTFS, a probe held the staging handle with read-only sharing and attempted
+rename and removal through the parent path; both failed with Windows sharing
+violation 32. This same-identity result does not establish distinct-identity
+access behavior or behavior on other Windows filesystems.
+Writers sharing the publisher's user or service identity are also outside the
+isolation boundary. A nonempty destination is refused; choose a new versioned
+path for each publish. Verification accepts
+only single-component filenames from `SHA256SUMS` and refuses symlink or reparse
 targets, so a checksum entry cannot read outside the bundle. Verification
 streams that file and caps it at 16 MiB, 4 KiB per line, and 100,000 entries;
-an exceeded cap is an explicit verification error.
+an exceeded cap is an explicit verification error. Duplicate names are
+reported and never cause the same payload to be hashed twice. Publishing and
+verification share a 512 MiB aggregate bundle-byte cap: publication preflights
+all source files plus generated `SHA256SUMS` and `MANIFEST.json` bytes before
+creating or changing the destination; verification counts those metadata files
+and the unique listed payloads before hashing them. Publication writes a
+complete bundle in a sibling private staging directory and verifies the bytes
+through the staging handles before promotion. A nonempty existing destination
+is refused. Replacing an empty directory is attempted only through a supported
+atomic handle-relative operation; otherwise publishing fails closed. The
+verifier rejects staging directories, missing manifests, and manifests whose
+file mapping differs from `SHA256SUMS`.
 
 ## Do not pool bundles
 

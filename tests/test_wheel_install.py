@@ -30,6 +30,7 @@ def test_installed_wheel_includes_dataset_provenance(tmp_path: Path) -> None:
     project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     modules = project["tool"]["setuptools"]["py-modules"]
     assert "dataset_provenance" in modules
+    assert "securefs" in modules
     for module in modules:
         shutil.copy2(REPO_ROOT / f"{module}.py", source / f"{module}.py")
 
@@ -127,9 +128,11 @@ def test_installed_wheel_includes_dataset_provenance(tmp_path: Path) -> None:
     dataset_path = runner_dir / "fixture-dataset.jsonl"
     runner_code = "; ".join(
         [
-            "import export_dataset, dataset_provenance, sys",
+            "import export_dataset, dataset_provenance, securefs, sandbox, sys",
             "print(export_dataset.__file__)",
             "print(dataset_provenance.__file__)",
+            "print(securefs.__file__)",
+            "print(sandbox.__file__)",
             "raise SystemExit(export_dataset.main(sys.argv[1:]))",
         ]
     )

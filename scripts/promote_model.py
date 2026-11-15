@@ -31,8 +31,10 @@ import stat
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
@@ -66,6 +68,10 @@ class PromotionEvaluationError(RuntimeError):
     """A fixed, safe-to-display reason a holdout run cannot authorize promotion."""
 
 
+class PromotionRecordError(RuntimeError):
+    """A promotion record destination is unsafe or could not be updated safely."""
+
+
 class _InputTooLargeError(ValueError):
     """Raised when a preflight input exceeds its explicit byte limit."""
 
@@ -84,6 +90,73 @@ def _is_link_or_reparse_point(metadata: os.stat_result) -> bool:
         return True
     reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     return bool(getattr(metadata, "st_file_attributes", 0) & reparse_attribute)
+
+
+def validate_promotion_record_path(path: Path) -> Path:
+    """Reject link-like or multiply linked record targets before promotion."""
+    try:
+        # resolve() would hide link components that this check needs to reject.
+        destination = Path(os.path.abspath(path))  # noqa: PTH100
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise PromotionRecordError("promotion record path cannot be inspected safely") from exc
+
+    for component in (destination, *destination.parents):
+        try:
+            metadata = component.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise PromotionRecordError(
+                "promotion record path cannot be inspected safely"
+            ) from exc
+        if _is_link_or_reparse_point(metadata):
+            raise PromotionRecordError(
+                "promotion record path contains a symlink or reparse point"
+            )
+        if component == destination:
+            if not stat.S_ISREG(metadata.st_mode):
+                raise PromotionRecordError("promotion record target is not a regular file")
+            if metadata.st_nlink != 1:
+                raise PromotionRecordError("promotion record target is hard-linked")
+    return destination
+
+
+def write_promotion_record(path: Path, record: Mapping[str, object]) -> None:
+    """Atomically update one regular record file without following its target."""
+    destination = validate_promotion_record_path(path)
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise PromotionRecordError("promotion record directory cannot be prepared") from exc
+    destination = validate_promotion_record_path(destination)
+
+    try:
+        existing_mode: int | None = None
+        with suppress(FileNotFoundError):
+            existing_mode = stat.S_IMODE(destination.lstat().st_mode)
+
+        temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+        descriptor = os.open(
+            temporary,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o666,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(record, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if existing_mode is not None:
+            temporary.chmod(existing_mode)
+        validate_promotion_record_path(destination)
+        temporary.replace(destination)
+    except PromotionRecordError:
+        raise
+    except OSError as exc:
+        raise PromotionRecordError("promotion record could not be written safely") from exc
+    finally:
+        if "temporary" in locals():
+            with suppress(OSError):
+                temporary.unlink()
 
 
 def validate_evaluation_report_path(path: Path, run: Path) -> Path:
@@ -337,6 +410,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    try:
+        record_path = validate_promotion_record_path(args.record)
+    except PromotionRecordError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+
     reasons = check_run(args.run)
     if reasons:
         print(f"[!] {args.run} is not promotable:", file=sys.stderr)
@@ -369,19 +448,22 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     _ollama_create(args.tag, args.run)
 
-    args.record.parent.mkdir(parents=True, exist_ok=True)
-    args.record.write_text(
-        json.dumps(
+    try:
+        write_promotion_record(
+            record_path,
             {
                 "tag": args.tag,
                 "run": args.run.name,
                 "promoted_at": datetime.now(UTC).isoformat(timespec="seconds"),
             },
-            indent=2,
         )
-        + "\n",
-        encoding="utf-8",
-    )
+    except PromotionRecordError as exc:
+        print(
+            "[!] model tag was created but the promotion record was not written "
+            f"({exc})",
+            file=sys.stderr,
+        )
+        return 1
     print(f"promoted {args.run.name} as {args.tag}")
     return 0
 

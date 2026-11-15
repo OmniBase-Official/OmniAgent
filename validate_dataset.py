@@ -114,6 +114,20 @@ class Report:
         return "\n".join(lines)
 
 
+class _DuplicateJSONKeyError(ValueError):
+    """Raised when a JSON object repeats a key with ambiguous meaning."""
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build a JSON object while rejecting duplicate keys at every depth."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJSONKeyError
+        result[key] = value
+    return result
+
+
 def find_secrets(text: str) -> list[str]:
     """Names of every credential pattern the text matches."""
     return [label for label, pattern in SECRET_PATTERNS if pattern.search(text)]
@@ -129,10 +143,12 @@ def check_shape(messages: Any, where: str) -> list[str]:
         if not isinstance(message, dict):
             problems.append(f"{where}: message {index} is not an object")
             continue
+        if set(message) != {"role", "content"}:
+            problems.append(f"{where}: message {index} contains unsupported fields")
+            continue
         role, content = message.get("role"), message.get("content")
         if not isinstance(role, str) or role not in VALID_ROLES:
-            role_label = repr(role)[:120]
-            problems.append(f"{where}: message {index} has role {role_label}")
+            problems.append(f"{where}: message {index} has an invalid role")
         if not isinstance(content, str) or not content.strip():
             problems.append(f"{where}: message {index} has empty content")
     if problems:
@@ -155,7 +171,7 @@ def check_shape(messages: Any, where: str) -> list[str]:
     return problems
 
 
-def _json_nesting_is_too_deep(text: str) -> bool:
+def _json_nesting_is_too_deep(text: str, max_depth: int = MAX_JSON_NESTING) -> bool:
     """Bound JSON container depth before parsing an untrusted dataset line."""
     depth = 0
     in_string = False
@@ -175,7 +191,7 @@ def _json_nesting_is_too_deep(text: str) -> bool:
             in_string = True
         elif character in "[{":
             depth += 1
-            if depth > MAX_JSON_NESTING:
+            if depth > max_depth:
                 return True
         elif character in "]}" and depth:
             depth -= 1
@@ -251,7 +267,10 @@ def validate_file(  # noqa: PLR0912, PLR0915 - one branch per validation failure
                     continue
 
                 try:
-                    example = json.loads(line)
+                    example = json.loads(line, object_pairs_hook=_unique_json_object)
+                except _DuplicateJSONKeyError:
+                    report.errors.append(f"{where}: JSON contains a duplicate object key")
+                    continue
                 except json.JSONDecodeError as exc:
                     report.errors.append(f"{where}: not valid JSON ({exc.msg})")
                     continue
@@ -263,6 +282,9 @@ def validate_file(  # noqa: PLR0912, PLR0915 - one branch per validation failure
                     continue
                 if not isinstance(example, dict) or "messages" not in example:
                     report.errors.append(f"{where}: missing a 'messages' key")
+                    continue
+                if set(example) != {"messages"}:
+                    report.errors.append(f"{where}: contains unsupported top-level fields")
                     continue
 
                 messages = example["messages"]
