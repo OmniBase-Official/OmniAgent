@@ -29,7 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from dataset_provenance import write_sidecar
+import validate_dataset as dataset_validation
+from dataset_provenance import DatasetBoundsError, iter_bounded_lines, write_sidecar
 from observability import TRUNCATION_MARKER
 from trajectory_utils import actions_in as _actions_in
 
@@ -98,24 +99,66 @@ def expand_paths(patterns: Sequence[str]) -> list[Path]:
     return paths
 
 
-def read_records(paths: Iterable[Path]) -> Iterator[dict[str, Any]]:
+def read_records(  # noqa: PLR0912 - separate handling for malformed input and resource bounds
+    paths: Iterable[Path],
+) -> Iterator[dict[str, Any]]:
     """Yield every well-formed JSON object across the given log files.
 
     A half-written final line is normal for a log that is still open, so a
     malformed line is skipped rather than fatal.
     """
+    total_bytes = 0
+    total_lines = 0
+    total_records = 0
     for path in paths:
-        with path.open(encoding="utf-8") as handle:
-            for line in handle:
-                stripped = line.strip()
-                if not stripped:
+        try:
+            for number, raw_line in iter_bounded_lines(path):
+                total_bytes += len(raw_line)
+                total_lines += 1
+                if total_bytes > dataset_validation.MAX_DATASET_BYTES:
+                    raise DatasetError(
+                        "input logs exceed the "
+                        f"{dataset_validation.MAX_DATASET_BYTES}-byte total limit"
+                    )
+                if total_lines > dataset_validation.MAX_DATASET_LINES:
+                    raise DatasetError(
+                        "input logs exceed the "
+                        f"{dataset_validation.MAX_DATASET_LINES}-line total limit"
+                    )
+                if not raw_line.strip():
                     continue
+                total_records += 1
+                if total_records > dataset_validation.MAX_DATASET_EXAMPLES:
+                    raise DatasetError(
+                        "input logs exceed the "
+                        f"{dataset_validation.MAX_DATASET_EXAMPLES}-record total limit"
+                    )
+                try:
+                    stripped = raw_line.decode("utf-8").strip()
+                except UnicodeDecodeError as exc:
+                    raise DatasetError(f"{path.name} line {number} is not valid UTF-8") from exc
+                if dataset_validation._json_nesting_is_too_deep(  # noqa: SLF001 - reuse validator policy
+                    stripped
+                ):
+                    raise DatasetError(
+                        f"{path.name} line {number} has JSON nesting that is too deep"
+                    )
                 try:
                     record = json.loads(stripped)
                 except json.JSONDecodeError:
                     continue
+                except RecursionError:
+                    raise DatasetError(
+                        f"{path.name} line {number} has JSON nesting that is too deep"
+                    ) from None
+                except ValueError as exc:
+                    raise DatasetError(
+                        f"{path.name} line {number} has an invalid or oversized JSON value"
+                    ) from exc
                 if isinstance(record, dict) and "event" in record:
                     yield record
+        except DatasetBoundsError as exc:
+            raise DatasetError(str(exc)) from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -135,7 +178,13 @@ def collect_turns(  # noqa: PLR0912 - one branch per log event we replay
     order: list[tuple[str, int]] = []
     prompts: dict[str, str] = {}
 
+    record_count = 0
     for record in records:
+        record_count += 1
+        if record_count > dataset_validation.MAX_DATASET_EXAMPLES:
+            raise DatasetError(
+                f"input logs exceed the {dataset_validation.MAX_DATASET_EXAMPLES}-record limit"
+            )
         event = record.get("event")
         session_id = str(record.get("session_id", ""))
 
@@ -397,7 +446,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[!] {exc}", file=sys.stderr)
         return 1
 
-    turns, prompts = collect_turns(read_records(paths))
+    try:
+        turns, prompts = collect_turns(read_records(paths))
+    except DatasetError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
     examples, stats = build_examples(
         turns,
         prompts,

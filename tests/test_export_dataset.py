@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+import validate_dataset as dataset_validation
 from export_dataset import (
     DatasetError,
     build_examples,
@@ -372,6 +373,63 @@ def test_malformed_lines_are_skipped_not_fatal(tmp_path: Path) -> None:
 
     records = list(read_records([log]))
     assert [r["event"] for r in records] == ["agent.created", "agent.turn.start"]
+
+
+def test_read_records_rejects_oversized_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dataset_validation, "MAX_DATASET_BYTES", 16)
+    log = tmp_path / "oversized.jsonl"
+    log.write_bytes(b" " * 17)
+
+    with pytest.raises(DatasetError, match="maximum file size"):
+        list(read_records([log]))
+
+
+def test_read_records_rejects_an_overlong_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dataset_validation, "MAX_DATASET_LINE_BYTES", 16)
+    log = tmp_path / "long-line.jsonl"
+    log.write_bytes(b" " * 17 + b"\n")
+
+    with pytest.raises(DatasetError, match="maximum line size"):
+        list(read_records([log]))
+
+
+def test_read_records_rejects_excessive_json_nesting(tmp_path: Path) -> None:
+    log = tmp_path / "deep.jsonl"
+    log.write_text('{"event":"x","nested":' + "[" * 5_000 + "]" * 5_000 + "}\n")
+
+    with pytest.raises(DatasetError, match="JSON nesting.*too deep"):
+        list(read_records([log]))
+
+
+def test_read_records_converts_parser_recursion_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = write_log(tmp_path / "recursion.jsonl", [created()])
+    monkeypatch.setattr(json, "loads", lambda _: (_ for _ in ()).throw(RecursionError()))
+
+    with pytest.raises(DatasetError, match="JSON nesting.*too deep"):
+        list(read_records([log]))
+
+
+def test_read_records_converts_oversized_integer_value(tmp_path: Path) -> None:
+    log = tmp_path / "large-integer.jsonl"
+    log.write_text('{"event":"test","value":' + "9" * 5_000 + "}\n", encoding="utf-8")
+
+    with pytest.raises(DatasetError, match=r"line 1 has an invalid or oversized JSON value"):
+        list(read_records([log]))
+
+
+def test_collect_turns_bounds_direct_record_iterables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dataset_validation, "MAX_DATASET_EXAMPLES", 1)
+
+    with pytest.raises(DatasetError, match="record limit"):
+        collect_turns([created(), created(session_id="s2")])
 
 
 def test_expand_paths_resolves_a_glob(tmp_path: Path) -> None:
