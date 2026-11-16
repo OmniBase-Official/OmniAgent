@@ -49,6 +49,10 @@ UNRECONSTRUCTIBLE_EVENTS = frozenset(
 #: Minimum messages in a usable example: system, user, assistant.
 _MIN_MESSAGES = 3
 
+# Event turn numbers are retained in dictionary keys by collect_turns(). Keep
+# the magnitude within a signed 64-bit domain, which covers realistic logs.
+MAX_TURN_NUMBER = (1 << 63) - 1
+
 
 class DatasetError(ValueError):
     """Raised when a log cannot be read at all."""
@@ -170,23 +174,118 @@ def _is_truncated(*values: object) -> bool:
     return any(isinstance(v, str) and TRUNCATION_MARKER in v for v in values)
 
 
+def _bounded_session_id(value: object, record_number: int) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None or isinstance(value, bool | float):
+        return str(value)
+    if isinstance(value, int):
+        if value.bit_length() > dataset_validation.MAX_DATASET_LINE_BYTES * 4:
+            raise DatasetError(f"input record {record_number} has an oversized session_id")
+        try:
+            return str(value)
+        except ValueError:
+            raise DatasetError(
+                f"input record {record_number} has an oversized session_id"
+            ) from None
+    raise DatasetError(f"input record {record_number} has an unsupported session_id type")
+
+
+def _bounded_text_bytes(values: Iterable[str], record_number: int) -> int:
+    total = 0
+    for value in values:
+        if len(value) > dataset_validation.MAX_DATASET_LINE_BYTES:
+            raise DatasetError(
+                f"input record {record_number} exceeds the "
+                f"{dataset_validation.MAX_DATASET_LINE_BYTES}-byte text limit"
+            )
+        try:
+            total += len(value.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise DatasetError(
+                f"input record {record_number} contains invalid UTF-8 text"
+            ) from exc
+        if total > dataset_validation.MAX_DATASET_LINE_BYTES:
+            raise DatasetError(
+                f"input record {record_number} exceeds the "
+                f"{dataset_validation.MAX_DATASET_LINE_BYTES}-byte text limit"
+            )
+    return total
+
+
+def _account_retained_record(
+    record: dict[str, Any], record_number: int, retained_total: int
+) -> tuple[Any, str, int]:
+    session_id = _bounded_session_id(record.get("session_id", ""), record_number)
+    event = record.get("event")
+    if event is not None and not isinstance(event, str):
+        raise DatasetError(f"input record {record_number} has an invalid event name")
+    raw_turn = record.get("turn")
+    turn_size = 0
+    if isinstance(raw_turn, int):
+        if raw_turn.bit_length() > MAX_TURN_NUMBER.bit_length():
+            raise DatasetError(
+                f"input record {record_number} turn number exceeds {MAX_TURN_NUMBER}"
+            )
+        turn_size = sys.getsizeof(raw_turn)
+    relevant_fields: tuple[str, ...] = {
+        "agent.created": ("system_prompt",),
+        "agent.turn.start": ("question",),
+        "agent.llm.response": ("reply",),
+        "agent.tool.result": ("observation",),
+        "agent.turn.end": ("answer",),
+    }.get(event, ()) if isinstance(event, str) else ()
+    retained_text = [session_id]
+    if isinstance(event, str):
+        retained_text.append(event)
+    for field_name in relevant_fields:
+        value = record.get(field_name)
+        if isinstance(value, str) and (field_name != "reply" or value):
+            retained_text.append(value)
+            if field_name == "observation":
+                retained_text.append("Observation: ")
+
+    record_bytes = _bounded_text_bytes(retained_text, record_number) + turn_size
+    if record_bytes > dataset_validation.MAX_DATASET_LINE_BYTES:
+        raise DatasetError(
+            f"input record {record_number} exceeds the "
+            f"{dataset_validation.MAX_DATASET_LINE_BYTES}-byte retained-data limit"
+        )
+    retained_total += record_bytes
+    if retained_total > dataset_validation.MAX_DATASET_BYTES:
+        raise DatasetError(
+            f"input logs exceed the {dataset_validation.MAX_DATASET_BYTES}-byte total limit"
+        )
+    return event, session_id, retained_total
+
+
 def collect_turns(  # noqa: PLR0912 - one branch per log event we replay
     records: Iterable[dict[str, Any]],
 ) -> tuple[list[Turn], dict[str, str]]:
-    """Group records into turns, and collect each session's system prompt."""
+    """Group bounded records into turns and collect each session's system prompt.
+
+    Direct callers may provide records without going through ``read_records``,
+    so retained text is bounded here as well. The limits match the JSONL reader:
+    each record's retained UTF-8 text plus turn identifier storage is limited to
+    ``MAX_DATASET_LINE_BYTES``; the complete retained input is limited to
+    ``MAX_DATASET_BYTES``. Turn numbers must fit the signed 64-bit domain.
+    """
     turns: dict[tuple[str, int], Turn] = {}
     order: list[tuple[str, int]] = []
     prompts: dict[str, str] = {}
 
     record_count = 0
+    retained_bytes = 0
     for record in records:
         record_count += 1
         if record_count > dataset_validation.MAX_DATASET_EXAMPLES:
             raise DatasetError(
                 f"input logs exceed the {dataset_validation.MAX_DATASET_EXAMPLES}-record limit"
             )
-        event = record.get("event")
-        session_id = str(record.get("session_id", ""))
+
+        event, session_id, retained_bytes = _account_retained_record(
+            record, record_count, retained_bytes
+        )
 
         if event == "agent.created":
             prompt = record.get("system_prompt")
