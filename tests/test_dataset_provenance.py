@@ -146,7 +146,7 @@ def test_provenance_rejects_excessive_json_nesting(tmp_path: Path) -> None:
     dataset = tmp_path / "deep.jsonl"
     dataset.write_text("[" * 5_000 + "]" * 5_000 + "\n", encoding="utf-8")
 
-    with pytest.raises(ProvenanceError, match="JSON nesting.*too deep"):
+    with pytest.raises(ProvenanceError, match=r"JSON nesting.*too deep"):
         dataset_fingerprint(dataset)
 
 

@@ -401,7 +401,7 @@ def test_read_records_rejects_excessive_json_nesting(tmp_path: Path) -> None:
     log = tmp_path / "deep.jsonl"
     log.write_text('{"event":"x","nested":' + "[" * 5_000 + "]" * 5_000 + "}\n")
 
-    with pytest.raises(DatasetError, match="JSON nesting.*too deep"):
+    with pytest.raises(DatasetError, match=r"JSON nesting.*too deep"):
         list(read_records([log]))
 
 
@@ -411,7 +411,7 @@ def test_read_records_converts_parser_recursion_error(
     log = write_log(tmp_path / "recursion.jsonl", [created()])
     monkeypatch.setattr(json, "loads", lambda _: (_ for _ in ()).throw(RecursionError()))
 
-    with pytest.raises(DatasetError, match="JSON nesting.*too deep"):
+    with pytest.raises(DatasetError, match=r"JSON nesting.*too deep"):
         list(read_records([log]))
 
 
