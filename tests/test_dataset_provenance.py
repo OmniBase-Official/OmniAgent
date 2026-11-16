@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+import dataset_provenance as provenance
+import validate_dataset as dataset_validation
 from agent import AgentConfig, ReActAgent
 from dataset_provenance import (
     ProvenanceError,
@@ -116,6 +118,59 @@ def test_a_dataset_mixing_two_prompts_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(ProvenanceError, match="mixes 2 distinct"):
         dataset_fingerprint(dataset)
+
+
+def test_provenance_rejects_oversized_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dataset_validation, "MAX_DATASET_BYTES", 16)
+    dataset = tmp_path / "oversized.jsonl"
+    dataset.write_bytes(b" " * 17)
+
+    with pytest.raises(ProvenanceError, match="maximum file size"):
+        dataset_fingerprint(dataset)
+
+
+def test_provenance_rejects_an_overlong_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dataset_validation, "MAX_DATASET_LINE_BYTES", 16)
+    dataset = tmp_path / "long-line.jsonl"
+    dataset.write_bytes(b" " * 17 + b"\n")
+
+    with pytest.raises(ProvenanceError, match="maximum line size"):
+        dataset_fingerprint(dataset)
+
+
+def test_provenance_rejects_excessive_json_nesting(tmp_path: Path) -> None:
+    dataset = tmp_path / "deep.jsonl"
+    dataset.write_text("[" * 5_000 + "]" * 5_000 + "\n", encoding="utf-8")
+
+    with pytest.raises(ProvenanceError, match=r"JSON nesting.*too deep"):
+        dataset_fingerprint(dataset)
+
+
+def test_provenance_converts_parser_recursion_error_to_validation_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "recursion.jsonl"
+    dataset.write_text(_example("PROMPT A") + "\n", encoding="utf-8")
+    monkeypatch.setattr(json, "loads", lambda _: (_ for _ in ()).throw(RecursionError()))
+
+    with pytest.raises(ProvenanceError, match="invalid JSON"):
+        dataset_fingerprint(dataset)
+
+
+def test_sidecar_reader_bounds_size_and_nesting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "sidecar.jsonl"
+    path = provenance.sidecar_path(dataset)
+    path.write_text(" " * 33, encoding="utf-8")
+    monkeypatch.setattr(provenance, "MAX_SIDECAR_BYTES", 32)
+
+    with pytest.raises(ProvenanceError, match="size limit"):
+        read_sidecar(dataset)
 
 
 def test_an_example_without_a_system_turn_is_refused(tmp_path: Path) -> None:

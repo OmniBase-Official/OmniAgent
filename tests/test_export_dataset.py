@@ -8,11 +8,14 @@ truncated, a conversation whose system prompt was never logged.
 from __future__ import annotations
 
 import json
+import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import validate_dataset as dataset_validation
 from export_dataset import (
     DatasetError,
     build_examples,
@@ -372,6 +375,146 @@ def test_malformed_lines_are_skipped_not_fatal(tmp_path: Path) -> None:
 
     records = list(read_records([log]))
     assert [r["event"] for r in records] == ["agent.created", "agent.turn.start"]
+
+
+def test_read_records_rejects_oversized_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dataset_validation, "MAX_DATASET_BYTES", 16)
+    log = tmp_path / "oversized.jsonl"
+    log.write_bytes(b" " * 17)
+
+    with pytest.raises(DatasetError, match="maximum file size"):
+        list(read_records([log]))
+
+
+def test_read_records_rejects_an_overlong_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dataset_validation, "MAX_DATASET_LINE_BYTES", 16)
+    log = tmp_path / "long-line.jsonl"
+    log.write_bytes(b" " * 17 + b"\n")
+
+    with pytest.raises(DatasetError, match="maximum line size"):
+        list(read_records([log]))
+
+
+def test_read_records_rejects_excessive_json_nesting(tmp_path: Path) -> None:
+    log = tmp_path / "deep.jsonl"
+    log.write_text('{"event":"x","nested":' + "[" * 5_000 + "]" * 5_000 + "}\n")
+
+    with pytest.raises(DatasetError, match=r"JSON nesting.*too deep"):
+        list(read_records([log]))
+
+
+def test_read_records_converts_parser_recursion_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = write_log(tmp_path / "recursion.jsonl", [created()])
+    monkeypatch.setattr(json, "loads", lambda _: (_ for _ in ()).throw(RecursionError()))
+
+    with pytest.raises(DatasetError, match=r"JSON nesting.*too deep"):
+        list(read_records([log]))
+
+
+def test_read_records_converts_oversized_integer_value(tmp_path: Path) -> None:
+    log = tmp_path / "large-integer.jsonl"
+    log.write_text('{"event":"test","value":' + "9" * 5_000 + "}\n", encoding="utf-8")
+
+    with pytest.raises(DatasetError, match=r"line 1 has an invalid or oversized JSON value"):
+        list(read_records([log]))
+
+
+def test_collect_turns_bounds_direct_record_iterables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dataset_validation, "MAX_DATASET_EXAMPLES", 1)
+
+    with pytest.raises(DatasetError, match="record limit"):
+        collect_turns([created(), created(session_id="s2")])
+
+
+def test_collect_turns_rejects_an_oversized_retained_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dataset_validation, "MAX_DATASET_LINE_BYTES", 64)
+
+    with pytest.raises(DatasetError, match="record 1 exceeds the 64-byte text limit"):
+        collect_turns([created(system_prompt="p" * 65)])
+
+
+def test_collect_turns_rejects_aggregate_retained_text_over_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dataset_validation, "MAX_DATASET_LINE_BYTES", 64)
+    monkeypatch.setattr(dataset_validation, "MAX_DATASET_BYTES", 39)
+
+    with pytest.raises(DatasetError, match="39-byte total limit"):
+        collect_turns([created(system_prompt="p" * 5), created(system_prompt="q" * 5)])
+
+
+def test_collect_turns_accepts_exact_utf8_byte_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dataset_validation, "MAX_DATASET_LINE_BYTES", 21)
+    monkeypatch.setattr(dataset_validation, "MAX_DATASET_BYTES", 21)
+
+    turns, prompts = collect_turns([created(system_prompt="é" * 3)])
+
+    assert turns == []
+    assert prompts == {"s1": "é" * 3}
+
+
+def test_collect_turns_returns_no_partial_result_when_later_record_exceeds_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dataset_validation, "MAX_DATASET_LINE_BYTES", 64)
+    result: tuple[list[Any], dict[str, str]] | None = None
+
+    def records() -> Iterator[dict[str, Any]]:
+        yield created(system_prompt="safe")
+        yield created(system_prompt="p" * 65)
+
+    with pytest.raises(DatasetError, match="record 2 exceeds the 64-byte text limit"):
+        result = collect_turns(records())
+
+    assert result is None
+
+
+def test_collect_turns_sanitizes_oversized_integer_session_id() -> None:
+    oversized_id = 10**5_000
+
+    with pytest.raises(DatasetError, match="oversized session_id"):
+        collect_turns([record("agent.created", session_id=oversized_id)])
+
+
+def test_collect_turns_rejects_an_oversized_turn_number() -> None:
+    with pytest.raises(DatasetError, match="turn number exceeds"):
+        collect_turns([record("agent.turn.start", turn=10**5_000, question="q")])
+
+
+def test_collect_turns_charges_repeated_large_turn_identifiers_to_total_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    large_turn = (1 << 62) - 1
+    per_record_bytes = (
+        len("agent.turn.start")
+        + len("s1")
+        + len("q")
+        + sys.getsizeof(large_turn)
+    )
+    monkeypatch.setattr(dataset_validation, "MAX_DATASET_LINE_BYTES", per_record_bytes + 1)
+    monkeypatch.setattr(dataset_validation, "MAX_DATASET_BYTES", per_record_bytes + 1)
+    result: tuple[list[Any], dict[str, str]] | None = None
+    records = [
+        record("agent.turn.start", session_id="s1", turn=large_turn, question="q"),
+        record("agent.turn.start", session_id="s2", turn=large_turn, question="q"),
+    ]
+
+    with pytest.raises(DatasetError, match="byte total limit"):
+        result = collect_turns(records)
+
+    assert result is None
 
 
 def test_expand_paths_resolves_a_glob(tmp_path: Path) -> None:
