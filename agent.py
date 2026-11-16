@@ -22,6 +22,7 @@ import time
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable
 from importlib import import_module
+from threading import Lock
 from typing import Any, cast
 from urllib.parse import urlsplit
 
@@ -666,7 +667,11 @@ def _clean_action_input(raw: str) -> str:
 
 
 class ReActAgent:
-    """A ReAct agent backed by a local Ollama model."""
+    """A ReAct agent backed by a local Ollama model.
+
+    One instance represents one serialized conversation session. Create a
+    separate instance for each conversation that must run concurrently.
+    """
 
     def __init__(  # noqa: PLR0913 - tool/capability policies remain explicit
         self,
@@ -713,6 +718,7 @@ class ReActAgent:
         self.history: list[ChatCompletionMessageParam] = []
         self.last_trace: list[Step] = []
         self._turn = 0
+        self._execution_lock = Lock()
 
         obs.event(
             "agent.created",
@@ -736,9 +742,21 @@ class ReActAgent:
 
     def reset(self) -> None:
         """Forget the conversation history."""
-        obs.event("agent.reset", logger=_log, level=logging.DEBUG, turns=self._turn)
-        self.history.clear()
-        self.last_trace.clear()
+        self._acquire_execution_slot()
+        try:
+            obs.event("agent.reset", logger=_log, level=logging.DEBUG, turns=self._turn)
+            self.history.clear()
+            self.last_trace.clear()
+        finally:
+            self._execution_lock.release()
+
+    def _acquire_execution_slot(self) -> None:
+        """Fail fast when one conversation instance is already mutating state."""
+        if not self._execution_lock.acquire(blocking=False):
+            raise AgentError(
+                "this ReActAgent instance is already active; concurrent operations are "
+                "not supported. Use a separate instance for each concurrent session."
+            )
 
     def _create_completion(self, **kwargs: Any) -> Any:
         """Revalidate the client path before dispatching the pinned method."""
@@ -794,13 +812,17 @@ class ReActAgent:
         return available
 
     def run(self, question: str) -> str:
-        """Answer one question, running the ReAct loop until it settles."""
-        self._turn += 1
-        if self.workspace is not None:
-            with workspace_scope(self.workspace), obs.bind(turn=self._turn):
+        """Answer one question in this instance's serialized conversation."""
+        self._acquire_execution_slot()
+        try:
+            self._turn += 1
+            if self.workspace is not None:
+                with workspace_scope(self.workspace), obs.bind(turn=self._turn):
+                    return self._run_turn(question)
+            with obs.bind(turn=self._turn):
                 return self._run_turn(question)
-        with obs.bind(turn=self._turn):
-            return self._run_turn(question)
+        finally:
+            self._execution_lock.release()
 
     def _run_turn(self, question: str) -> str:
         self.last_trace = []
