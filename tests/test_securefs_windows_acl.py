@@ -12,6 +12,7 @@ from typing import cast
 
 import pytest
 
+import securefs
 from publisher_root import _known_local_data_root
 from securefs import SecureRoot
 
@@ -126,7 +127,7 @@ def test_inherited_unsafe_grant_is_checked_at_each_ancestor(tmp_path: Path) -> N
     assert not _supports_private_staging(leaf)
 
 
-def test_benign_inherited_read_and_traverse_grants_are_accepted(tmp_path: Path) -> None:
+def test_benign_inherited_read_and_traverse_ace_is_accepted(tmp_path: Path) -> None:
     current = _current_sid()
     top = tmp_path / "read-only-parent"
     top.mkdir()
@@ -135,7 +136,15 @@ def test_benign_inherited_read_and_traverse_grants_are_accepted(tmp_path: Path) 
     leaf = middle / "leaf"
     middle.mkdir()
     leaf.mkdir()
-    assert _supports_private_staging(leaf)
+    root = SecureRoot(leaf, writable=True, _allow_safe_inherited_ancestors=True)
+    try:
+        acl_check_name = "_has_safe_parent_acl"
+        acl_check = cast(Callable[..., bool], getattr(securefs, acl_check_name))
+        root_handle_name = "handle"
+        root_handle = cast(int, getattr(root, root_handle_name))
+        assert acl_check(root_handle, allow_safe_inherited=True)
+    finally:
+        root.close()
 
 
 def test_supported_local_appdata_ancestors_have_a_safe_standard_acl() -> None:

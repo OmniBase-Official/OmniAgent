@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import shutil
 import stat
@@ -11,6 +12,7 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -92,6 +94,20 @@ def test_non_windows_token_check_remains_a_noop(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(sys, "platform", "linux")
 
     assert publisher_root._windows_standard_token()
+
+
+def test_windows_dll_loader_preserves_last_error_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, bool]] = []
+    library = cast(ctypes.CDLL, object())
+
+    def fake_loader(name: str, *, use_last_error: bool) -> ctypes.CDLL:
+        calls.append((name, use_last_error))
+        return library
+
+    monkeypatch.setattr(ctypes, "WinDLL", fake_loader, raising=False)
+
+    assert publisher_root._load_windows_dll("advapi32") is library
+    assert calls == [("advapi32", True)]
 
 
 def test_posix_ancestor_validation_accepts_root_and_user_home(

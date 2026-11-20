@@ -12,7 +12,9 @@ import os
 import stat
 import struct
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 from securefs import SecureRoot
 
@@ -52,6 +54,12 @@ class PublisherRootError(OSError):
     """The current user's publication directory is unsafe or unavailable."""
 
 
+def _load_windows_dll(name: str) -> ctypes.CDLL:
+    loader_name = "WinDLL"
+    loader = cast(Callable[..., ctypes.CDLL], getattr(ctypes, loader_name))
+    return loader(name, use_last_error=True)
+
+
 def _is_windows() -> bool:
     return sys.platform == "win32"
 
@@ -73,8 +81,8 @@ def _known_local_data_root() -> Path:
             0x4FCF,
             (ctypes.c_ubyte * 8)(0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91),
         )
-        shell = ctypes.WinDLL("shell32", use_last_error=True)
-        ole = ctypes.WinDLL("ole32", use_last_error=True)
+        shell = _load_windows_dll("shell32")
+        ole = _load_windows_dll("ole32")
         shell.SHGetKnownFolderPath.argtypes = [
             ctypes.POINTER(_Guid),
             ctypes.c_uint32,
@@ -104,8 +112,8 @@ def _known_local_data_root() -> Path:
 def _windows_standard_token() -> bool:  # noqa: PLR0912, PLR0915 - explicit token privilege checks
     if not _is_windows():
         return True
-    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi = _load_windows_dll("advapi32")
+    kernel = _load_windows_dll("kernel32")
     advapi.OpenProcessToken.argtypes = [
         ctypes.c_void_p,
         ctypes.c_uint32,

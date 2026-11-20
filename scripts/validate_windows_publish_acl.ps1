@@ -519,6 +519,7 @@ $testResults = @{}
 $probeExitCode = $null
 $failureClass = $null
 $failurePhase = "preflight"
+$identitySubphase = "not-started"
 $localAppData = $null
 
 function New-RandomCredential([string]$Name) {
@@ -547,29 +548,41 @@ try {
     New-Item -ItemType Directory -Path $privateData | Out-Null
     New-Item -ItemType Directory -Path $destinationParent | Out-Null
     $failurePhase = "identity-setup"
+    $identitySubphase = "publisher-credential"
     $publisherCredential = New-RandomCredential $publisherName
+    $identitySubphase = "peer-credential"
     $peerCredential = New-RandomCredential $peerName
     $ownerDescription = "OmniAgent ACL validation run " + $runId
+    $identitySubphase = "account-collision-check"
     if ((Get-LocalUser -Name $publisherName -ErrorAction SilentlyContinue) -or
         (Get-LocalUser -Name $peerName -ErrorAction SilentlyContinue)) {
         throw "A generated temporary username already exists."
     }
     $usersToClean += [pscustomobject]@{ Name = $publisherName; Marker = $ownerDescription; Sid = $null }
+    $identitySubphase = "publisher-account-create"
     New-LocalUser -Name $publisherName -Password $publisherCredential.Password -Description $ownerDescription -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword | Out-Null
+    $identitySubphase = "publisher-account-readback"
     $publisherAccount = Get-LocalUser -Name $publisherName
     if ($publisherAccount.Description -ne $ownerDescription) { throw "Publisher ownership marker mismatch." }
+    $identitySubphase = "publisher-sid-capture"
     $usersToClean[0].Sid = $publisherAccount.SID.Value
 
     $usersToClean += [pscustomobject]@{ Name = $peerName; Marker = $ownerDescription; Sid = $null }
+    $identitySubphase = "peer-account-create"
     New-LocalUser -Name $peerName -Password $peerCredential.Password -Description $ownerDescription -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword | Out-Null
+    $identitySubphase = "peer-account-readback"
     $peerAccount = Get-LocalUser -Name $peerName
     if ($peerAccount.Description -ne $ownerDescription) { throw "Peer ownership marker mismatch." }
+    $identitySubphase = "peer-sid-capture"
     $usersToClean[1].Sid = $peerAccount.SID.Value
     $publisherSid = $publisherAccount.SID.Value
     $peerSid = $peerAccount.SID.Value
+    $identitySubphase = "sid-distinctness-check"
     if ($publisherSid -eq $peerSid) { throw "Temporary users did not receive distinct SIDs." }
+    $identitySubphase = "admin-membership-check"
     $adminSids = @(Get-LocalGroupMember -Group "Administrators" | ForEach-Object { $_.SID.Value })
     if ($adminSids -contains $publisherSid -or $adminSids -contains $peerSid) { throw "Temporary accounts must be standard users." }
+    $identitySubphase = "complete"
 
     $failurePhase = "acl-setup"
     $systemFull = "*S-1-5-18:(OI)(CI)F"
@@ -768,6 +781,7 @@ try {
         peer_probe_exit_code = $probeExitCode
         failure_class = $failureClass
         failure_phase = $failurePhase
+        identity_subphase = $identitySubphase
         failure_status = if ($failureClass) { "failed" } else { "passed" }
         path_acl_facts = $pathAclFacts
         cleanup_failed = ($cleanupErrors.Count -gt 0)
