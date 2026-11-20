@@ -140,7 +140,8 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository &&
         github.event.pull_request.base.ref == 'main') ||
        (github.event_name == 'workflow_dispatch' &&
-        github.ref == 'refs/heads/codex/scale-security-hardening-20261113'))
+        (github.ref == 'refs/heads/codex/scale-security-hardening-20261113' ||
+         github.ref == 'refs/heads/codex/security-scans-validation-20261120')))
     runs-on: windows-latest
     timeout-minutes: 15
     permissions:
