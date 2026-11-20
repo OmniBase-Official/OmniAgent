@@ -516,6 +516,10 @@ file into a dataset, but OmniAgent does not create persistent run logs. Dataset
 collection is disabled by the privacy policy; do not enable a file sink to
 work around this restriction. From a source checkout, run:
 
+> **Privacy warning:** Run-log input and exported output may contain private
+> prompts, replies, tool inputs, and observations. Review and redact them before
+> use, and keep these files out of shared folders and repository paths.
+
 ```bash
 python export_dataset.py compatible.jsonl -o data/dataset.jsonl --stats
 ```

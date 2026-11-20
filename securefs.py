@@ -59,42 +59,42 @@ if sys.platform == "win32":
     _advapi = ctypes.WinDLL("advapi32", use_last_error=True)
 
     class _US(ctypes.Structure):
-        _fields_ = [
+        _fields_ = (
             ("Length", wintypes.USHORT),
             ("MaximumLength", wintypes.USHORT),
             ("Buffer", wintypes.LPWSTR),
-        ]
+        )
 
     class _OA(ctypes.Structure):
-        _fields_ = [
+        _fields_ = (
             ("Length", wintypes.ULONG),
             ("RootDirectory", wintypes.HANDLE),
             ("ObjectName", ctypes.POINTER(_US)),
             ("Attributes", wintypes.ULONG),
             ("SecurityDescriptor", wintypes.LPVOID),
             ("SecurityQualityOfService", wintypes.LPVOID),
-        ]
+        )
 
     class _IOSB(ctypes.Structure):
-        _fields_ = [
+        _fields_ = (
             ("Status", ctypes.c_size_t),
             ("Information", ctypes.c_size_t),
-        ]
+        )
 
     class _TAG(ctypes.Structure):
-        _fields_ = [
+        _fields_ = (
             ("FileAttributes", wintypes.DWORD),
             ("ReparseTag", wintypes.DWORD),
-        ]
+        )
 
     class _STANDARD(ctypes.Structure):
-        _fields_ = [
+        _fields_ = (
             ("AllocationSize", ctypes.c_longlong),
             ("EndOfFile", ctypes.c_longlong),
             ("NumberOfLinks", wintypes.DWORD),
             ("DeletePending", wintypes.BOOLEAN),
             ("Directory", wintypes.BOOLEAN),
-        ]
+        )
 
     _nt.NtCreateFile.argtypes = [
         ctypes.POINTER(wintypes.HANDLE),
@@ -171,6 +171,73 @@ if sys.platform == "win32":
     ]
     _k.GetCurrentProcess.restype = wintypes.HANDLE
     _k.LocalFree.argtypes = [wintypes.HLOCAL]
+    _k.CloseHandle.argtypes = [wintypes.HANDLE]
+    _advapi.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    _advapi.OpenProcessToken.restype = wintypes.BOOL
+    _advapi.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _advapi.GetTokenInformation.restype = wintypes.BOOL
+    _advapi.GetSecurityInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+    ]
+    _advapi.GetSecurityInfo.restype = wintypes.DWORD
+    _advapi.GetSecurityDescriptorOwner.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    _advapi.GetSecurityDescriptorOwner.restype = wintypes.BOOL
+    _advapi.GetSecurityDescriptorDacl.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    _advapi.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    _advapi.GetSecurityDescriptorControl.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _advapi.GetSecurityDescriptorControl.restype = wintypes.BOOL
+    _advapi.GetAclInformation.argtypes = [
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.c_int,
+    ]
+    _advapi.GetAclInformation.restype = wintypes.BOOL
+    _advapi.GetAce.argtypes = [
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPVOID),
+    ]
+    _advapi.GetAce.restype = wintypes.BOOL
+    _advapi.IsValidSid.argtypes = [wintypes.LPVOID]
+    _advapi.IsValidSid.restype = wintypes.BOOL
+    _advapi.GetLengthSid.argtypes = [wintypes.LPVOID]
+    _advapi.GetLengthSid.restype = wintypes.DWORD
+    _advapi.ConvertSidToStringSidW.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.LPWSTR),
+    ]
+    _advapi.ConvertSidToStringSidW.restype = wintypes.BOOL
     _advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
         wintypes.LPCWSTR,
         wintypes.DWORD,
@@ -181,6 +248,7 @@ if sys.platform == "win32":
 
     _INVALID = ctypes.c_void_p(-1).value
     _SHARE = 7
+    _SHARE_NO_DELETE = 3
     _SHARE_READ = 1
     _SYNC = 0x00100000
     _READ_DATA = 1
@@ -197,6 +265,209 @@ if sys.platform == "win32":
     _FILE_ATTRIBUTE_DIRECTORY = 0x10
     _FILE_ATTRIBUTE_NORMAL = 0x80
     _FILE_PERSISTENT_ACLS = 0x8
+    _READ_CONTROL = 0x00020000
+    _TOKEN_QUERY = 0x0008
+    _TOKEN_USER_CLASS = 1
+    _SE_FILE_OBJECT = 1
+    _OWNER_SECURITY_INFORMATION = 0x00000001
+    _DACL_SECURITY_INFORMATION = 0x00000004
+    _SE_DACL_PROTECTED = 0x1000
+    _ACL_SIZE_INFORMATION_CLASS = 2
+    _ACCESS_ALLOWED_ACE_TYPE = 0
+    _ACCESS_DENIED_ACE_TYPE = 1
+    _ACE_HEADER_SIZE = 4
+    _ACE_MASK_SIZE = 4
+    _ACE_SID_OFFSET = _ACE_HEADER_SIZE + _ACE_MASK_SIZE
+    _ACE_OBJECT_INHERIT = 0x01
+    _ACE_CONTAINER_INHERIT = 0x02
+    _ACE_INHERIT_ONLY = 0x08
+    _ACE_ALLOWED_FLAGS = 0x1F  # standard inheritance flags, including inherited ACEs
+    _FILE_ADD_FILE = 0x00000002
+    _FILE_ADD_SUBDIRECTORY = 0x00000004
+    _FILE_WRITE_EA = 0x00000010
+    _FILE_DELETE_CHILD = 0x00000040
+    _FILE_WRITE_ATTRIBUTES = 0x00000100
+    _DELETE = 0x00010000
+    _WRITE_DAC = 0x00040000
+    _WRITE_OWNER = 0x00080000
+    _GENERIC_WRITE = 0x40000000
+    _GENERIC_ALL = 0x10000000
+    _UNTRUSTED_DIRECTORY_MUTATION = (
+        _FILE_ADD_FILE
+        | _FILE_ADD_SUBDIRECTORY
+        | _FILE_WRITE_EA
+        | _FILE_DELETE_CHILD
+        | _FILE_WRITE_ATTRIBUTES
+        | _DELETE
+        | _WRITE_DAC
+        | _WRITE_OWNER
+        | _GENERIC_WRITE
+        | _GENERIC_ALL
+    )
+    _BUILTIN_ADMINISTRATORS_SID = "S-1-5-32-544"
+    _LOCAL_SYSTEM_SID = "S-1-5-18"
+    _OWNER_RIGHTS_SID = "S-1-3-4"
+    _TRUSTED_INSTALLER_SID = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+    _MAX_TOKEN_USER_BUFFER = 65536
+
+    class _AclSizeInformation(ctypes.Structure):
+        _fields_ = [  # noqa: RUF012 - ctypes requires mutable _fields_.
+            ("AceCount", wintypes.DWORD),
+            ("AclBytesInUse", wintypes.DWORD),
+            ("AclBytesFree", wintypes.DWORD),
+        ]
+
+    class _AceHeader(ctypes.Structure):
+        _fields_ = [  # noqa: RUF012 - ctypes requires mutable _fields_.
+            ("AceType", ctypes.c_ubyte),
+            ("AceFlags", ctypes.c_ubyte),
+            ("AceSize", wintypes.WORD),
+        ]
+
+    def _sid_to_string(sid: int, available_bytes: int | None = None) -> str | None:
+        if not _advapi.IsValidSid(sid):
+            return None
+        length = int(_advapi.GetLengthSid(sid))
+        if length <= 0 or (available_bytes is not None and length != available_bytes):
+            return None
+        value = wintypes.LPWSTR()
+        if not _advapi.ConvertSidToStringSidW(sid, ctypes.byref(value)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return value.value
+        finally:
+            _k.LocalFree(ctypes.cast(value, wintypes.HLOCAL))
+
+    def _current_process_sid() -> str:
+        token = wintypes.HANDLE()
+        if not _advapi.OpenProcessToken(_k.GetCurrentProcess(), _TOKEN_QUERY, ctypes.byref(token)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            required = wintypes.DWORD()
+            _advapi.GetTokenInformation(token, _TOKEN_USER_CLASS, None, 0, ctypes.byref(required))
+            if not 1 <= required.value <= _MAX_TOKEN_USER_BUFFER:
+                raise OSError(errno.EIO, "invalid Windows token SID size")
+            buffer = ctypes.create_string_buffer(required.value)
+            if not _advapi.GetTokenInformation(
+                token,
+                _TOKEN_USER_CLASS,
+                buffer,
+                len(buffer),
+                ctypes.byref(required),
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            sid = ctypes.c_void_p.from_buffer(buffer).value
+            if sid is None:
+                raise OSError(errno.EIO, "Windows returned an empty token SID")
+            value = _sid_to_string(sid)
+            if value is None:
+                raise OSError(errno.EIO, "Windows returned an invalid token SID")
+            return value
+        finally:
+            _k.CloseHandle(token)
+
+    def _has_safe_parent_acl(  # noqa: PLR0912 - fail closed for each ACL parse error
+        handle: int, *, allow_safe_inherited: bool = False
+    ) -> bool:
+        """Reject untrusted identities that can mutate children or change the DACL.
+
+        The default workspace policy requires protected DACLs. The local-user
+        publisher profile may accept inherited standard allow/deny ACEs only
+        when every mutating allow is limited to the current user and trusted
+        operating-system administrators. Unknown ACE forms still fail closed.
+        """
+        owner, dacl, descriptor = wintypes.LPVOID(), wintypes.LPVOID(), wintypes.LPVOID()
+        status = _advapi.GetSecurityInfo(
+            handle,
+            _SE_FILE_OBJECT,
+            _OWNER_SECURITY_INFORMATION | _DACL_SECURITY_INFORMATION,
+            ctypes.byref(owner),
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(descriptor),
+        )
+        if status != 0:
+            raise ctypes.WinError(status)
+        try:
+            owner_sid = _sid_to_string(owner.value) if owner.value else None
+            if owner_sid is None:
+                return False
+            present, defaulted = wintypes.BOOL(), wintypes.BOOL()
+            if not _advapi.GetSecurityDescriptorDacl(
+                descriptor, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if not present.value or not dacl.value:
+                return False
+
+            control, revision = wintypes.WORD(), wintypes.DWORD()
+            if not _advapi.GetSecurityDescriptorControl(
+                descriptor, ctypes.byref(control), ctypes.byref(revision)
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if not allow_safe_inherited and not (control.value & _SE_DACL_PROTECTED):
+                return False
+
+            trusted = {
+                _current_process_sid(),
+                _BUILTIN_ADMINISTRATORS_SID,
+                _LOCAL_SYSTEM_SID,
+                _TRUSTED_INSTALLER_SID,
+            }
+            if owner_sid not in trusted:
+                return False
+            # OWNER RIGHTS is a conditional alias for this object's owner,
+            # which was just checked against the narrow trusted owner set.
+            trusted.add(_OWNER_RIGHTS_SID)
+
+            info = _AclSizeInformation()
+            if not _advapi.GetAclInformation(
+                dacl,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
+                _ACL_SIZE_INFORMATION_CLASS,
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            for index in range(info.AceCount):
+                ace = wintypes.LPVOID()
+                if not _advapi.GetAce(dacl, index, ctypes.byref(ace)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                header = ctypes.cast(ace, ctypes.POINTER(_AceHeader)).contents
+                if (
+                    int(header.AceType)
+                    not in {
+                        _ACCESS_ALLOWED_ACE_TYPE,
+                        _ACCESS_DENIED_ACE_TYPE,
+                    }
+                    or header.AceFlags & ~_ACE_ALLOWED_FLAGS
+                    or header.AceSize < _ACE_SID_OFFSET
+                ):
+                    return False
+                ace_address = ace.value
+                if ace_address is None:
+                    return False
+                ace_size = int(header.AceSize)
+                sid = _sid_to_string(ace_address + _ACE_SID_OFFSET, ace_size - _ACE_SID_OFFSET)
+                if sid is None:
+                    return False
+                mask = ctypes.c_uint32.from_address(ace_address + _ACE_HEADER_SIZE).value
+                if (
+                    int(header.AceType) == _ACCESS_ALLOWED_ACE_TYPE
+                    and not header.AceFlags & _ACE_INHERIT_ONLY
+                    and sid not in trusted
+                    and mask & _UNTRUSTED_DIRECTORY_MUTATION
+                ):
+                    return False
+            return True
+        finally:
+            if descriptor:
+                _k.LocalFree(ctypes.cast(descriptor, wintypes.HLOCAL))
+
+    def _close_windows_chain(root_handle: int, child_handles: tuple[int, ...]) -> None:
+        for handle in reversed(child_handles):
+            _nt.NtClose(handle)
+        _k.CloseHandle(root_handle)
 
     def _native_handle_value(value: int | None) -> int:
         if value is None:
@@ -256,37 +527,72 @@ if sys.platform == "win32":
     class SecureRoot:
         """A retained root handle and operations confined beneath it."""
 
-        def __init__(self, root: Path, *, writable: bool = False) -> None:
+        def __init__(  # noqa: PLR0912 - pin every writable ancestor or fail closed
+            self,
+            root: Path,
+            *,
+            writable: bool = False,
+            _allow_safe_inherited_ancestors: bool = False,
+        ) -> None:
             absolute = str(root.expanduser().absolute())
             drive, tail = os.path.splitdrive(absolute)
             if not drive or not tail.startswith("\\"):
                 raise SecureFSError(errno.ENOTSUP, "workspace must be on a local Windows volume")
             current = _k.CreateFileW(
-                drive + "\\", _SYNC | _READ_ATTR, _SHARE, None, 3, 0x02000000, None
+                drive + "\\",
+                _SYNC | _READ_ATTR | (_READ_CONTROL if writable else 0),
+                _SHARE_NO_DELETE if writable else _SHARE,
+                None,
+                3,
+                0x02000000,
+                None,
             )
             if current == _INVALID or current is None:
                 raise ctypes.WinError(ctypes.get_last_error())
             current = int(current)
             root_handle = current
+            pinned_children: list[int] = []
             try:
                 parts = [p for p in tail.split("\\") if p]
                 for index, part in enumerate(parts):
                     desired = _READ_DATA | _READ_ATTR | _SYNC
                     if writable and index == len(parts) - 1:
                         desired |= _FILE_ADD_SUBDIRECTORY | _FILE_DELETE_CHILD | _FILE_DELETE
-                    child = _nt_open(current, part, True, desired)
-                    if current != root_handle:
+                    if writable:
+                        desired |= _READ_CONTROL
+                    child = _nt_open(
+                        current,
+                        part,
+                        True,
+                        desired,
+                        share=_SHARE_NO_DELETE if writable else _SHARE,
+                    )
+                    if writable:
+                        pinned_children.append(child)
+                    elif current != root_handle:
                         _nt.NtClose(current)
                     current = child
                 self.handle = current
             except BaseException:
-                if current != root_handle:
+                if writable:
+                    for handle in reversed(pinned_children):
+                        _nt.NtClose(handle)
+                elif current != root_handle:
                     _nt.NtClose(current)
                 _k.CloseHandle(root_handle)
                 raise
-            if current != root_handle:
+            if writable:
+                self._pinned_handles = (root_handle, *pinned_children)
+                self._allow_safe_inherited_ancestors = _allow_safe_inherited_ancestors
+                self._finalizer = weakref.finalize(
+                    self, _close_windows_chain, root_handle, tuple(pinned_children)
+                )
+            elif current != root_handle:
                 _k.CloseHandle(root_handle)
-            self._finalizer = weakref.finalize(self, _nt.NtClose, self.handle)
+            if not writable:
+                self._pinned_handles = (self.handle,)
+                self._allow_safe_inherited_ancestors = False
+                self._finalizer = weakref.finalize(self, _nt.NtClose, self.handle)
 
         def open(self, relative: str, *, directory: bool = False, immutable: bool = False) -> int:
             parts = _components(relative)
@@ -429,9 +735,21 @@ if sys.platform == "win32":
             status = _nt.NtQueryVolumeInformationFile(
                 self.handle, ctypes.byref(iosb), buffer, len(buffer), 5
             )
-            return status >= 0 and bool(
+            if status < 0 or not (
                 ctypes.c_uint32.from_address(ctypes.addressof(buffer)).value & _FILE_PERSISTENT_ACLS
-            )
+            ):
+                return False
+            try:
+                return all(
+                    _has_safe_parent_acl(
+                        handle,
+                        allow_safe_inherited=self._allow_safe_inherited_ancestors,
+                    )
+                    for handle in self._pinned_handles
+                )
+            except OSError:
+                # An unreadable or malformed parent ACL is unsafe for staging.
+                return False
 
         def create_directory(self, name: str) -> int:
             if not self.supports_private_staging():
@@ -601,6 +919,35 @@ if sys.platform == "win32":
         def close_handle(self, handle: int) -> None:
             _nt.NtClose(handle)
 
+        def subroot(self, relative: str) -> SecureRoot:
+            handle = self.open(relative, directory=True)
+            child = SecureRoot.__new__(SecureRoot)
+            child.handle = handle
+            child._pinned_handles = (handle,)  # noqa: SLF001 - initialize capability internals
+            child._allow_safe_inherited_ancestors = False  # noqa: SLF001 - initialize capability internals
+            child._finalizer = weakref.finalize(child, _nt.NtClose, handle)  # noqa: SLF001 - initialize capability internals
+            return child
+
+        def owned_by_current_user(self) -> bool:
+            owner, descriptor = wintypes.LPVOID(), wintypes.LPVOID()
+            status = _advapi.GetSecurityInfo(
+                self.handle,
+                _SE_FILE_OBJECT,
+                _OWNER_SECURITY_INFORMATION,
+                ctypes.byref(owner),
+                None,
+                None,
+                None,
+                ctypes.byref(descriptor),
+            )
+            if status != 0:
+                raise ctypes.WinError(status)
+            try:
+                return _sid_to_string(owner.value) == _current_process_sid()
+            finally:
+                if descriptor:
+                    _k.LocalFree(ctypes.cast(descriptor, wintypes.HLOCAL))
+
         def close(self) -> None:
             self._finalizer()
 
@@ -610,8 +957,15 @@ else:
     class SecureRoot:
         """Linux openat2 root enforcing BENEATH, no links and no mount crossing."""
 
-        def __init__(self, root: Path, *, writable: bool = False) -> None:
+        def __init__(
+            self,
+            root: Path,
+            *,
+            writable: bool = False,
+            _allow_safe_inherited_ancestors: bool = False,
+        ) -> None:
             _ = writable  # POSIX directories are opened read-only; relative mutation uses dir_fd.
+            _ = _allow_safe_inherited_ancestors
             if not sys.platform.startswith("linux"):
                 raise SecureFSError(errno.ENOTSUP, "secure handle-relative access unavailable")
             root_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
@@ -768,19 +1122,19 @@ else:
                 raise SecureFSError(
                     errno.ENOTSUP, "destination parent is writable by other identities"
                 )
-            os.mkdir(name, 0o700, dir_fd=self.fd)  # parent dir_fd is pinned
+            os.mkdir(name, 0o700, dir_fd=self.fd)  # noqa: PTH102, RUF100 - keep creation relative to the pinned parent handle
             try:
                 handle = self.open(name, directory=True)
                 mode = stat.S_IMODE(os.fstat(handle).st_mode)
                 if mode & 0o077:
                     os.close(handle)
-                    os.rmdir(name, dir_fd=self.fd)  # parent dir_fd is pinned
+                    os.rmdir(name, dir_fd=self.fd)  # noqa: PTH106, RUF100 - keep cleanup relative to the pinned parent handle
                     raise SecureFSError(  # noqa: TRY301 - staging must be removed on failure
                         errno.ENOTSUP, "filesystem did not enforce private staging mode"
                     )
             except BaseException:
                 with suppress(OSError):
-                    os.rmdir(name, dir_fd=self.fd)  # pinned parent dir_fd
+                    os.rmdir(name, dir_fd=self.fd)  # noqa: PTH106, RUF100 - keep cleanup relative to the pinned parent handle
                 raise
             else:
                 return handle
@@ -918,13 +1272,13 @@ else:
                 os.close(old_target)
 
         def unlink_child(self, directory: int, name: str) -> None:
-            os.unlink(name, dir_fd=directory)  # child dir_fd is pinned
+            os.unlink(name, dir_fd=directory)  # noqa: PTH108, RUF100 - keep deletion relative to the pinned directory handle
 
         def delete_child(self, directory: int, name: str, *, directory_entry: bool = False) -> None:
             if directory_entry:
-                os.rmdir(name, dir_fd=directory)  # child dir_fd is pinned
+                os.rmdir(name, dir_fd=directory)  # noqa: PTH106, RUF100 - keep deletion relative to the pinned directory handle
             else:
-                os.unlink(name, dir_fd=directory)  # child dir_fd is pinned
+                os.unlink(name, dir_fd=directory)  # noqa: PTH108, RUF100 - keep deletion relative to the pinned directory handle
 
         def seek_start(self, handle: int) -> None:
             os.lseek(handle, 0, os.SEEK_SET)
@@ -942,10 +1296,20 @@ else:
                     )
             finally:
                 os.close(current)
-            os.rmdir(name, dir_fd=self.fd)  # parent dir_fd is pinned
+            os.rmdir(name, dir_fd=self.fd)  # noqa: PTH106, RUF100 - keep deletion relative to the pinned parent handle
 
         def close_handle(self, handle: int) -> None:
             os.close(handle)
+
+        def subroot(self, relative: str) -> SecureRoot:
+            child_fd = self.open(relative, directory=True)
+            child = SecureRoot.__new__(SecureRoot)
+            child.fd = child_fd
+            child._finalizer = weakref.finalize(child, os.close, child_fd)  # noqa: SLF001 - initialize capability internals
+            return child
+
+        def owned_by_current_user(self) -> bool:
+            return os.fstat(self.fd).st_uid == os.geteuid()
 
         def close(self) -> None:
             self._finalizer()

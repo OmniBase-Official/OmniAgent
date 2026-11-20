@@ -48,6 +48,7 @@ sys.path.insert(0, str(PROJECT))
 import dataset_provenance
 import validate_dataset
 from dataset_provenance import ProvenanceError, dataset_fingerprint, read_sidecar, sidecar_path
+from publisher_root import PublisherRoot
 from securefs import SecureRoot
 from validate_dataset import validate_file
 
@@ -81,11 +82,41 @@ MAX_SUMS_LINE_BYTES = 4 * 1024
 MAX_SUMS_ENTRIES = 100_000
 MAX_BUNDLE_BYTES = 512 * 1024 * 1024
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_TEACHER_MODEL_BYTES = 256
+MAX_WORKSPACE_RULE_BYTES = 1024
 _STAGING_PREFIX = ".omniagent-publish-"
 
 
 class PublishError(RuntimeError):
     """A dataset that cannot be published, or did not arrive intact."""
+
+
+def _metadata_text_within_limit(value: object, limit: int, *, optional: bool = False) -> bool:
+    if optional and value is None:
+        return True
+    if not isinstance(value, str) or any(not character.isprintable() for character in value):
+        return False
+    try:
+        return len(value.encode("utf-8")) <= limit
+    except UnicodeEncodeError:
+        return False
+
+
+def _validate_publish_metadata(teacher: object, workspace_rule: object) -> None:
+    if (
+        not isinstance(teacher, str)
+        or not teacher.strip()
+        or not _metadata_text_within_limit(teacher, MAX_TEACHER_MODEL_BYTES)
+    ):
+        raise PublishError(
+            "teacher metadata must be printable text of at most "
+            f"{MAX_TEACHER_MODEL_BYTES} UTF-8 bytes"
+        )
+    if not _metadata_text_within_limit(workspace_rule, MAX_WORKSPACE_RULE_BYTES, optional=True):
+        raise PublishError(
+            "workspace rule metadata must be printable text of at most "
+            f"{MAX_WORKSPACE_RULE_BYTES} UTF-8 bytes"
+        )
 
 
 class _SnapshotPath:
@@ -283,7 +314,7 @@ def _publish_location(dest: Path, output_names: set[str]) -> tuple[Path, Path]:
     return parent, target
 
 
-def publish(  # noqa: PLR0912, PLR0913, PLR0915 - validations abort the staging transaction
+def _publish(  # noqa: PLR0912, PLR0913, PLR0915 - validations abort the staging transaction
     dataset: Path,
     dest: Path,
     *,
@@ -291,17 +322,25 @@ def publish(  # noqa: PLR0912, PLR0913, PLR0915 - validations abort the staging 
     workspace_rule: str | None = None,
     extras: Iterable[Path] = (),
     source_commit: str | None = None,
+    publisher_root: PublisherRoot | None = None,
 ) -> dict[str, object]:
     """Validate and publish bytes captured through stable source/destination handles."""
+    _validate_publish_metadata(teacher, workspace_rule)
     absolute_dest = dest.expanduser().absolute()
     destination_name = absolute_dest.name
     if not _safe_bundle_name(destination_name):
         raise PublishError("destination must name a safe directory below its parent")
 
-    try:
-        parent = SecureRoot(absolute_dest.parent, writable=True)
-    except OSError as exc:
-        raise PublishError("could not pin the destination parent; refusing to publish") from exc
+    owns_parent = publisher_root is None
+    if publisher_root is None:
+        try:
+            parent = SecureRoot(absolute_dest.parent, writable=True)
+        except OSError as exc:
+            raise PublishError("could not pin the destination parent; refusing to publish") from exc
+    else:
+        if absolute_dest.parent != publisher_root.path:
+            raise PublishError("safe publisher destination must remain inside its profile root")
+        parent = publisher_root._secure_root()  # noqa: SLF001 - publisher capability owns this boundary
     sources: list[_OpenedSource] = []
     stage_handle: int | None = None
     stage_name: str | None = None
@@ -388,6 +427,29 @@ def publish(  # noqa: PLR0912, PLR0913, PLR0915 - validations abort the staging 
                 raise PublishError(f"source size changed while reading {source.path.name}")  # noqa: TRY301
             extra_snapshots[source.path.name] = snapshot
             source_bytes += len(snapshot)
+            expected[source.path.name] = hashlib.sha256(snapshot).hexdigest()
+
+        sums_text = "".join(f"{value}  {name}\n" for name, value in sorted(expected.items()))
+        manifest: dict[str, object] = {
+            "dataset": dataset.name,
+            "examples": recorded["examples"],
+            "system_prompt_sha256": recorded["system_prompt_sha256"],
+            "teacher_model": teacher,
+            "workspace_rule": workspace_rule,
+            "source_commit": source_commit if source_commit is not None else _head_commit(),
+            "published_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "files": dict(sorted(expected.items())),
+        }
+        manifest_text = json.dumps(manifest, indent=2) + "\n"
+        generated = {
+            SUMS_NAME: sums_text.encode("utf-8"),
+            MANIFEST_NAME: manifest_text.encode("utf-8"),
+        }
+        if len(generated[MANIFEST_NAME]) > MAX_MANIFEST_BYTES:
+            raise PublishError(f"{MANIFEST_NAME} exceeds the {MAX_MANIFEST_BYTES}-byte limit")  # noqa: TRY301
+        if source_bytes + sum(map(len, generated.values())) > MAX_BUNDLE_BYTES:
+            raise PublishError("bundle exceeds the aggregate bundle byte limit")  # noqa: TRY301
+
         stage_name = _STAGING_PREFIX + secrets.token_hex(12)
         try:
             stage_handle = parent.create_directory(stage_name)
@@ -427,29 +489,16 @@ def publish(  # noqa: PLR0912, PLR0913, PLR0915 - validations abort the staging 
 
         for source in sources[2:]:
             snapshot = extra_snapshots[source.path.name]
-            source_written, source_hash = write_verified(source.path.name, (snapshot,), None)
+            source_written, source_hash = write_verified(
+                source.path.name, (snapshot,), expected[source.path.name]
+            )
             if source_written != len(snapshot):
                 raise PublishError(f"source size changed while reading {source.path.name}")  # noqa: TRY301
-            expected[source.path.name] = source_hash
+            if source_hash != expected[source.path.name]:
+                raise PublishError(  # noqa: TRY301 - reject hash drift inside staging transaction
+                    f"staged copy does not match the source: {source.path.name}"
+                )
         _publish_checkpoint("all-payloads")
-        sums_text = "".join(f"{value}  {name}\n" for name, value in sorted(expected.items()))
-        manifest: dict[str, object] = {
-            "dataset": dataset.name,
-            "examples": recorded["examples"],
-            "system_prompt_sha256": recorded["system_prompt_sha256"],
-            "teacher_model": teacher,
-            "workspace_rule": workspace_rule,
-            "source_commit": source_commit if source_commit is not None else _head_commit(),
-            "published_at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "files": dict(sorted(expected.items())),
-        }
-        manifest_text = json.dumps(manifest, indent=2) + "\n"
-        generated = {
-            SUMS_NAME: sums_text.encode("utf-8"),
-            MANIFEST_NAME: manifest_text.encode("utf-8"),
-        }
-        if source_bytes + sum(map(len, generated.values())) > MAX_BUNDLE_BYTES:
-            raise PublishError("bundle exceeds the aggregate bundle byte limit")  # noqa: TRY301
         # Inspect a possible target only after source and aggregate validation.
         # Every inspection is relative to the pinned destination parent.
         try:
@@ -537,7 +586,59 @@ def publish(  # noqa: PLR0912, PLR0913, PLR0915 - validations abort the staging 
             parent.close_handle(stage_handle)
         if existing_handle is not None:
             parent.close_handle(existing_handle)
-        parent.close()
+        if owns_parent:
+            parent.close()
+
+
+def publish(  # noqa: PLR0913 - compatibility API preserves existing parameters
+    dataset: Path,
+    dest: Path,
+    *,
+    teacher: str,
+    workspace_rule: str | None = None,
+    extras: Iterable[Path] = (),
+    source_commit: str | None = None,
+) -> dict[str, object]:
+    """Deprecated local-only compatibility API accepting an arbitrary path.
+
+    This API does not provide the local-user profile's cross-identity boundary.
+    New callers must use :func:`publish_to_root`.
+    """
+    return _publish(
+        dataset,
+        dest,
+        teacher=teacher,
+        workspace_rule=workspace_rule,
+        extras=extras,
+        source_commit=source_commit,
+    )
+
+
+def publish_to_root(  # noqa: PLR0913 - metadata and source options mirror publish()
+    dataset: Path,
+    publisher_root: PublisherRoot,
+    destination_name: str,
+    *,
+    teacher: str,
+    workspace_rule: str | None = None,
+    extras: Iterable[Path] = (),
+    source_commit: str | None = None,
+) -> dict[str, object]:
+    """Publish into one name inside a validated current-user profile."""
+    _validate_publish_metadata(teacher, workspace_rule)
+    try:
+        dest = publisher_root._path_for_display(destination_name)  # noqa: SLF001 - validate profile child
+    except OSError as exc:
+        raise PublishError("destination must be one safe directory name") from exc
+    return _publish(
+        dataset,
+        dest,
+        teacher=teacher,
+        workspace_rule=workspace_rule,
+        extras=extras,
+        source_commit=source_commit,
+        publisher_root=publisher_root,
+    )
 
 
 def _iter_sums_lines(content: bytes) -> Iterator[str]:
@@ -696,8 +797,8 @@ def _read_manifest(content: bytes) -> tuple[dict[str, object], dict[str, str]]:
         or not _SHA256_PATTERN.fullmatch(prompt_digest)
         or not isinstance(teacher, str)
         or not teacher.strip()
-        or any(not char.isprintable() for char in teacher)
-        or (workspace_rule is not None and not isinstance(workspace_rule, str))
+        or not _metadata_text_within_limit(teacher, MAX_TEACHER_MODEL_BYTES)
+        or not _metadata_text_within_limit(workspace_rule, MAX_WORKSPACE_RULE_BYTES, optional=True)
         or (
             source_commit is not None
             and (
@@ -849,7 +950,7 @@ def _verify_bundle(root: SecureRoot) -> list[str]:  # noqa: PLR0912, PLR0915 - e
 
 
 def verify(dest: Path) -> list[str]:
-    """Verify a committed bundle; staging directories are never valid inputs."""
+    """Deprecated local-only compatibility API accepting an arbitrary path."""
     absolute = dest.expanduser().absolute()
     if absolute.name.startswith(_STAGING_PREFIX):
         raise PublishError("unpublished staging directories cannot be verified as bundles")
@@ -863,6 +964,21 @@ def verify(dest: Path) -> list[str]:
         root.close()
 
 
+def verify_from_root(publisher_root: PublisherRoot, destination_name: str) -> list[str]:
+    """Verify a committed bundle named inside a validated local-user profile."""
+    if not _safe_bundle_name(destination_name) or destination_name.startswith(_STAGING_PREFIX):
+        raise PublishError("destination must name a committed bundle inside the profile")
+    try:
+        publisher_root._path_for_display(destination_name)  # noqa: SLF001 - validate profile child
+        root = publisher_root._secure_root().subroot(destination_name)  # noqa: SLF001 - pinned capability
+    except OSError as exc:
+        raise PublishError("could not safely open the bundle inside the publisher profile") from exc
+    try:
+        return _verify_bundle(root)
+    finally:
+        root.close()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Publish a dataset and its provenance to a training store."
@@ -870,7 +986,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     # dataset and --teacher are optional for verification, which checks the
     # complete bundle metadata and payloads without needing collection inputs.
     parser.add_argument("dataset", type=Path, nargs="?", help="The exported .jsonl dataset.")
-    parser.add_argument("--dest", type=Path, required=True, help="Destination directory.")
+    destination = parser.add_mutually_exclusive_group(required=True)
+    destination.add_argument(
+        "--dest", help="One destination directory name inside the local-user publisher profile."
+    )
+    destination.add_argument(
+        "--local-only-path",
+        type=Path,
+        help=(
+            "Deprecated arbitrary path. Local-only; does not protect against "
+            "other local identities."
+        ),
+    )
     parser.add_argument("--teacher", help="Model tag the bank was asked of.")
     parser.add_argument(
         "--workspace-rule",
@@ -886,19 +1013,51 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if not args.verify_only and (args.dataset is None or args.teacher is None):
         parser.error("dataset and --teacher are required unless --verify-only is given")
+    if args.local_only_path is None and (args.dest is None or not _safe_bundle_name(args.dest)):
+        parser.error("--dest must be one safe directory name inside the local-user profile")
 
     try:
-        if args.verify_only:
-            broken = verify(args.dest)
-            print(f"[!] {len(broken)} file(s) bad: {', '.join(broken)}" if broken else "verified")
-            return 1 if broken else 0
-        manifest = publish(
-            args.dataset,
-            args.dest,
-            teacher=args.teacher,
-            workspace_rule=args.workspace_rule,
-            extras=tuple(args.also),
-        )
+        if args.local_only_path is not None:
+            print(
+                "[!] WARNING: --local-only-path is deprecated and provides no "
+                "cross-identity destination protection.",
+                file=sys.stderr,
+            )
+            if args.verify_only:
+                broken = verify(args.local_only_path)
+                print(
+                    f"[!] {len(broken)} file(s) bad: {', '.join(broken)}" if broken else "verified"
+                )
+                return 1 if broken else 0
+            manifest = publish(
+                args.dataset,
+                args.local_only_path,
+                teacher=args.teacher,
+                workspace_rule=args.workspace_rule,
+                extras=tuple(args.also),
+            )
+            published_path = args.local_only_path
+        else:
+            with PublisherRoot.provision_local_user() as publisher_root:
+                if args.verify_only:
+                    broken = verify_from_root(publisher_root, args.dest)
+                    print(
+                        f"[!] {len(broken)} file(s) bad: {', '.join(broken)}"
+                        if broken
+                        else "verified"
+                    )
+                    return 1 if broken else 0
+                if args.dataset is None or args.teacher is None:
+                    parser.error("dataset and --teacher are required unless --verify-only is given")
+                manifest = publish_to_root(
+                    args.dataset,
+                    publisher_root,
+                    args.dest,
+                    teacher=args.teacher,
+                    workspace_rule=args.workspace_rule,
+                    extras=tuple(args.also),
+                )
+                published_path = publisher_root._path_for_display(args.dest)  # noqa: SLF001 - validated name
     except PublishError as exc:
         print(f"[!] {exc}", file=sys.stderr)
         return 1
@@ -906,7 +1065,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     published = manifest["files"]
     if not isinstance(published, dict):  # pragma: no cover - publish always sets it
         return 1
-    print(f"published {len(published)} file(s) to {args.dest}")
+    print(f"published {len(published)} file(s) to {published_path}")
     for name, value in sorted(published.items()):
         print(f"  {str(value)[:12]}  {name}")
     return 0

@@ -32,6 +32,21 @@ from typing import Any
 from dataset_provenance import write_sidecar
 from observability import TRUNCATION_MARKER
 from trajectory_utils import actions_in as _actions_in
+from validate_dataset import (
+    MAX_DATASET_BYTES as _MAX_DATASET_BYTES,
+)
+from validate_dataset import (
+    MAX_DATASET_LINE_BYTES as _MAX_DATASET_LINE_BYTES,
+)
+from validate_dataset import (
+    MAX_DATASET_LINES as _MAX_DATASET_LINES,
+)
+from validate_dataset import (
+    MAX_JSON_NESTING as _MAX_JSON_NESTING,
+)
+from validate_dataset import (
+    _json_nesting_is_too_deep,
+)
 
 #: Events that mean the turn contains a message the log does not record
 #: verbatim -- a format correction, a rut intervention, or the forced
@@ -47,6 +62,18 @@ UNRECONSTRUCTIBLE_EVENTS = frozenset(
 
 #: Minimum messages in a usable example: system, user, assistant.
 _MIN_MESSAGES = 3
+
+#: Bounds for replaying explicit trajectory files and direct API inputs.
+MAX_LOG_BYTES = _MAX_DATASET_BYTES
+MAX_LOG_LINE_BYTES = _MAX_DATASET_LINE_BYTES
+MAX_LOG_LINES = _MAX_DATASET_LINES
+MAX_LOG_FILES = 256
+MAX_LOG_RECORDS = 500_000
+MAX_LOG_NESTING = _MAX_JSON_NESTING
+MAX_COLLECTED_TURNS = 100_000
+MAX_COLLECTED_SESSIONS = 100_000
+MAX_COLLECTED_TEXT_BYTES = 64 * 1024 * 1024
+MAX_LOG_TEXT_FIELD_BYTES = 4 * 1024 * 1024
 
 
 class DatasetError(ValueError):
@@ -84,11 +111,17 @@ def expand_paths(patterns: Sequence[str]) -> list[Path]:
     """
     paths: list[Path] = []
     for pattern in patterns:
-        matches = sorted(glob.glob(pattern))  # noqa: PTH207 - pattern, not a path
+        matches: list[str] = []
+        for match in glob.iglob(pattern):  # noqa: PTH207 - stop after the file cap
+            matches.append(match)
+            if len(paths) + len(matches) > MAX_LOG_FILES:
+                raise DatasetError(f"logs exceed the {MAX_LOG_FILES}-file input limit")
         if matches:
-            paths.extend(Path(match) for match in matches)
+            paths.extend(Path(match) for match in sorted(matches))
         else:
             paths.append(Path(pattern))
+            if len(paths) > MAX_LOG_FILES:
+                raise DatasetError(f"logs exceed the {MAX_LOG_FILES}-file input limit")
 
     missing = [path for path in paths if not path.is_file()]
     if missing:
@@ -98,23 +131,67 @@ def expand_paths(patterns: Sequence[str]) -> list[Path]:
     return paths
 
 
-def read_records(paths: Iterable[Path]) -> Iterator[dict[str, Any]]:
+def read_records(  # noqa: PLR0912 - one fail-closed branch per input bound
+    paths: Iterable[Path],
+) -> Iterator[dict[str, Any]]:
     """Yield every well-formed JSON object across the given log files.
 
     A half-written final line is normal for a log that is still open, so a
     malformed line is skipped rather than fatal.
     """
+    total_bytes = 0
+    total_lines = 0
+    total_records = 0
+    total_files = 0
     for path in paths:
-        with path.open(encoding="utf-8") as handle:
-            for line in handle:
+        total_files += 1
+        if total_files > MAX_LOG_FILES:
+            raise DatasetError(f"logs exceed the {MAX_LOG_FILES}-file input limit")
+        try:
+            handle = path.open("rb")
+        except OSError as exc:
+            raise DatasetError(f"could not read log file {path.name}") from exc
+        with handle:
+            while True:
+                remaining = MAX_LOG_BYTES - total_bytes
+                line = handle.readline(min(MAX_LOG_LINE_BYTES + 1, remaining + 1))
+                if not line:
+                    break
+                total_bytes += len(line)
+                if total_bytes > MAX_LOG_BYTES:
+                    raise DatasetError(f"logs exceed the {MAX_LOG_BYTES}-byte input limit")
+                total_lines += 1
+                if total_lines > MAX_LOG_LINES:
+                    raise DatasetError(f"logs exceed the {MAX_LOG_LINES}-line input limit")
+                if len(line) > MAX_LOG_LINE_BYTES:
+                    raise DatasetError(
+                        f"log line exceeds the {MAX_LOG_LINE_BYTES}-byte limit"
+                    )
                 stripped = line.strip()
                 if not stripped:
                     continue
                 try:
-                    record = json.loads(stripped)
+                    text = stripped.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise DatasetError(f"log file {path.name} is not valid UTF-8") from exc
+                if _json_nesting_is_too_deep(text, max_depth=MAX_LOG_NESTING):
+                    raise DatasetError(
+                        f"log line exceeds the JSON nesting limit of {MAX_LOG_NESTING}"
+                    )
+                try:
+                    record = json.loads(text)
                 except json.JSONDecodeError:
                     continue
+                except ValueError as exc:
+                    raise DatasetError("log line contains an unsupported JSON integer") from exc
+                except RecursionError as exc:
+                    raise DatasetError("log line exceeds the JSON parser depth limit") from exc
                 if isinstance(record, dict) and "event" in record:
+                    total_records += 1
+                    if total_records > MAX_LOG_RECORDS:
+                        raise DatasetError(
+                            f"logs exceed the {MAX_LOG_RECORDS}-record input limit"
+                        )
                     yield record
 
 
@@ -127,30 +204,86 @@ def _is_truncated(*values: object) -> bool:
     return any(isinstance(v, str) and TRUNCATION_MARKER in v for v in values)
 
 
-def collect_turns(  # noqa: PLR0912 - one branch per log event we replay
+def collect_turns(  # noqa: PLR0912, PLR0915 - one branch per log event and bound
     records: Iterable[dict[str, Any]],
 ) -> tuple[list[Turn], dict[str, str]]:
     """Group records into turns, and collect each session's system prompt."""
     turns: dict[tuple[str, int], Turn] = {}
     order: list[tuple[str, int]] = []
     prompts: dict[str, str] = {}
+    record_count = 0
+    retained_text_bytes = 0
+    accounted_session_ids: set[str] = set()
+
+    def bounded_text(value: str, field_name: str) -> str:
+        nonlocal retained_text_bytes
+        if len(value) > MAX_LOG_TEXT_FIELD_BYTES:
+            raise DatasetError(
+                f"{field_name} exceeds the {MAX_LOG_TEXT_FIELD_BYTES}-byte field limit"
+            )
+        try:
+            size = len(value.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise DatasetError(f"{field_name} is not valid UTF-8 text") from exc
+        if size > MAX_LOG_TEXT_FIELD_BYTES:
+            raise DatasetError(
+                f"{field_name} exceeds the {MAX_LOG_TEXT_FIELD_BYTES}-byte field limit"
+            )
+        if size > MAX_COLLECTED_TEXT_BYTES - retained_text_bytes:
+            raise DatasetError(
+                f"trajectory text exceeds the {MAX_COLLECTED_TEXT_BYTES}-byte aggregate limit"
+            )
+        retained_text_bytes += size
+        return value
 
     for record in records:
+        record_count += 1
+        if record_count > MAX_LOG_RECORDS:
+            raise DatasetError(f"records exceed the {MAX_LOG_RECORDS}-record input limit")
+        if not isinstance(record, dict):
+            raise DatasetError("trajectory records must be JSON objects")
         event = record.get("event")
-        session_id = str(record.get("session_id", ""))
+        if not isinstance(event, str):
+            continue
+        event = bounded_text(event, "event")
+        raw_session_id = record.get("session_id", "")
+        session_id = str(raw_session_id)
+        if len(session_id) > MAX_LOG_TEXT_FIELD_BYTES:
+            raise DatasetError(
+                f"session_id exceeds the {MAX_LOG_TEXT_FIELD_BYTES}-byte field limit"
+            )
+        try:
+            session_bytes = len(session_id.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise DatasetError("session_id is not valid UTF-8 text") from exc
+        if session_bytes > MAX_LOG_TEXT_FIELD_BYTES:
+            raise DatasetError(
+                f"session_id exceeds the {MAX_LOG_TEXT_FIELD_BYTES}-byte field limit"
+            )
+        if session_id not in accounted_session_ids:
+            if len(accounted_session_ids) >= MAX_COLLECTED_SESSIONS:
+                raise DatasetError(
+                    f"logs exceed the {MAX_COLLECTED_SESSIONS}-session limit"
+                )
+            bounded_text(session_id, "session_id")
+            accounted_session_ids.add(session_id)
 
         if event == "agent.created":
             prompt = record.get("system_prompt")
             if isinstance(prompt, str) and prompt:
-                prompts[session_id] = prompt
+                prompts[session_id] = bounded_text(prompt, "system_prompt")
             continue
 
         raw_turn = record.get("turn")
-        if not isinstance(raw_turn, int):
+        if not isinstance(raw_turn, int) or isinstance(raw_turn, bool):
             continue
+        if not -(2**63) <= raw_turn < 2**63:
+            raise DatasetError("turn exceeds the signed 64-bit integer limit")
 
         key = (session_id, raw_turn)
         if key not in turns:
+            if len(turns) >= MAX_COLLECTED_TURNS:
+                raise DatasetError(f"logs exceed the {MAX_COLLECTED_TURNS}-turn limit")
             turns[key] = Turn(session_id=session_id, turn=raw_turn)
             order.append(key)
         turn = turns[key]
@@ -161,20 +294,25 @@ def collect_turns(  # noqa: PLR0912 - one branch per log event we replay
         elif event == "agent.turn.start":
             question = record.get("question")
             if isinstance(question, str):
-                turn.question = question
+                turn.question = bounded_text(question, "question")
                 turn.truncated |= _is_truncated(question)
 
         elif event == "agent.llm.response":
             reply = record.get("reply")
             if isinstance(reply, str) and reply:
-                turn.exchange.append({"role": "assistant", "content": reply})
+                turn.exchange.append(
+                    {"role": "assistant", "content": bounded_text(reply, "reply")}
+                )
                 turn.truncated |= _is_truncated(reply)
 
         elif event == "agent.tool.result":
             observation = record.get("observation")
             if isinstance(observation, str):
                 turn.exchange.append(
-                    {"role": "user", "content": f"Observation: {observation}"}
+                    {
+                        "role": "user",
+                        "content": f"Observation: {bounded_text(observation, 'observation')}",
+                    }
                 )
                 turn.truncated |= _is_truncated(observation)
             if record.get("ok") is False:
@@ -183,7 +321,7 @@ def collect_turns(  # noqa: PLR0912 - one branch per log event we replay
         elif event == "agent.turn.end":
             answer = record.get("answer")
             if isinstance(answer, str):
-                turn.answer = answer
+                turn.answer = bounded_text(answer, "answer")
                 turn.truncated |= _is_truncated(answer)
 
     return [turns[key] for key in order], prompts

@@ -97,6 +97,232 @@ def test_a_clean_turn_becomes_one_example() -> None:
     assert messages[4]["content"].startswith("Thought: done")
 
 
+def test_collect_turns_rejects_record_count_overflow(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("export_dataset.MAX_LOG_RECORDS", 1)
+    with pytest.raises(DatasetError, match="record input limit"):
+        collect_turns(iter([created(), created(session_id="s2")]))
+
+
+def test_collect_turns_accepts_exact_aggregate_utf8_byte_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    budget = len("agent.created") + len("s1") + len("éé".encode())
+    monkeypatch.setattr("export_dataset.MAX_COLLECTED_TEXT_BYTES", budget)
+    turns, prompts = collect_turns([created(system_prompt="éé")])
+    assert turns == []
+    assert prompts == {"s1": "éé"}
+
+
+def test_collect_turns_rejects_aggregate_utf8_byte_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("export_dataset.MAX_COLLECTED_TEXT_BYTES", 18)
+    with pytest.raises(DatasetError, match="aggregate limit"):
+        collect_turns([created(system_prompt="éé")])
+
+
+def test_collect_turns_counts_unique_session_ids_in_aggregate_byte_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("export_dataset.MAX_COLLECTED_TEXT_BYTES", 5)
+    records = [
+        record("x", turn=1, session_id="aa"),
+        record("x", turn=1, session_id="bb"),
+        record("x", turn=1, session_id="cc"),
+    ]
+    with pytest.raises(DatasetError, match="aggregate limit"):
+        collect_turns(records)
+
+
+def test_collect_turns_rejects_oversized_event_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("export_dataset.MAX_LOG_TEXT_FIELD_BYTES", 3)
+    with pytest.raises(DatasetError, match="event exceeds"):
+        collect_turns([record("long-event", turn=1)])
+
+
+def test_collect_turns_rejects_a_single_text_field_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("export_dataset.MAX_LOG_TEXT_FIELD_BYTES", 3)
+    with pytest.raises(DatasetError, match="field limit"):
+        collect_turns([created(system_prompt="four")])
+
+
+def test_collect_turns_rejects_too_many_distinct_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("export_dataset.MAX_COLLECTED_TURNS", 1)
+    records = [
+        record("agent.turn.start", turn=1),
+        record("agent.turn.start", turn=2),
+    ]
+    with pytest.raises(DatasetError, match="turn limit"):
+        collect_turns(records)
+
+
+def test_collect_turns_accepts_signed_64_bit_turn_boundaries() -> None:
+    turns, _ = collect_turns(
+        [
+            record("agent.turn.start", turn=-(2**63)),
+            record("agent.turn.start", turn=(2**63) - 1),
+        ]
+    )
+    assert [item.turn for item in turns] == [-(2**63), (2**63) - 1]
+
+
+def test_collect_turns_rejects_turn_outside_signed_64_bit_range() -> None:
+    for turn in (-(2**63) - 1, 2**63):
+        with pytest.raises(DatasetError, match="signed 64-bit"):
+            collect_turns([record("agent.turn.start", turn=turn)])
+
+
+def test_read_records_rejects_total_file_byte_overflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "large.jsonl"
+    path.write_bytes(b'{"event":"x"}\n')
+    monkeypatch.setattr("export_dataset.MAX_LOG_BYTES", 8)
+    with pytest.raises(DatasetError, match="byte input limit"):
+        list(read_records([path]))
+
+
+def test_read_records_accepts_exact_total_file_byte_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "exact-total.jsonl"
+    content = b'{"event":"x"}\n'
+    path.write_bytes(content)
+    monkeypatch.setattr("export_dataset.MAX_LOG_BYTES", len(content))
+    assert list(read_records([path])) == [{"event": "x"}]
+
+
+def test_read_records_rejects_line_byte_overflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "wide.jsonl"
+    path.write_text(json.dumps({"event": "x", "value": "y" * 32}) + "\n")
+    monkeypatch.setattr("export_dataset.MAX_LOG_LINE_BYTES", 16)
+    with pytest.raises(DatasetError, match="line exceeds"):
+        list(read_records([path]))
+
+
+def test_read_records_accepts_exact_line_byte_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "exact-line.jsonl"
+    content = b'{"event":"x"}\n'
+    path.write_bytes(content)
+    monkeypatch.setattr("export_dataset.MAX_LOG_BYTES", len(content))
+    monkeypatch.setattr("export_dataset.MAX_LOG_LINE_BYTES", len(content))
+    assert list(read_records([path])) == [{"event": "x"}]
+
+
+def test_read_records_rejects_line_count_overflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "many-lines.jsonl"
+    path.write_text('{"event":"x"}\n{"event":"y"}\n')
+    monkeypatch.setattr("export_dataset.MAX_LOG_LINES", 1)
+    with pytest.raises(DatasetError, match="line input limit"):
+        list(read_records([path]))
+
+
+def test_read_records_rejects_record_count_overflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "many-records.jsonl"
+    path.write_text('{"event":"x"}\n{"event":"y"}\n')
+    monkeypatch.setattr("export_dataset.MAX_LOG_RECORDS", 1)
+    with pytest.raises(DatasetError, match="record input limit"):
+        list(read_records([path]))
+
+
+def test_read_records_rejects_json_nesting_overflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "deep.jsonl"
+    path.write_text('{"event":"x","nested":{"too":{"deep":true}}}\n')
+    monkeypatch.setattr("export_dataset.MAX_LOG_NESTING", 2)
+    with pytest.raises(DatasetError, match="nesting limit"):
+        list(read_records([path]))
+
+
+def test_read_records_accepts_exact_json_nesting_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "exact-depth.jsonl"
+    path.write_text('{"event":"x","nested":{"value":1}}\n')
+    monkeypatch.setattr("export_dataset.MAX_LOG_NESTING", 2)
+    assert list(read_records([path])) == [{"event": "x", "nested": {"value": 1}}]
+
+
+def test_read_records_rejects_too_many_empty_input_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = [tmp_path / f"empty-{index}.jsonl" for index in range(3)]
+    for path in paths:
+        path.touch()
+    monkeypatch.setattr("export_dataset.MAX_LOG_FILES", 2)
+    with pytest.raises(DatasetError, match="file input limit"):
+        list(read_records(paths))
+
+
+def test_expand_paths_caps_lazy_glob_before_consuming_all_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+
+    def many_matches(_pattern: str) -> Any:
+        index = 0
+        while True:
+            index += 1
+            match = str(tmp_path / f"{index}.jsonl")
+            seen.append(match)
+            yield match
+
+    monkeypatch.setattr("export_dataset.MAX_LOG_FILES", 2)
+    monkeypatch.setattr("export_dataset.glob.iglob", many_matches)
+    with pytest.raises(DatasetError, match="file input limit"):
+        expand_paths(["*.jsonl"])
+    assert len(seen) == 3
+
+
+def test_expand_paths_accepts_exact_file_limit_in_sorted_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "a.jsonl"
+    second = tmp_path / "b.jsonl"
+    first.touch()
+    second.touch()
+    monkeypatch.setattr("export_dataset.MAX_LOG_FILES", 2)
+    monkeypatch.setattr(
+        "export_dataset.glob.iglob", lambda _pattern: iter([str(second), str(first)])
+    )
+    assert expand_paths(["*.jsonl"]) == [first, second]
+
+
+def test_expand_paths_counts_unmatched_literals_toward_file_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("export_dataset.MAX_LOG_FILES", 1)
+    monkeypatch.setattr("export_dataset.glob.iglob", lambda _pattern: iter(()))
+    patterns = [str(tmp_path / "missing-a.jsonl"), str(tmp_path / "missing-b.jsonl")]
+    with pytest.raises(DatasetError, match="file input limit"):
+        expand_paths(patterns)
+
+
+def test_read_records_rejects_json_integer_digit_limit_without_echoing_input(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "oversized-integer.jsonl"
+    path.write_text('{"event":"agent.turn.start","turn":' + "9" * 5_000 + "}\n")
+    with pytest.raises(DatasetError, match="unsupported JSON integer") as caught:
+        list(read_records([path]))
+    assert "9" * 100 not in str(caught.value)
+
+
 def test_the_observation_prefix_is_restored() -> None:
     """The log stores the bare observation; the conversation had the prefix."""
     examples, _ = export([created(), *clean_turn()])

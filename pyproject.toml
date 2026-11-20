@@ -54,6 +54,7 @@ py-modules = [
     "dataset_provenance",
     "sandbox",
     "securefs",
+    "publisher_root",
     "validate_dataset",
     "config",
 ]
@@ -75,6 +76,7 @@ files = [
     "export_dataset.py",
     "sandbox.py",
     "securefs.py",
+    "publisher_root.py",
     "validate_dataset.py",
     "config.py",
     "dataset_provenance.py",

@@ -214,7 +214,9 @@ def test_publish_cli_refuses_invalid_dataset_without_mutating_destination(
             if path.is_file()
         }
 
-    result = publish_main([str(dataset), "--dest", str(dest), "--teacher", "synthetic-teacher"])
+    result = publish_main(
+        [str(dataset), "--local-only-path", str(dest), "--teacher", "synthetic-teacher"]
+    )
 
     assert result == 1
     assert "credential/schema validation" in capsys.readouterr().err
@@ -234,7 +236,9 @@ def test_publish_cli_still_publishes_valid_dataset(
 ) -> None:
     dest = tmp_path / "drive"
 
-    result = publish_main([str(dataset), "--dest", str(dest), "--teacher", "synthetic-teacher"])
+    result = publish_main(
+        [str(dataset), "--local-only-path", str(dest), "--teacher", "synthetic-teacher"]
+    )
 
     assert result == 0
     assert "published" in capsys.readouterr().out
@@ -338,9 +342,7 @@ def test_workspace_listing_hides_junction_canary(tmp_path: Path) -> None:
     (root / "normal.txt").write_text("normal", encoding="utf-8")
     outside = tmp_path / "outside"
     outside.mkdir()
-    (outside / "UNIQUE-JUNCTION-LISTING-CANARY.txt").write_text(
-        "outside secret", encoding="utf-8"
-    )
+    (outside / "UNIQUE-JUNCTION-LISTING-CANARY.txt").write_text("outside secret", encoding="utf-8")
     _create_junction(root / "redirect", outside)
     workspace = Workspace.at(root)
     try:
@@ -488,6 +490,107 @@ def test_the_manifest_records_what_the_sidecar_cannot(dataset: Path, tmp_path: P
     assert manifest["system_prompt_sha256"]
     written = json.loads((dest / "MANIFEST.json").read_text("utf-8"))
     assert written == manifest
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        (
+            "teacher",
+            "t" * (publish_dataset.MAX_TEACHER_MODEL_BYTES + 1),
+            "teacher metadata",
+        ),
+        (
+            "workspace_rule",
+            "é" * (publish_dataset.MAX_WORKSPACE_RULE_BYTES // 2 + 1),
+            "workspace rule metadata",
+        ),
+    ],
+)
+@pytest.mark.parametrize("api", ["publish", "publish_to_root"])
+def test_public_publish_apis_refuse_oversized_metadata_before_destination_creation(  # noqa: PLR0913 - pytest fixtures and cases
+    dataset: Path,
+    tmp_path: Path,
+    field: str,
+    value: str,
+    message: str,
+    api: str,
+) -> None:
+    dest = tmp_path / "oversized-metadata-bundle"
+    teacher = value if field == "teacher" else "bounded-teacher"
+    workspace_rule = value if field == "workspace_rule" else None
+    if api == "publish":
+        call = lambda: publish(  # noqa: E731 - keep parametrized API invocation explicit
+            dataset, dest, teacher=teacher, workspace_rule=workspace_rule
+        )
+    else:
+        fake_root = cast(
+            publish_dataset.PublisherRoot,
+            type("UntouchedRoot", (), {"path": dest.parent})(),
+        )
+        call = lambda: publish_dataset.publish_to_root(  # noqa: E731 - see above
+            dataset,
+            fake_root,
+            dest.name,
+            teacher=teacher,
+            workspace_rule=workspace_rule,
+        )
+
+    with pytest.raises(PublishError, match=message):
+        call()
+
+    assert not dest.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows AppContainer cannot provide private staging")
+def test_metadata_at_byte_limits_publishes_and_verifies(dataset: Path, tmp_path: Path) -> None:
+    dest = tmp_path / "maximum-metadata-bundle"
+    teacher = "t" * publish_dataset.MAX_TEACHER_MODEL_BYTES
+    workspace_rule = "é" * (publish_dataset.MAX_WORKSPACE_RULE_BYTES // 2)
+
+    manifest = publish(dataset, dest, teacher=teacher, workspace_rule=workspace_rule)
+
+    assert manifest["teacher_model"] == teacher
+    assert manifest["workspace_rule"] == workspace_rule
+    assert verify(dest) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows AppContainer cannot provide private staging")
+def test_oversized_encoded_manifest_refuses_before_staging(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "oversized-manifest-bundle"
+    monkeypatch.setattr(publish_dataset, "MAX_MANIFEST_BYTES", 1)
+
+    with pytest.raises(PublishError, match="MANIFEST.json exceeds"):
+        publish(dataset, dest, teacher="synthetic-teacher")
+
+    assert not dest.exists()
+    assert not list(tmp_path.glob(".omniagent-publish-*"))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("teacher_model", "t" * (publish_dataset.MAX_TEACHER_MODEL_BYTES + 1)),
+        ("workspace_rule", "w" * (publish_dataset.MAX_WORKSPACE_RULE_BYTES + 1)),
+    ],
+)
+def test_manifest_parser_rejects_metadata_over_byte_limits(field: str, value: str) -> None:
+    manifest = {
+        "dataset": "dataset.jsonl",
+        "examples": 1,
+        "system_prompt_sha256": "a" * 64,
+        "teacher_model": "valid-teacher",
+        "workspace_rule": None,
+        "source_commit": None,
+        "published_at": "2026-01-01T00:00:00+00:00",
+        "files": {},
+    }
+    manifest[field] = value
+
+    with pytest.raises(PublishError, match=r"MANIFEST\.json contains invalid metadata"):
+        publish_dataset._read_manifest(json.dumps(manifest).encode("utf-8"))
 
 
 def test_every_published_file_is_listed_with_its_digest(dataset: Path, tmp_path: Path) -> None:
@@ -875,6 +978,8 @@ def test_verifier_rejects_duplicate_manifest_keys(dataset: Path, tmp_path: Path)
         ("bad-commit", "source_commit"),
         ("bad-time", "published_at"),
         ("empty-teacher", "teacher_model"),
+        ("overlong-teacher", "teacher_model"),
+        ("overlong-workspace", "workspace_rule"),
     ],
 )
 def test_verifier_rejects_invalid_manifest_schema_or_metadata(
@@ -899,6 +1004,10 @@ def test_verifier_rejects_invalid_manifest_schema_or_metadata(
         manifest[field] = "not-a-git-commit"
     elif mutation == "bad-time":
         manifest[field] = "yesterday"
+    elif mutation == "overlong-teacher":
+        manifest[field] = "t" * (publish_dataset.MAX_TEACHER_MODEL_BYTES + 1)
+    elif mutation == "overlong-workspace":
+        manifest[field] = "w" * (publish_dataset.MAX_WORKSPACE_RULE_BYTES + 1)
     else:
         manifest[field] = "  "
     path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -948,7 +1057,7 @@ def test_verifier_process_rejects_an_incomplete_bundle(
             sys.executable,
             str(Path(publish_dataset.__file__)),
             "--verify-only",
-            "--dest",
+            "--local-only-path",
             str(dest),
         ],
         capture_output=True,
@@ -974,7 +1083,7 @@ def test_atomic_publish_preserves_existing_valid_destination(dataset: Path, tmp_
             sys.executable,
             str(Path(publish_dataset.__file__)),
             "--verify-only",
-            "--dest",
+            "--local-only-path",
             str(dest),
         ],
         capture_output=True,
@@ -1189,7 +1298,7 @@ def test_verify_only_needs_nothing_but_a_destination(dataset: Path, tmp_path: Pa
     dest = tmp_path / "drive"
     publish(dataset, dest, teacher="t")
 
-    assert publish_dataset.main(["--verify-only", "--dest", str(dest)]) == 0
+    assert publish_dataset.main(["--verify-only", "--local-only-path", str(dest)]) == 0
 
 
 def test_verify_only_reports_a_tampered_bundle_as_failure(dataset: Path, tmp_path: Path) -> None:
@@ -1197,7 +1306,7 @@ def test_verify_only_reports_a_tampered_bundle_as_failure(dataset: Path, tmp_pat
     publish(dataset, dest, teacher="t")
     (dest / "dataset.jsonl").write_text("tampered\n", encoding="utf-8")
 
-    assert publish_dataset.main(["--verify-only", "--dest", str(dest)]) == 1
+    assert publish_dataset.main(["--verify-only", "--local-only-path", str(dest)]) == 1
 
 
 def test_publishing_still_requires_a_dataset_and_a_teacher(tmp_path: Path) -> None:
@@ -1207,6 +1316,6 @@ def test_publishing_still_requires_a_dataset_and_a_teacher(tmp_path: Path) -> No
     convention every other CLI here follows.
     """
     with pytest.raises(SystemExit) as exit_info:
-        publish_dataset.main(["--dest", str(tmp_path / "drive")])
+        publish_dataset.main(["--local-only-path", str(tmp_path / "drive")])
 
     assert exit_info.value.code == 2
