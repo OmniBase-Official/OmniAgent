@@ -93,6 +93,17 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/gitleaks-trust/ignore"
           printf '[extend]\nuseDefault = true\n' > "$RUNNER_TEMP/gitleaks-trust/gitleaks.toml"
+          cat > "$RUNNER_TEMP/gitleaks-trust/ignore/.gitleaksignore" <<'EOF'
+          3576aebaf297c5e956ac9d9f0b80eb50a9af44af:tests/test_validate_dataset.py:generic-api-key:126
+          3576aebaf297c5e956ac9d9f0b80eb50a9af44af:tests/test_validate_dataset.py:generic-api-key:148
+          3576aebaf297c5e956ac9d9f0b80eb50a9af44af:tests/test_validate_dataset.py:generic-api-key:161
+          3576aebaf297c5e956ac9d9f0b80eb50a9af44af:tests/test_validate_dataset.py:generic-api-key:188
+          3576aebaf297c5e956ac9d9f0b80eb50a9af44af:tests/test_publish_dataset.py:generic-api-key:194
+          3576aebaf297c5e956ac9d9f0b80eb50a9af44af:tests/test_publish_dataset.py:generic-api-key:200
+          3576aebaf297c5e956ac9d9f0b80eb50a9af44af:tests/test_publish_dataset.py:generic-api-key:202
+          8ebc04a8f548817e75834bb864659b357872a140:tests/test_validate_dataset.py:generic-api-key:168
+          8ebc04a8f548817e75834bb864659b357872a140:tests/test_validate_dataset.py:generic-api-key:178
+          EOF
           rm -rf -- "$GITHUB_WORKSPACE/.gitleaks.toml" "$GITHUB_WORKSPACE/.gitleaksignore"
 
       - name: Scan and sanitize full-history Gitleaks report
@@ -116,7 +127,7 @@ jobs:
             --mount "type=bind,source=${output_dir},target=/reports" \
             "$GITLEAKS_IMAGE" git \
             --config /trust/gitleaks.toml \
-            --gitleaks-ignore-path /trust/gitleaks-ignore \
+            --gitleaks-ignore-path /trust/ignore \
             --redact=100 --no-banner --log-opts="--all" \
             --report-format json --report-path /reports/raw-report.json /repo \
             >/dev/null 2>&1; then

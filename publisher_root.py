@@ -52,6 +52,10 @@ class PublisherRootError(OSError):
     """The current user's publication directory is unsafe or unavailable."""
 
 
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
 def _known_local_data_root() -> Path:
     if sys.platform == "win32":
 
@@ -98,7 +102,7 @@ def _known_local_data_root() -> Path:
 
 
 def _windows_standard_token() -> bool:  # noqa: PLR0912, PLR0915 - explicit token privilege checks
-    if sys.platform != "win32":
+    if not _is_windows():
         return True
     advapi = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)

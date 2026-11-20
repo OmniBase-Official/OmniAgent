@@ -6,12 +6,29 @@ import ctypes
 import os
 import re
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from publisher_root import _known_local_data_root
 from securefs import SecureRoot
+
+
+def _ctypes_attribute(name: str) -> object:
+    return getattr(ctypes, name)
+
+
+def _load_windows_dll(name: str) -> ctypes.CDLL:
+    loader = cast(Callable[..., ctypes.CDLL], _ctypes_attribute("WinDLL"))
+    return loader(name, use_last_error=True)
+
+
+def _windows_error() -> OSError:
+    get_last_error = cast(Callable[[], int], _ctypes_attribute("get_last_error"))
+    win_error = cast(Callable[[int], OSError], _ctypes_attribute("WinError"))
+    return win_error(get_last_error())
 
 
 def _current_sid() -> str:
@@ -26,12 +43,15 @@ def _current_sid() -> str:
     matches = re.findall(r"S-1-\d+(?:-\d+)+", result.stdout)
     if len(matches) != 1:
         raise AssertionError("could not identify current Windows SID")
-    return matches[0]
+    sid = matches[0]
+    if not isinstance(sid, str):
+        raise TypeError("could not identify current Windows SID")
+    return sid
 
 
 def _set_dacl(path: Path, sddl: str) -> None:
-    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi = _load_windows_dll("advapi32")
+    kernel = _load_windows_dll("kernel32")
     descriptor = ctypes.c_void_p()
     advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
         ctypes.c_wchar_p,
@@ -46,10 +66,10 @@ def _set_dacl(path: Path, sddl: str) -> None:
     if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
         sddl, 1, ctypes.byref(descriptor), None
     ):
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise _windows_error()
     try:
         if not advapi.SetFileSecurityW(str(path), 0x00000004, descriptor):
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _windows_error()
     finally:
         kernel.LocalFree(descriptor)
 

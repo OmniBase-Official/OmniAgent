@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from contextlib import suppress
 from hashlib import sha256
 from pathlib import Path
@@ -31,6 +32,7 @@ from publish_dataset import PublishError, publish, verify
 from publish_dataset import main as publish_main
 
 from dataset_provenance import prompt_fingerprint, write_sidecar
+from publisher_root import PublisherRoot
 from sandbox import Workspace
 
 
@@ -517,13 +519,14 @@ def test_public_publish_apis_refuse_oversized_metadata_before_destination_creati
     dest = tmp_path / "oversized-metadata-bundle"
     teacher = value if field == "teacher" else "bounded-teacher"
     workspace_rule = value if field == "workspace_rule" else None
+    call: Callable[[], object]
     if api == "publish":
         call = lambda: publish(  # noqa: E731 - keep parametrized API invocation explicit
             dataset, dest, teacher=teacher, workspace_rule=workspace_rule
         )
     else:
         fake_root = cast(
-            publish_dataset.PublisherRoot,
+            PublisherRoot,
             type("UntouchedRoot", (), {"path": dest.parent})(),
         )
         call = lambda: publish_dataset.publish_to_root(  # noqa: E731 - see above

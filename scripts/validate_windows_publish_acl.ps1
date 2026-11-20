@@ -518,7 +518,8 @@ $peerEvidence = $null
 $testResults = @{}
 $probeExitCode = $null
 $failureClass = $null
-$localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+$failurePhase = "preflight"
+$localAppData = $null
 
 function New-RandomCredential([string]$Name) {
     $random = New-Object byte[] 32
@@ -536,6 +537,8 @@ function New-RandomCredential([string]$Name) {
 }
 
 try {
+    $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    $failurePhase = "directory-setup"
     New-Item -ItemType Directory -Path $runRoot | Out-Null
     [IO.File]::WriteAllText($marker, $runId, [Text.Encoding]::ASCII)
     New-Item -ItemType Directory -Path $controlRoot | Out-Null
@@ -543,6 +546,7 @@ try {
     New-Item -ItemType Directory -Path $peerOutputRoot | Out-Null
     New-Item -ItemType Directory -Path $privateData | Out-Null
     New-Item -ItemType Directory -Path $destinationParent | Out-Null
+    $failurePhase = "identity-setup"
     $publisherCredential = New-RandomCredential $publisherName
     $peerCredential = New-RandomCredential $peerName
     $ownerDescription = "OmniAgent ACL validation run " + $runId
@@ -567,6 +571,7 @@ try {
     $adminSids = @(Get-LocalGroupMember -Group "Administrators" | ForEach-Object { $_.SID.Value })
     if ($adminSids -contains $publisherSid -or $adminSids -contains $peerSid) { throw "Temporary accounts must be standard users." }
 
+    $failurePhase = "acl-setup"
     $systemFull = "*S-1-5-18:(OI)(CI)F"
     $adminsFull = "*S-1-5-32-544:(OI)(CI)F"
     $publisherRead = "*{0}:(OI)(CI)RX" -f $publisherSid
@@ -585,6 +590,7 @@ try {
     Set-ExplicitAcl -Path $marker -AccessRules @("*S-1-5-18:F", "*S-1-5-32-544:F", $peerMarkerRead, $publisherMarkerRead)
     $destinationAclEvidence = Get-PublisherOnlyDirectoryAcl -Path $destinationParent -PublisherSid $publisherSid
 
+    $failurePhase = "negative-controls"
     Set-UnsafeParentAcl -Path $unsafeDeleteChildParent -PublisherSid $publisherSid -PeerSid $peerSid -PeerRights ([Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles)
     Set-Content -LiteralPath $unsafeDeleteChildControlPath -Value "negative-control" -Encoding ascii
     Set-UnsafeParentAcl -Path $unsafeWriteDacParent -PublisherSid $publisherSid -PeerSid $peerSid -PeerRights ([Security.AccessControl.FileSystemRights]::ChangePermissions)
@@ -601,6 +607,7 @@ try {
     Invoke-PeerProbe -Mode "write-owner-control" -Target $unsafeWriteOwnerControlPath -OutputPath $unsafeWriteOwnerResultPath -ExpectedPeerSid $peerSid
     Invoke-PeerProbe -Mode "generic-all-control" -Target $unsafeGenericAllControlPath -OutputPath $unsafeGenericAllResultPath -ExpectedPeerSid $peerSid
 
+    $failurePhase = "publisher-setup"
     $configPath = Join-Path $controlRoot "test-config.json"
     $config = [ordered]@{
         publisher_sid = $publisherSid
@@ -641,10 +648,12 @@ try {
     Set-Content -LiteralPath $commandFile -Value $batch -Encoding ascii
     $publisherProcess = Start-Process -FilePath $env:ComSpec -Credential $publisherCredential -WorkingDirectory $repository -ArgumentList ('/d /c "' + $commandFile + '"') -PassThru -RedirectStandardOutput (Join-Path $runRoot "publisher.stdout.txt") -RedirectStandardError (Join-Path $runRoot "publisher.stderr.txt")
 
+    $failurePhase = "publisher-wait"
     $deadline = [DateTime]::UtcNow.AddMinutes(4)
     while (-not $publisherProcess.HasExited -and [DateTime]::UtcNow -lt $deadline) {
         $publisherProcess.Refresh()
         if (Test-Path -LiteralPath $readyPath -PathType Leaf) {
+            $failurePhase = "peer-probe"
             $ready = Get-Content -LiteralPath $readyPath -Raw | ConvertFrom-Json
             $stagePath = Assert-Within -Path ([string]$ready.stage_path) -Root $destinationParent
             if ((Split-Path -Leaf $stagePath) -notlike ".omniagent-publish-*") { throw "Unexpected staging path." }
@@ -663,6 +672,7 @@ try {
             Set-Content -LiteralPath $releasePath -Value "peer-probe-complete" -Encoding ascii
             Remove-Item -LiteralPath $readyPath -Force
             if ($probeExitCode -ne 0) { throw "Peer token did not fail all private-stage probes." }
+            $failurePhase = "publisher-wait"
         }
         Start-Sleep -Milliseconds 200
     }
@@ -671,6 +681,7 @@ try {
         & taskkill.exe /PID $publisherProcess.Id /T /F | Out-Null
         throw "Publisher test timed out."
     }
+    $failurePhase = "result-validation"
     $publisherProcess.Refresh()
     if ($publisherProcess.ExitCode -ne 0) { throw "Publisher pytest failed." }
     $publisherEvidence = Get-Content -LiteralPath $publisherEvidencePath -Raw | ConvertFrom-Json
@@ -682,6 +693,7 @@ try {
         -not $peerEvidence.stage_listing_denied -or -not $peerEvidence.payload_read_denied -or -not $peerEvidence.stage_create_denied -or
         -not $peerEvidence.stage_rename_denied -or -not $peerEvidence.stage_delete_denied) { throw "Peer could access publisher-only data or mutate private staging." }
     if (-not $testResults.safe_profile -or -not $testResults.publish_success -or -not $testResults.promotion_failure) { throw "A safe-profile publisher scenario did not report success." }
+    $failurePhase = "complete"
 } catch {
     $failureClass = Get-ControlledErrorCategory $_.Exception
     throw ("Publisher validation failed [{0}]." -f $failureClass)
@@ -755,6 +767,7 @@ try {
         unsafe_write_dac_negative_control = (Test-Path -LiteralPath $unsafeWriteDacResultPath -PathType Leaf)
         peer_probe_exit_code = $probeExitCode
         failure_class = $failureClass
+        failure_phase = $failurePhase
         failure_status = if ($failureClass) { "failed" } else { "passed" }
         path_acl_facts = $pathAclFacts
         cleanup_failed = ($cleanupErrors.Count -gt 0)

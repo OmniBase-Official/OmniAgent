@@ -21,6 +21,7 @@ import publish_dataset
 import publisher_root
 from dataset_provenance import write_sidecar
 from publisher_root import PublisherRoot, PublisherRootError
+from securefs import SecureRoot
 
 
 @pytest.fixture
@@ -77,14 +78,20 @@ def _mock_posix_ancestors(
         uid, mode = metadata[directory]
         return SimpleNamespace(st_uid=uid, st_mode=stat.S_IFDIR | mode)
 
-    monkeypatch.setattr(publisher_root.Path, "stat", fake_stat)
-    monkeypatch.setattr(publisher_root.Path, "is_symlink", lambda _directory: False)
-    monkeypatch.setattr(publisher_root.os, "geteuid", lambda: current_uid, raising=False)
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    monkeypatch.setattr(Path, "is_symlink", lambda _directory: False)
+    monkeypatch.setattr(os, "geteuid", lambda: current_uid, raising=False)
     monkeypatch.setattr(
         publisher_root,
         "_acl_has_foreign_write_execute",
         lambda _directory, _attribute: False,
     )
+
+
+def test_non_windows_token_check_remains_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert publisher_root._windows_standard_token()
 
 
 def test_posix_ancestor_validation_accepts_root_and_user_home(
@@ -182,7 +189,7 @@ def test_wrong_owner_profile_is_refused(
 ) -> None:
     with PublisherRoot.provision_local_user() as root:
         profile_path = root.path
-    monkeypatch.setattr(publisher_root.SecureRoot, "owned_by_current_user", lambda _root: False)
+    monkeypatch.setattr(SecureRoot, "owned_by_current_user", lambda _root: False)
     with pytest.raises(PublisherRootError, match="owner or permissions"):
         PublisherRoot.open_local_user()
     assert profile_path.is_dir()
@@ -197,7 +204,9 @@ def test_profile_publish_verify_and_cleanup_use_only_one_name(
         manifest = publish_dataset.publish_to_root(
             dataset, root, "daily-bundle", teacher="synthetic-test"
         )
-        assert "dataset.jsonl" in manifest["files"]
+        files = manifest["files"]
+        assert isinstance(files, dict)
+        assert "dataset.jsonl" in files
         assert publish_dataset.verify_from_root(root, "daily-bundle") == []
         with pytest.raises(publish_dataset.PublishError, match="one safe directory name"):
             publish_dataset.publish_to_root(dataset, root, "../outside", teacher="synthetic-test")
