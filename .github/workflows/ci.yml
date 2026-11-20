@@ -95,18 +95,75 @@ jobs:
           printf '[extend]\nuseDefault = true\n' > "$RUNNER_TEMP/gitleaks-trust/gitleaks.toml"
           rm -rf -- "$GITHUB_WORKSPACE/.gitleaks.toml" "$GITHUB_WORKSPACE/.gitleaksignore"
 
-      - name: Scan full Git history with Gitleaks
+      - name: Scan and sanitize full-history Gitleaks report
+        id: gitleaks_scan
         env:
           GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+        shell: bash
         run: |
-          docker run --rm --network none --read-only \
+          set -euo pipefail
+          output_dir="$RUNNER_TEMP/gitleaks-output"
+          raw_report="$output_dir/raw-report.json"
+          sanitized_report="$output_dir/sanitized-report.json"
+          trap 'rm -f -- "$raw_report"' EXIT
+          mkdir -m 700 -p "$output_dir"
+          chmod 700 "$output_dir"
+          umask 077
+          if docker run --rm --network none --read-only \
             --user "$(id -u):$(id -g)" \
             --mount "type=bind,source=${GITHUB_WORKSPACE},target=/repo,readonly" \
             --mount "type=bind,source=${RUNNER_TEMP}/gitleaks-trust,target=/trust,readonly" \
+            --mount "type=bind,source=${output_dir},target=/reports" \
             "$GITLEAKS_IMAGE" git \
             --config /trust/gitleaks.toml \
             --gitleaks-ignore-path /trust/gitleaks-ignore \
-            --redact --no-banner --log-opts="--all" /repo
+            --redact=100 --no-banner --log-opts="--all" \
+            --report-format json --report-path /reports/raw-report.json /repo \
+            >/dev/null 2>&1; then
+            scan_exit=0
+          else
+            scan_exit=$?
+          fi
+          if [ ! -s "$raw_report" ]; then
+            echo "Gitleaks did not produce a JSON report (exit code ${scan_exit})." >&2
+            exit "${scan_exit:-2}"
+          fi
+          python3 - "$raw_report" "$sanitized_report" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          source, destination = map(Path, sys.argv[1:])
+          allowed = ("RuleID", "File", "Commit", "StartLine", "Fingerprint")
+          report = json.loads(source.read_text(encoding="utf-8"))
+          if not isinstance(report, list):
+              raise SystemExit("Gitleaks JSON report has an unexpected top-level type.")
+          sanitized = []
+          for finding in report:
+              if not isinstance(finding, dict):
+                  raise SystemExit("Gitleaks JSON report contains an invalid finding.")
+              sanitized.append({key: finding.get(key) for key in allowed})
+          with destination.open("x", encoding="utf-8") as output:
+              json.dump(sanitized, output, ensure_ascii=True, separators=(",", ":"))
+              output.write("\n")
+          os.chmod(destination, 0o600)
+          PY
+          rm -f -- "$raw_report"
+          echo "sanitized_report=$sanitized_report" >> "$GITHUB_OUTPUT"
+          if [ "$scan_exit" -ne 0 ]; then
+            echo "Gitleaks scan failed or found secrets (exit code ${scan_exit}); sanitized findings are attached." >&2
+            exit "$scan_exit"
+          fi
+
+      - name: Upload sanitized Gitleaks findings on failure
+        if: failure() && steps.gitleaks_scan.outputs.sanitized_report != ''
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: gitleaks-sanitized-findings-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.gitleaks_scan.outputs.sanitized_report }}
+          if-no-files-found: error
+          retention-days: 7
   windows-tests:
     name: Windows / pytest
     runs-on: windows-latest
@@ -175,6 +232,6 @@ jobs:
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: windows-publisher-acl-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/publisher-acl-${{ github.run_id }}-${{ github.run_attempt }}.*
+          path: ${{ runner.temp }}/publisher-acl-${{ github.run_id }}-${{ github.run_attempt }}.json
           if-no-files-found: warn
           retention-days: 7

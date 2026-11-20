@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import sys
 import tempfile
 import uuid
 from collections.abc import Iterator
@@ -13,10 +14,13 @@ from types import SimpleNamespace
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+
+import publish_dataset
+
 import publisher_root
 from dataset_provenance import write_sidecar
 from publisher_root import PublisherRoot, PublisherRootError
-from scripts import publish_dataset
 
 
 @pytest.fixture

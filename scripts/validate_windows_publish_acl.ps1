@@ -18,6 +18,41 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
+function Get-ControlledErrorCategory([System.Exception]$Exception) {
+    if ($Exception -is [UnauthorizedAccessException]) { return "access_denied" }
+    if ($Exception -is [Security.SecurityException]) { return "security_error" }
+    if ($Exception -is [IO.IOException]) { return "io_error" }
+    if ($Exception -is [ArgumentException]) { return "invalid_argument" }
+    if ($Exception -is [InvalidOperationException]) { return "invalid_operation" }
+    return "other_error"
+}
+
+function Get-SanitizedPathAclFact([string]$Role, [string]$Path) {
+    $fact = [ordered]@{
+        category = $Role
+        exists = $false
+        is_directory = $null
+        is_reparse_point = $null
+        acl_readable = $false
+        inheritance_protected = $null
+        error_category = $null
+    }
+    if (-not $Path) { return $fact }
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) { return $fact }
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        $fact.exists = $true
+        $fact.is_directory = [bool]$item.PSIsContainer
+        $fact.is_reparse_point = [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        $fact.acl_readable = $true
+        $fact.inheritance_protected = [bool]$acl.AreAccessRulesProtected
+    } catch {
+        $fact.error_category = Get-ControlledErrorCategory $_.Exception
+    }
+    return $fact
+}
+
 function Get-TokenEvidence {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $whoami = Join-Path $env:SYSTEMROOT "System32\whoami.exe"
@@ -217,7 +252,7 @@ if ($ProbeOnly) {
     $runnerTemp = (Resolve-Path -LiteralPath $RunnerTempPath).Path
     $runRoot = Assert-Within -Path $RunRoot -Root $runnerTemp
     $marker = Join-Path $runRoot ".omniagent-acl-run"
-    if (-not (Test-Path -LiteralPath $marker -PathType Leaf) -or (Get-Content -LiteralPath $marker -Raw) -ne $RunId) {
+    if (-not (Test-Path -LiteralPath $marker -PathType Leaf) -or (Get-Content -LiteralPath $marker -Raw) -cne $RunId) {
         throw "Probe run marker did not match."
     }
     $controlRoot = Assert-Within -Path $ControlRoot -Root $runRoot
@@ -444,7 +479,6 @@ if ($LASTEXITCODE -ne 0) { throw "Could not read the checked-out tree hash." }
 if (-not $EvidencePath) { $EvidencePath = Join-Path $runnerTemp ("publisher-acl-" + $env:GITHUB_RUN_ID + ".json") }
 $evidenceFull = Assert-Within -Path $EvidencePath -Root $runnerTemp
 $evidenceStream = [IO.File]::Open($evidenceFull, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-$logsPath = [IO.Path]::ChangeExtension($evidenceFull, ".logs.txt")
 
 $runId = [Guid]::NewGuid().ToString("N")
 $runRoot = Join-Path $runnerTemp ("omniagent-acl-" + $runId)
@@ -484,6 +518,7 @@ $peerEvidence = $null
 $testResults = @{}
 $probeExitCode = $null
 $failureClass = $null
+$localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
 
 function New-RandomCredential([string]$Name) {
     $random = New-Object byte[] 32
@@ -502,7 +537,7 @@ function New-RandomCredential([string]$Name) {
 
 try {
     New-Item -ItemType Directory -Path $runRoot | Out-Null
-    Set-Content -LiteralPath $marker -Value $runId -Encoding ascii
+    [IO.File]::WriteAllText($marker, $runId, [Text.Encoding]::ASCII)
     New-Item -ItemType Directory -Path $controlRoot | Out-Null
     New-Item -ItemType Directory -Path $publisherStatus | Out-Null
     New-Item -ItemType Directory -Path $peerOutputRoot | Out-Null
@@ -648,8 +683,8 @@ try {
         -not $peerEvidence.stage_rename_denied -or -not $peerEvidence.stage_delete_denied) { throw "Peer could access publisher-only data or mutate private staging." }
     if (-not $testResults.safe_profile -or -not $testResults.publish_success -or -not $testResults.promotion_failure) { throw "A safe-profile publisher scenario did not report success." }
 } catch {
-    $failureClass = $_.Exception.GetType().Name
-    throw
+    $failureClass = Get-ControlledErrorCategory $_.Exception
+    throw ("Publisher validation failed [{0}]." -f $failureClass)
 } finally {
     if ($publisherProcess -and -not $publisherProcess.HasExited) {
         Set-Content -LiteralPath $releasePath -Value "cleanup-release" -Encoding ascii -ErrorAction SilentlyContinue
@@ -674,34 +709,15 @@ try {
         }
     }
 
-    $logs = ""
-    if ($runRoot -and (Test-Path -LiteralPath $runRoot)) {
-        foreach ($name in @("publisher.stdout.txt", "publisher.stderr.txt", "peer.stdout.txt", "peer.stderr.txt")) {
-            $path = Join-Path $runRoot $name
-            if (Test-Path -LiteralPath $path) {
-                $logs += [Environment]::NewLine + "### " + $name + [Environment]::NewLine
-                $logs += ((Get-Content -LiteralPath $path -ErrorAction SilentlyContinue) -join [Environment]::NewLine)
-            }
-        }
-    }
-    if ($runRoot) { $logs = $logs.Replace($runRoot, "[run-root]") }
-    if ($repository) { $logs = $logs.Replace($repository, "[repository]") }
-    if ($publisherName) { $logs = $logs.Replace($publisherName, "[publisher-user]") }
-    if ($peerName) { $logs = $logs.Replace($peerName, "[peer-user]") }
-    $logStream = $null
-    try {
-        $logStream = [IO.File]::Open($logsPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-        $logBytes = [Text.UTF8Encoding]::new($false).GetBytes($logs)
-        $logStream.Write($logBytes, 0, $logBytes.Length)
-        $logStream.Flush()
-    } catch {
-        $cleanupErrors += "sanitized diagnostics preservation failed: " + $_.Exception.GetType().Name
-    } finally {
-        if ($logStream) { $logStream.Dispose() }
-    }
-
+    $pathAclFacts = @(
+        (Get-SanitizedPathAclFact -Role "runner_temp" -Path $runnerTemp),
+        (Get-SanitizedPathAclFact -Role "local_app_data" -Path $localAppData),
+        (Get-SanitizedPathAclFact -Role "run_root" -Path $runRoot),
+        (Get-SanitizedPathAclFact -Role "private_data" -Path $privateData),
+        (Get-SanitizedPathAclFact -Role "destination_parent" -Path $destinationParent)
+    )
     if ($runRoot -and (Test-Path -LiteralPath $marker)) {
-        $markerMatches = (Get-Content -LiteralPath $marker -Raw) -eq $runId
+        $markerMatches = (Get-Content -LiteralPath $marker -Raw) -ceq $runId
         $rootIsScoped = $runRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase)
         if ($markerMatches -and $rootIsScoped) {
             try { Remove-Item -LiteralPath $runRoot -Recurse -Force -ErrorAction Stop }
@@ -716,36 +732,32 @@ try {
     $evidence = [ordered]@{
         commit = $ExpectedCommit
         tree = $tree
-        runner_os = [Environment]::OSVersion.VersionString
-        token_scope = "distinct standard local accounts; no minimal-privilege claim"
-        publisher_sid = $publisherSid
-        peer_sid = $peerSid
-        destination_parent_sddl = if ($destinationAclEvidence) { $destinationAclEvidence.sddl } else { $null }
-        destination_parent_allowed_sids = if ($destinationAclEvidence) { $destinationAclEvidence.allowed_sids } else { @() }
-        destination_parent_inheritance_protected = [bool]$destinationAclEvidence.inheritance_protected
-        publisher_groups = if ($publisherEvidence) { $publisherEvidence.group_sids } else { @() }
-        publisher_privileges = if ($publisherEvidence) { $publisherEvidence.privileges } else { @() }
-        peer_groups = if ($peerEvidence) { $peerEvidence.peer_group_sids } else { @() }
-        peer_privileges = if ($peerEvidence) { $peerEvidence.peer_privileges } else { @() }
+        runner_platform = "windows"
+        publisher_peer_sid_distinct = [bool]($publisherSid -and $peerSid -and $publisherSid -ne $peerSid)
+        publisher_token_validated = [bool]$publisherEvidence
+        peer_token_validated = [bool]$peerEvidence
+        destination_parent_acl_observed = [bool]$destinationAclEvidence
+        destination_parent_inheritance_protected = if ($destinationAclEvidence) { [bool]$destinationAclEvidence.inheritance_protected } else { $null }
         destination_listing_denied = [bool]$peerEvidence.destination_listing_denied
         destination_create_denied = [bool]$peerEvidence.destination_create_denied
         destination_canary_was_created = [bool]$peerEvidence.destination_canary_was_created
-        destination_canary_cleanup_error = $peerEvidence.destination_canary_cleanup_error
+        destination_canary_cleanup_failed = [bool]$peerEvidence.destination_canary_cleanup_error
         stage_listing_denied = [bool]$peerEvidence.stage_listing_denied
         payload_read_denied = [bool]$peerEvidence.payload_read_denied
         stage_create_denied = [bool]$peerEvidence.stage_create_denied
         stage_rename_denied = [bool]$peerEvidence.stage_rename_denied
         stage_delete_denied = [bool]$peerEvidence.stage_delete_denied
-        stage_probe_boundary = $peerEvidence.stage_probe_boundary
         canary_was_created = [bool]$peerEvidence.canary_was_created
-        canary_cleanup_error = $peerEvidence.canary_cleanup_error
+        canary_cleanup_failed = [bool]$peerEvidence.canary_cleanup_error
         publish_success = [bool]$testResults.publish_success
         promotion_failure = [bool]$testResults.promotion_failure
         unsafe_delete_child_negative_control = (Test-Path -LiteralPath $unsafeDeleteChildResultPath -PathType Leaf)
         unsafe_write_dac_negative_control = (Test-Path -LiteralPath $unsafeWriteDacResultPath -PathType Leaf)
         peer_probe_exit_code = $probeExitCode
         failure_class = $failureClass
-        cleanup_errors = $cleanupErrors
+        failure_status = if ($failureClass) { "failed" } else { "passed" }
+        path_acl_facts = $pathAclFacts
+        cleanup_failed = ($cleanupErrors.Count -gt 0)
     }
     $evidenceBytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json -InputObject $evidence -Depth 8))
     $evidenceStream.Write($evidenceBytes, 0, $evidenceBytes.Length)
