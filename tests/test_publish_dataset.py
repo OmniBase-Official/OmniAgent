@@ -36,6 +36,12 @@ from publisher_root import PublisherRoot
 from sandbox import Workspace
 
 
+@pytest.fixture
+def tmp_path(owner_private_test_root: Path) -> Path:
+    """Use an ancestry-checked private root for publisher source and destination paths."""
+    return owner_private_test_root
+
+
 def _write_manifest(dest: Path, files: dict[str, str]) -> None:
     (dest / publish_dataset.MANIFEST_NAME).write_text(
         json.dumps(

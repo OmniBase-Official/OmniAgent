@@ -27,6 +27,28 @@ function Get-ControlledErrorCategory([System.Exception]$Exception) {
     return "other_error"
 }
 
+function Get-SanitizedIdentityErrorCategory([System.Exception]$Exception) {
+    $current = $Exception
+    while ($null -ne $current) {
+        $code = $null
+        if ($current -is [System.ComponentModel.Win32Exception]) {
+            $code = [int]$current.NativeErrorCode
+        } else {
+            $hresult = [int]$current.HResult
+            if (($hresult -band 0xFFFF0000) -eq -2147024896) {
+                $code = $hresult -band 0xFFFF
+            }
+        }
+        switch ($code) {
+            1314 { return "privilege_not_held" }
+            5 { return "access_denied" }
+            50 { return "unsupported" }
+        }
+        $current = $current.InnerException
+    }
+    return "other"
+}
+
 function Get-SanitizedPathAclFact([string]$Role, [string]$Path) {
     $fact = [ordered]@{
         category = $Role
@@ -520,6 +542,7 @@ $probeExitCode = $null
 $failureClass = $null
 $failurePhase = "preflight"
 $identitySubphase = "not-started"
+$identityErrorCategory = $null
 $localAppData = $null
 
 function New-RandomCredential([string]$Name) {
@@ -560,7 +583,8 @@ try {
     }
     $usersToClean += [pscustomobject]@{ Name = $publisherName; Marker = $ownerDescription; Sid = $null }
     $identitySubphase = "publisher-account-create"
-    New-LocalUser -Name $publisherName -Password $publisherCredential.Password -Description $ownerDescription -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword | Out-Null
+    try { New-LocalUser -Name $publisherName -Password $publisherCredential.Password -Description $ownerDescription -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword -ErrorAction Stop | Out-Null }
+    catch { $identityErrorCategory = Get-SanitizedIdentityErrorCategory $_.Exception; throw }
     $identitySubphase = "publisher-account-readback"
     $publisherAccount = Get-LocalUser -Name $publisherName
     if ($publisherAccount.Description -ne $ownerDescription) { throw "Publisher ownership marker mismatch." }
@@ -569,7 +593,8 @@ try {
 
     $usersToClean += [pscustomobject]@{ Name = $peerName; Marker = $ownerDescription; Sid = $null }
     $identitySubphase = "peer-account-create"
-    New-LocalUser -Name $peerName -Password $peerCredential.Password -Description $ownerDescription -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword | Out-Null
+    try { New-LocalUser -Name $peerName -Password $peerCredential.Password -Description $ownerDescription -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword -ErrorAction Stop | Out-Null }
+    catch { $identityErrorCategory = Get-SanitizedIdentityErrorCategory $_.Exception; throw }
     $identitySubphase = "peer-account-readback"
     $peerAccount = Get-LocalUser -Name $peerName
     if ($peerAccount.Description -ne $ownerDescription) { throw "Peer ownership marker mismatch." }
@@ -782,6 +807,7 @@ try {
         failure_class = $failureClass
         failure_phase = $failurePhase
         identity_subphase = $identitySubphase
+        identity_error_category = $identityErrorCategory
         failure_status = if ($failureClass) { "failed" } else { "passed" }
         path_acl_facts = $pathAclFacts
         cleanup_failed = ($cleanupErrors.Count -gt 0)

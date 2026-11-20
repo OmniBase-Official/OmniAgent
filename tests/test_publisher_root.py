@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import ctypes
 import os
-import shutil
 import stat
 import sys
-import tempfile
 import uuid
-from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -27,24 +24,16 @@ from securefs import SecureRoot
 
 
 @pytest.fixture
-def isolated_profile(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+def isolated_profile(
+    monkeypatch: pytest.MonkeyPatch, owner_private_test_root: Path
+) -> Path:
+    base = owner_private_test_root
+    app_directory = f"OmniAgent-test-{uuid.uuid4().hex}"
+    monkeypatch.setattr(publisher_root, "_known_local_data_root", lambda: base)
+    monkeypatch.setattr(publisher_root, "_APP_DIRECTORY", app_directory)
     if os.name == "nt":
-        base = publisher_root._known_local_data_root()
-        app_directory = f"OmniAgent-test-{uuid.uuid4().hex}"
-        monkeypatch.setattr(publisher_root, "_known_local_data_root", lambda: base)
-        monkeypatch.setattr(publisher_root, "_APP_DIRECTORY", app_directory)
         monkeypatch.setattr(publisher_root, "_windows_standard_token", lambda: True)
-        try:
-            yield base
-        finally:
-            shutil.rmtree(base / app_directory, ignore_errors=True)
-        return
-    with tempfile.TemporaryDirectory(dir=Path.home()) as temporary:
-        base = Path(temporary) / "data"
-        base.mkdir(mode=0o700)
-        monkeypatch.setattr(publisher_root, "_known_local_data_root", lambda: base)
-        monkeypatch.setattr(publisher_root, "_APP_DIRECTORY", "omniagent-test-profile")
-        yield base
+    return base
 
 
 def _dataset(path: Path) -> Path:
