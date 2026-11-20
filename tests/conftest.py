@@ -59,14 +59,73 @@ def explicit_repository_workspace() -> Iterator[None]:
         yield
 
 
+def _candidate_test_parents() -> list[Path]:
+    if os.name == "nt":
+        values = [
+            os.environ.get("RUNNER_TEMP"),
+            os.environ.get("LOCALAPPDATA"),
+            os.environ.get("USERPROFILE"),
+            os.environ.get("GITHUB_WORKSPACE"),
+            os.environ.get("SYSTEMDRIVE", "C:") + os.sep,
+        ]
+    elif sys.platform.startswith("linux"):
+        values = [
+            os.environ.get("XDG_RUNTIME_DIR"),
+            str(Path("/run/user") / str(os.geteuid())),
+            os.environ.get("RUNNER_TEMP"),
+            os.environ.get("GITHUB_WORKSPACE"),
+            str(Path.home()),
+        ]
+    else:
+        return []
+    result: list[Path] = []
+    for value in values:
+        if value:
+            candidate = Path(value)
+            if candidate not in result and candidate.is_dir():
+                result.append(candidate)
+    return result
+
+
+def _supports_private_test_parent(parent: Path) -> bool:
+    if os.name == "nt":
+        root = None
+        try:
+            root = SecureRoot(
+                parent, writable=True, _allow_safe_inherited_ancestors=True
+            )
+            return root.supports_private_staging()
+        except OSError:
+            return False
+        finally:
+            if root is not None:
+                root.close()
+    try:
+        publisher_root._validate_posix_ancestors(parent)
+    except OSError:
+        return False
+    return True
+
+
+def _create_private_test_root_candidate() -> Path:
+    for parent in _candidate_test_parents():
+        if not _supports_private_test_parent(parent):
+            continue
+        try:
+            return Path(
+                tempfile.mkdtemp(
+                    prefix=f"omniagent-test-{uuid.uuid4().hex}-", dir=parent
+                )
+            )
+        except PermissionError:
+            continue
+    raise RuntimeError("No runner-provided parent can host private test staging.")
+
+
 @pytest.fixture
 def owner_private_test_root() -> Iterator[Path]:
-    """Create a test root and verify its ancestry under the production policy."""
-    if os.name == "nt":
-        parent = Path(os.environ.get("USERPROFILE") or Path.home())
-    else:
-        parent = Path(os.environ.get("RUNNER_TEMP") or tempfile.gettempdir())
-    root = Path(tempfile.mkdtemp(prefix=f"omniagent-test-{uuid.uuid4().hex}-", dir=parent))
+    """Create a test root beneath a runner directory accepted by production checks."""
+    root = _create_private_test_root_candidate()
     try:
         if os.name == "nt":
             _protect_owner_private_test_directory(root)

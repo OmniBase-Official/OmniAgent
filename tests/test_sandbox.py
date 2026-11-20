@@ -597,14 +597,14 @@ def test_linux_source_owned_by_other_uid_rejects_owner_write_permission(
 
 @pytest.mark.skipif(os.name != "nt", reason="NTFS stage share-mode probe")
 def test_windows_held_staging_handle_blocks_parent_path_rename_and_delete(
-    tmp_path: Path,
+    owner_private_test_root: Path,
 ) -> None:
-    parent = SecureRoot(tmp_path, writable=True)
+    parent = SecureRoot(owner_private_test_root, writable=True)
     stage_name = "held-stage-share-probe"
     moved_name = "held-stage-share-probe-moved"
     stage = parent.create_directory(stage_name)
-    original = tmp_path / stage_name
-    moved = tmp_path / moved_name
+    original = owner_private_test_root / stage_name
+    moved = owner_private_test_root / moved_name
     try:
         for operation in (lambda: original.rename(moved), original.rmdir):
             with pytest.raises(PermissionError) as raised:
