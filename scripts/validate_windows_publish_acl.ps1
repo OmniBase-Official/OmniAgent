@@ -29,8 +29,14 @@ function Get-ControlledErrorCategory([System.Exception]$Exception) {
 }
 
 function Get-SanitizedIdentityExceptionType([System.Exception]$Exception) {
+    $typeName = $Exception.GetType().FullName
+    switch -Exact ($typeName) {
+        "System.Management.Automation.RuntimeException" { return "PowerShellRuntimeException" }
+        "System.Management.Automation.WriteErrorException" { return "PowerShellWriteErrorException" }
+        "System.Management.Automation.CmdletInvocationException" { return "PowerShellCmdletInvocationException" }
+        "Microsoft.Management.Infrastructure.CimException" { return "CimException" }
+    }
     if ($Exception -is [System.ComponentModel.Win32Exception]) { return "Win32Exception" }
-    if ($Exception.GetType().FullName -eq "Microsoft.Management.Infrastructure.CimException") { return "CimException" }
     if ($Exception -is [UnauthorizedAccessException]) { return "UnauthorizedAccessException" }
     if ($Exception -is [Security.SecurityException]) { return "SecurityException" }
     if ($Exception -is [InvalidOperationException]) { return "InvalidOperationException" }
@@ -38,9 +44,47 @@ function Get-SanitizedIdentityExceptionType([System.Exception]$Exception) {
     if ($Exception -is [IO.IOException]) { return "IOException" }
     return "OtherException"
 }
+
+function Get-SanitizedIdentityExceptionChain([System.Exception]$Exception) {
+    $labels = [System.Collections.Generic.List[string]]::new()
+    $current = $Exception
+    for ($depth = 0; $null -ne $current -and $depth -lt 5; $depth++) {
+        $labels.Add((Get-SanitizedIdentityExceptionType $current))
+        $current = $current.InnerException
+    }
+    if ($null -ne $current) { $labels.Add("AdditionalCauseOmitted") }
+    return [string]::Join(">", $labels)
+}
+
+function Get-SanitizedCimNativeErrorCategory([string]$NativeErrorName) {
+    switch -Exact ($NativeErrorName) {
+        "AccessDenied" { return "access_denied" }
+        "InvalidParameter" { return "invalid_argument" }
+        "NotSupported" { return "unsupported" }
+        "AlreadyExists" { return "account_exists" }
+    }
+    return $null
+}
+
+function Get-SanitizedCimStatusCategory([uint32]$StatusCode) {
+    switch ($StatusCode) {
+        2 { return "access_denied" }
+        4 { return "invalid_argument" }
+        7 { return "unsupported" }
+        11 { return "account_exists" }
+    }
+    return $null
+}
+
 function Get-SanitizedIdentityErrorCategory([System.Exception]$Exception) {
     $current = $Exception
     while ($null -ne $current) {
+        if ($current.GetType().FullName -eq "Microsoft.Management.Infrastructure.CimException") {
+            $nativeCategory = Get-SanitizedCimNativeErrorCategory ([string]$current.NativeErrorCode)
+            if ($nativeCategory) { return $nativeCategory }
+            $statusCategory = Get-SanitizedCimStatusCategory ([uint32]$current.StatusCode)
+            if ($statusCategory) { return $statusCategory }
+        }
         $code = $null
         if ($current -is [System.ComponentModel.Win32Exception]) {
             $code = [int]$current.NativeErrorCode
@@ -59,10 +103,31 @@ function Get-SanitizedIdentityErrorCategory([System.Exception]$Exception) {
     }
     return "unclassified"
 }
-function Get-SanitizedIdentityDiagnostics([System.Exception]$Exception) {
+
+function Get-SanitizedPowerShellCategory([string]$Category) {
+    switch -Exact ($Category) {
+        "PermissionDenied" { return "permission_denied" }
+        "SecurityError" { return "security_error" }
+        "InvalidArgument" { return "invalid_argument" }
+        "InvalidOperation" { return "invalid_operation" }
+        "InvalidData" { return "invalid_data" }
+        "ObjectNotFound" { return "object_not_found" }
+        "ResourceExists" { return "resource_exists" }
+        "ResourceUnavailable" { return "resource_unavailable" }
+        "NotSpecified" { return "not_specified" }
+    }
+    return "not_specified"
+}
+
+function Get-SanitizedIdentityDiagnostics([System.Management.Automation.ErrorRecord]$ErrorRecord) {
+    $exception = $ErrorRecord.Exception
+    $exceptionChain = Get-SanitizedIdentityExceptionChain $exception
+    $exceptionType = if ($exceptionChain) { $exceptionChain.Split(">")[0] } else { "OtherException" }
     return [ordered]@{
-        exception_type = Get-SanitizedIdentityExceptionType $Exception
-        error_category = Get-SanitizedIdentityErrorCategory $Exception
+        exception_type = $exceptionType
+        exception_chain = $exceptionChain
+        error_category = Get-SanitizedIdentityErrorCategory $exception
+        powershell_category = Get-SanitizedPowerShellCategory ([string]$ErrorRecord.CategoryInfo.Category)
     }
 }
 
@@ -484,11 +549,16 @@ if ($ProbeOnly) {
 if ($DiagnosticSelfTest) {
     $sentinel = "SENSITIVE_SENTINEL_PATH_AND_CREDENTIAL"
     $cases = [ordered]@{
-        privilege = Get-SanitizedIdentityDiagnostics ([System.ComponentModel.Win32Exception]::new(1314, $sentinel))
-        access_denied = Get-SanitizedIdentityDiagnostics ([System.ComponentModel.Win32Exception]::new(5, $sentinel))
-        hresult_access_denied = Get-SanitizedIdentityDiagnostics ([Runtime.InteropServices.COMException]::new($sentinel, -2147024891))
-        unsupported = Get-SanitizedIdentityDiagnostics ([System.ComponentModel.Win32Exception]::new(50, $sentinel))
-        unknown = Get-SanitizedIdentityDiagnostics ([InvalidOperationException]::new($sentinel))
+        privilege = Get-SanitizedIdentityDiagnostics ([System.Management.Automation.ErrorRecord]::new([System.ComponentModel.Win32Exception]::new(1314, $sentinel), $sentinel, [System.Management.Automation.ErrorCategory]::PermissionDenied, $sentinel))
+        access_denied = Get-SanitizedIdentityDiagnostics ([System.Management.Automation.ErrorRecord]::new([System.ComponentModel.Win32Exception]::new(5, $sentinel), $sentinel, [System.Management.Automation.ErrorCategory]::NotSpecified, $sentinel))
+        hresult_access_denied = Get-SanitizedIdentityDiagnostics ([System.Management.Automation.ErrorRecord]::new([Runtime.InteropServices.COMException]::new($sentinel, -2147024891), $sentinel, [System.Management.Automation.ErrorCategory]::NotSpecified, $sentinel))
+        unsupported = Get-SanitizedIdentityDiagnostics ([System.Management.Automation.ErrorRecord]::new([System.ComponentModel.Win32Exception]::new(50, $sentinel), $sentinel, [System.Management.Automation.ErrorCategory]::NotSpecified, $sentinel))
+        unknown = Get-SanitizedIdentityDiagnostics ([System.Management.Automation.ErrorRecord]::new([InvalidOperationException]::new($sentinel), $sentinel, [System.Management.Automation.ErrorCategory]::NotSpecified, $sentinel))
+        wrapped = Get-SanitizedIdentityDiagnostics ([System.Management.Automation.ErrorRecord]::new([System.Management.Automation.RuntimeException]::new($sentinel, [InvalidOperationException]::new($sentinel)), $sentinel, [System.Management.Automation.ErrorCategory]::PermissionDenied, $sentinel))
+        cim_access_denied = Get-SanitizedCimNativeErrorCategory "AccessDenied"
+        cim_unknown = Get-SanitizedCimNativeErrorCategory $sentinel
+        cim_status_access_denied = Get-SanitizedCimStatusCategory 2
+        cim_status_unknown = Get-SanitizedCimStatusCategory 9999
     }
     Write-Output (ConvertTo-Json -InputObject $cases -Depth 4 -Compress)
     exit 0
@@ -573,6 +643,8 @@ $failurePhase = "preflight"
 $identitySubphase = "not-started"
 $identityErrorCategory = $null
 $identityExceptionType = $null
+$identityExceptionChain = $null
+$identityPowerShellCategory = $null
 $localAppData = $null
 
 function New-RandomCredential([string]$Name) {
@@ -614,7 +686,7 @@ try {
     $usersToClean += [pscustomobject]@{ Name = $publisherName; Marker = $ownerDescription; Sid = $null }
     $identitySubphase = "publisher-account-create"
     try { New-LocalUser -Name $publisherName -Password $publisherCredential.Password -Description $ownerDescription -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword -ErrorAction Stop | Out-Null }
-    catch { $identityError = Get-SanitizedIdentityDiagnostics $_.Exception; $identityExceptionType = $identityError.exception_type; $identityErrorCategory = $identityError.error_category; throw }
+    catch { $identityError = Get-SanitizedIdentityDiagnostics $_; $identityExceptionType = $identityError.exception_type; $identityErrorCategory = $identityError.error_category; $identityExceptionChain = $identityError.exception_chain; $identityPowerShellCategory = $identityError.powershell_category; throw }
     $identitySubphase = "publisher-account-readback"
     $publisherAccount = Get-LocalUser -Name $publisherName
     if ($publisherAccount.Description -ne $ownerDescription) { throw "Publisher ownership marker mismatch." }
@@ -624,7 +696,7 @@ try {
     $usersToClean += [pscustomobject]@{ Name = $peerName; Marker = $ownerDescription; Sid = $null }
     $identitySubphase = "peer-account-create"
     try { New-LocalUser -Name $peerName -Password $peerCredential.Password -Description $ownerDescription -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword -ErrorAction Stop | Out-Null }
-    catch { $identityError = Get-SanitizedIdentityDiagnostics $_.Exception; $identityExceptionType = $identityError.exception_type; $identityErrorCategory = $identityError.error_category; throw }
+    catch { $identityError = Get-SanitizedIdentityDiagnostics $_; $identityExceptionType = $identityError.exception_type; $identityErrorCategory = $identityError.error_category; $identityExceptionChain = $identityError.exception_chain; $identityPowerShellCategory = $identityError.powershell_category; throw }
     $identitySubphase = "peer-account-readback"
     $peerAccount = Get-LocalUser -Name $peerName
     if ($peerAccount.Description -ne $ownerDescription) { throw "Peer ownership marker mismatch." }
@@ -839,6 +911,8 @@ try {
         identity_subphase = $identitySubphase
         identity_error_category = $identityErrorCategory
         identity_exception_type = $identityExceptionType
+        identity_exception_chain = $identityExceptionChain
+        identity_powershell_category = $identityPowerShellCategory
         failure_status = if ($failureClass) { "failed" } else { "passed" }
         path_acl_facts = $pathAclFacts
         cleanup_failed = ($cleanupErrors.Count -gt 0)

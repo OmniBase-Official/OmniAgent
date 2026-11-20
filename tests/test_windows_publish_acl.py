@@ -413,24 +413,44 @@ def test_windows_identity_diagnostics_are_allowlisted_and_redacted() -> None:
     assert evidence == {
         "privilege": {
             "exception_type": "Win32Exception",
+            "exception_chain": "Win32Exception",
             "error_category": "privilege_not_held",
+            "powershell_category": "permission_denied",
         },
         "access_denied": {
             "exception_type": "Win32Exception",
+            "exception_chain": "Win32Exception",
             "error_category": "access_denied",
+            "powershell_category": "not_specified",
         },
         "hresult_access_denied": {
             "exception_type": "OtherException",
+            "exception_chain": "OtherException",
             "error_category": "access_denied",
+            "powershell_category": "not_specified",
         },
         "unsupported": {
             "exception_type": "Win32Exception",
+            "exception_chain": "Win32Exception",
             "error_category": "unsupported",
+            "powershell_category": "not_specified",
         },
         "unknown": {
             "exception_type": "InvalidOperationException",
+            "exception_chain": "InvalidOperationException",
             "error_category": "unclassified",
+            "powershell_category": "not_specified",
         },
+        "wrapped": {
+            "exception_type": "PowerShellRuntimeException",
+            "exception_chain": "PowerShellRuntimeException>InvalidOperationException",
+            "error_category": "unclassified",
+            "powershell_category": "permission_denied",
+        },
+        "cim_access_denied": "access_denied",
+        "cim_unknown": None,
+        "cim_status_access_denied": "access_denied",
+        "cim_status_unknown": None,
     }
     assert "SENSITIVE_SENTINEL" not in completed.stdout
     assert "SENSITIVE_SENTINEL" not in completed.stderr
