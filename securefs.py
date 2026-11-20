@@ -20,6 +20,7 @@ import weakref
 from collections.abc import Iterator
 from contextlib import suppress
 from pathlib import Path
+from typing import ClassVar
 
 
 class SecureFSError(OSError):
@@ -311,14 +312,14 @@ if sys.platform == "win32":
     _MAX_TOKEN_USER_BUFFER = 65536
 
     class _AclSizeInformation(ctypes.Structure):
-        _fields_ = [  # noqa: RUF012 - ctypes requires mutable _fields_.
+        _fields_: ClassVar[list[tuple[str, object]]] = [
             ("AceCount", wintypes.DWORD),
             ("AclBytesInUse", wintypes.DWORD),
             ("AclBytesFree", wintypes.DWORD),
         ]
 
     class _AceHeader(ctypes.Structure):
-        _fields_ = [  # noqa: RUF012 - ctypes requires mutable _fields_.
+        _fields_: ClassVar[list[tuple[str, object]]] = [
             ("AceType", ctypes.c_ubyte),
             ("AceFlags", ctypes.c_ubyte),
             ("AceSize", wintypes.WORD),

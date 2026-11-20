@@ -16,6 +16,7 @@ import pytest
 import publisher_root
 from dataset_provenance import write_sidecar
 from publisher_root import PublisherRoot, PublisherRootError
+from scripts import publish_dataset
 
 
 @pytest.fixture
@@ -186,7 +187,6 @@ def test_wrong_owner_profile_is_refused(
 def test_profile_publish_verify_and_cleanup_use_only_one_name(
     isolated_profile: Path, tmp_path: Path
 ) -> None:
-    from scripts import publish_dataset
 
     dataset = _dataset(tmp_path)
     with PublisherRoot.provision_local_user() as root:
@@ -204,7 +204,6 @@ def test_profile_publish_verify_and_cleanup_use_only_one_name(
 def test_cli_safe_default_publishes_under_the_local_user_profile(
     isolated_profile: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from scripts import publish_dataset
 
     dataset = _dataset(tmp_path)
     assert (
@@ -220,7 +219,6 @@ def test_cli_safe_default_publishes_under_the_local_user_profile(
 
 
 def test_cli_requires_explicit_local_only_path_for_arbitrary_destinations() -> None:
-    from scripts import publish_dataset
 
     with pytest.raises(SystemExit):
         publish_dataset.main(["--verify-only", "--dest", "C:/arbitrary/path"])

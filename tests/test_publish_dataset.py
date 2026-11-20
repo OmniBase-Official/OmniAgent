@@ -493,29 +493,27 @@ def test_the_manifest_records_what_the_sidecar_cannot(dataset: Path, tmp_path: P
 
 
 @pytest.mark.parametrize(
-    ("field", "value", "message"),
+    ("metadata", "message"),
     [
         (
-            "teacher",
-            "t" * (publish_dataset.MAX_TEACHER_MODEL_BYTES + 1),
+            ("teacher", "t" * (publish_dataset.MAX_TEACHER_MODEL_BYTES + 1)),
             "teacher metadata",
         ),
         (
-            "workspace_rule",
-            "é" * (publish_dataset.MAX_WORKSPACE_RULE_BYTES // 2 + 1),
+            ("workspace_rule", "é" * (publish_dataset.MAX_WORKSPACE_RULE_BYTES // 2 + 1)),
             "workspace rule metadata",
         ),
     ],
 )
 @pytest.mark.parametrize("api", ["publish", "publish_to_root"])
-def test_public_publish_apis_refuse_oversized_metadata_before_destination_creation(  # noqa: PLR0913 - pytest fixtures and cases
+def test_public_publish_apis_refuse_oversized_metadata_before_destination_creation(
     dataset: Path,
     tmp_path: Path,
-    field: str,
-    value: str,
+    metadata: tuple[str, str],
     message: str,
     api: str,
 ) -> None:
+    field, value = metadata
     dest = tmp_path / "oversized-metadata-bundle"
     teacher = value if field == "teacher" else "bounded-teacher"
     workspace_rule = value if field == "workspace_rule" else None
@@ -562,7 +560,7 @@ def test_oversized_encoded_manifest_refuses_before_staging(
     dest = tmp_path / "oversized-manifest-bundle"
     monkeypatch.setattr(publish_dataset, "MAX_MANIFEST_BYTES", 1)
 
-    with pytest.raises(PublishError, match="MANIFEST.json exceeds"):
+    with pytest.raises(PublishError, match=r"MANIFEST\.json exceeds"):
         publish(dataset, dest, teacher="synthetic-teacher")
 
     assert not dest.exists()

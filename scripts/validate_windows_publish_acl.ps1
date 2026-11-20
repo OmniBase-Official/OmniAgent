@@ -421,7 +421,7 @@ if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
         $event.pull_request.head.repo.full_name -eq $env:GITHUB_REPOSITORY
     if (-not $sameRepositoryPullRequest) { throw "Only same-repository pull requests targeting main may run this harness." }
 } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
-    if ($env:GITHUB_REF -ne "refs/heads/codex/scale-security-hardening-20261113") {
+    if ($env:GITHUB_REF -notin @("refs/heads/codex/scale-security-hardening-20261113", "refs/heads/codex/security-scans-validation-20261120")) {
         throw "Manual validation is restricted to the trusted feature ref."
     }
 } else {
