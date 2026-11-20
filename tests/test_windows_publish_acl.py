@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -383,3 +384,53 @@ def test_promotion_failure_leaves_no_destination_or_staging(
         _record_result(config, {"promotion_failure": True})
     finally:
         profile.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="sanitized PowerShell diagnostics require Windows")
+def test_windows_identity_diagnostics_are_allowlisted_and_redacted() -> None:
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    assert powershell is not None, "PowerShell is required for Windows diagnostics validation"
+    script = PROJECT / "scripts" / "validate_windows_publish_acl.ps1"
+    completed = subprocess.run(  # noqa: S603 - fixed repository-owned PowerShell validation script
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script),
+            "-RepositoryRoot",
+            str(PROJECT),
+            "-DiagnosticSelfTest",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=20,
+    )
+    evidence = json.loads(completed.stdout)
+    assert evidence == {
+        "privilege": {
+            "exception_type": "Win32Exception",
+            "error_category": "privilege_not_held",
+        },
+        "access_denied": {
+            "exception_type": "Win32Exception",
+            "error_category": "access_denied",
+        },
+        "hresult_access_denied": {
+            "exception_type": "OtherException",
+            "error_category": "access_denied",
+        },
+        "unsupported": {
+            "exception_type": "Win32Exception",
+            "error_category": "unsupported",
+        },
+        "unknown": {
+            "exception_type": "InvalidOperationException",
+            "error_category": "unclassified",
+        },
+    }
+    assert "SENSITIVE_SENTINEL" not in completed.stdout
+    assert "SENSITIVE_SENTINEL" not in completed.stderr

@@ -14,7 +14,8 @@ param(
     [string]$ProbeTarget,
     [string]$ProbePayloadPath,
     [string]$ExpectedSid,
-    [string]$ProbeEvidencePath
+    [string]$ProbeEvidencePath,
+    [switch]$DiagnosticSelfTest
 )
 $ErrorActionPreference = "Stop"
 
@@ -27,6 +28,16 @@ function Get-ControlledErrorCategory([System.Exception]$Exception) {
     return "other_error"
 }
 
+function Get-SanitizedIdentityExceptionType([System.Exception]$Exception) {
+    if ($Exception -is [System.ComponentModel.Win32Exception]) { return "Win32Exception" }
+    if ($Exception.GetType().FullName -eq "Microsoft.Management.Infrastructure.CimException") { return "CimException" }
+    if ($Exception -is [UnauthorizedAccessException]) { return "UnauthorizedAccessException" }
+    if ($Exception -is [Security.SecurityException]) { return "SecurityException" }
+    if ($Exception -is [InvalidOperationException]) { return "InvalidOperationException" }
+    if ($Exception -is [ArgumentException]) { return "ArgumentException" }
+    if ($Exception -is [IO.IOException]) { return "IOException" }
+    return "OtherException"
+}
 function Get-SanitizedIdentityErrorCategory([System.Exception]$Exception) {
     $current = $Exception
     while ($null -ne $current) {
@@ -46,7 +57,13 @@ function Get-SanitizedIdentityErrorCategory([System.Exception]$Exception) {
         }
         $current = $current.InnerException
     }
-    return "other"
+    return "unclassified"
+}
+function Get-SanitizedIdentityDiagnostics([System.Exception]$Exception) {
+    return [ordered]@{
+        exception_type = Get-SanitizedIdentityExceptionType $Exception
+        error_category = Get-SanitizedIdentityErrorCategory $Exception
+    }
 }
 
 function Get-SanitizedPathAclFact([string]$Role, [string]$Path) {
@@ -464,6 +481,18 @@ if ($ProbeOnly) {
     exit 0
 }
 
+if ($DiagnosticSelfTest) {
+    $sentinel = "SENSITIVE_SENTINEL_PATH_AND_CREDENTIAL"
+    $cases = [ordered]@{
+        privilege = Get-SanitizedIdentityDiagnostics ([System.ComponentModel.Win32Exception]::new(1314, $sentinel))
+        access_denied = Get-SanitizedIdentityDiagnostics ([System.ComponentModel.Win32Exception]::new(5, $sentinel))
+        hresult_access_denied = Get-SanitizedIdentityDiagnostics ([Runtime.InteropServices.COMException]::new($sentinel, -2147024891))
+        unsupported = Get-SanitizedIdentityDiagnostics ([System.ComponentModel.Win32Exception]::new(50, $sentinel))
+        unknown = Get-SanitizedIdentityDiagnostics ([InvalidOperationException]::new($sentinel))
+    }
+    Write-Output (ConvertTo-Json -InputObject $cases -Depth 4 -Compress)
+    exit 0
+}
 if ($env:GITHUB_ACTIONS -ne "true" -or $env:GITHUB_REPOSITORY -ne "OmniBase-Official/OmniAgent") {
     throw "Privileged validation is restricted to this repository on an ephemeral GitHub runner."
 }
@@ -543,6 +572,7 @@ $failureClass = $null
 $failurePhase = "preflight"
 $identitySubphase = "not-started"
 $identityErrorCategory = $null
+$identityExceptionType = $null
 $localAppData = $null
 
 function New-RandomCredential([string]$Name) {
@@ -584,7 +614,7 @@ try {
     $usersToClean += [pscustomobject]@{ Name = $publisherName; Marker = $ownerDescription; Sid = $null }
     $identitySubphase = "publisher-account-create"
     try { New-LocalUser -Name $publisherName -Password $publisherCredential.Password -Description $ownerDescription -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword -ErrorAction Stop | Out-Null }
-    catch { $identityErrorCategory = Get-SanitizedIdentityErrorCategory $_.Exception; throw }
+    catch { $identityError = Get-SanitizedIdentityDiagnostics $_.Exception; $identityExceptionType = $identityError.exception_type; $identityErrorCategory = $identityError.error_category; throw }
     $identitySubphase = "publisher-account-readback"
     $publisherAccount = Get-LocalUser -Name $publisherName
     if ($publisherAccount.Description -ne $ownerDescription) { throw "Publisher ownership marker mismatch." }
@@ -594,7 +624,7 @@ try {
     $usersToClean += [pscustomobject]@{ Name = $peerName; Marker = $ownerDescription; Sid = $null }
     $identitySubphase = "peer-account-create"
     try { New-LocalUser -Name $peerName -Password $peerCredential.Password -Description $ownerDescription -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword -ErrorAction Stop | Out-Null }
-    catch { $identityErrorCategory = Get-SanitizedIdentityErrorCategory $_.Exception; throw }
+    catch { $identityError = Get-SanitizedIdentityDiagnostics $_.Exception; $identityExceptionType = $identityError.exception_type; $identityErrorCategory = $identityError.error_category; throw }
     $identitySubphase = "peer-account-readback"
     $peerAccount = Get-LocalUser -Name $peerName
     if ($peerAccount.Description -ne $ownerDescription) { throw "Peer ownership marker mismatch." }
@@ -808,6 +838,7 @@ try {
         failure_phase = $failurePhase
         identity_subphase = $identitySubphase
         identity_error_category = $identityErrorCategory
+        identity_exception_type = $identityExceptionType
         failure_status = if ($failureClass) { "failed" } else { "passed" }
         path_acl_facts = $pathAclFacts
         cleanup_failed = ($cleanupErrors.Count -gt 0)
