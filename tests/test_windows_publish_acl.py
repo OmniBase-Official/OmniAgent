@@ -35,6 +35,17 @@ def test_private_root_probe_passes_path_to_secure_root() -> None:
         script,
     )
 
+
+def test_private_root_fixture_uses_acl_protected_user_profile_base() -> None:
+    script_path = PROJECT / "scripts" / "prepare_windows_private_test_root.ps1"
+    script = script_path.read_text(encoding="utf-8")
+
+    assert '$base = Join-Path $env:LOCALAPPDATA "OmniAgent-CI"' in script
+    assert '$phase = "base-acl"' in script
+    assert 'Set-PrivateDirectoryAcl -Path $base -CurrentSid $currentSid' in script
+    assert 'Set-PrivateDirectoryAcl -Path $root -CurrentSid $currentSid' in script
+    assert "$env:ProgramData" not in script
+
 _CONFIG_ENV = "OMNIAGENT_WINDOWS_ACL_CONFIG"
 _ADMINISTRATORS_SID = "S-1-5-32-544"
 _PRIVILEGED_GROUP_SIDS = {
@@ -497,6 +508,7 @@ def test_private_root_diagnostics_are_allowlisted_and_redacted() -> None:
         "policy_rejected": True,
         "ancestry_roles_allowlisted": True,
         "ancestry_values_boolean": True,
+        "volume_acl_and_persistence_are_separate": True,
         "unknown_status_fail_closed": True,
         "accepted_status_allowlisted": True,
         "unexpected_fields_fail_closed": True,

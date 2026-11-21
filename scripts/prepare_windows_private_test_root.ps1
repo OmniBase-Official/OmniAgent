@@ -11,7 +11,7 @@ $phase = "preflight"
 
 $probeStatuses = @("accepted", "policy_rejected", "securefs_rejected", "module_missing", "probe_import_error", "probe_attribute_error", "probe_argument_error", "probe_type_error", "probe_value_error", "probe_os_error", "probe_bootstrap_error", "probe_output_overflow", "probe_timeout", "probe_exception")
 $probeStages = @("bootstrap", "import", "root_open", "capability_check", "ancestry_acl", "volume_query", "root_close", "serialize")
-$ancestryRoles = @("volume", "program_data", "base", "root")
+$ancestryRoles = @("all_ancestor_acls_policy_passed", "base", "local_app_data", "persistent_acls_supported", "root", "volume_acl_policy_passed")
 
 function ConvertFrom-SafeProbeOutput([string]$Output) {
     try {
@@ -201,7 +201,7 @@ namespace OmniAgent {
 }
 
 if ($Action -eq "DiagnosticSelfTest") {
-    $valid = ConvertFrom-SafeProbeOutput '{"status":"policy_rejected","stage":"ancestry_acl","ancestry":{"volume":true,"program_data":true,"base":false,"root":true}}'
+    $valid = ConvertFrom-SafeProbeOutput '{"status":"policy_rejected","stage":"ancestry_acl","ancestry":{"all_ancestor_acls_policy_passed":false,"base":false,"local_app_data":true,"persistent_acls_supported":false,"root":true,"volume_acl_policy_passed":true}}'
     $unknown = ConvertFrom-SafeProbeOutput '{"status":"secret-path-SENSITIVE_SENTINEL"}'
     $accepted = ConvertFrom-SafeProbeOutput '{"status":"accepted","stage":"capability_check"}'
     $extraField = ConvertFrom-SafeProbeOutput '{"status":"accepted","stage":"capability_check","raw":"SENSITIVE_SENTINEL"}'
@@ -260,8 +260,9 @@ if ($Action -eq "DiagnosticSelfTest") {
     $export = Get-SafeProbeFailureCategory "environment-export" 1 "user=SENSITIVE_SENTINEL"
     $evidence = @{
         policy_rejected = ($valid.status -eq "policy_rejected")
-        ancestry_roles_allowlisted = (($valid.ancestry_policy_passed.Keys | Sort-Object) -join ",") -eq "base,program_data,root,volume"
+        ancestry_roles_allowlisted = (($valid.ancestry_policy_passed.Keys | Sort-Object) -join ",") -eq "all_ancestor_acls_policy_passed,base,local_app_data,persistent_acls_supported,root,volume_acl_policy_passed"
         ancestry_values_boolean = @($valid.ancestry_policy_passed.Values | Where-Object { $_ -isnot [bool] }).Count -eq 0
+        volume_acl_and_persistence_are_separate = ($valid.ancestry_policy_passed.volume_acl_policy_passed -eq $true -and $valid.ancestry_policy_passed.persistent_acls_supported -eq $false)
         unknown_status_fail_closed = ($unknown.status -eq "probe_exception")
         accepted_status_allowlisted = ($accepted.status -eq "accepted")
         unexpected_fields_fail_closed = ($extraField.status -eq "probe_exception")
@@ -308,16 +309,42 @@ function Get-SafeFailureCategory([System.Exception]$Exception) {
     return "other_error"
 }
 
+function Set-PrivateDirectoryAcl([string]$Path, [Security.Principal.SecurityIdentifier]$CurrentSid) {
+    $acl = [Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.SetOwner($CurrentSid)
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $trustedSids = @(
+        $CurrentSid,
+        [Security.Principal.SecurityIdentifier]::new("S-1-5-18"),
+        [Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")
+    )
+    foreach ($sid in $trustedSids) {
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        $acl.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
 try {
     if ($env:GITHUB_RUN_ID -notmatch "^\d+$" -or $env:GITHUB_RUN_ATTEMPT -notmatch "^\d+$") {
         throw "Workflow run identity is unavailable."
     }
-    $base = Join-Path $env:ProgramData "OmniAgent-CI"
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { throw "Local application data root is unavailable." }
+    $base = Join-Path $env:LOCALAPPDATA "OmniAgent-CI"
     $root = Join-Path $base ("private-" + $env:GITHUB_RUN_ID + "-" + $env:GITHUB_RUN_ATTEMPT)
     $marker = Join-Path $root ".omniagent-private-test-root"
     $markerValue = $env:GITHUB_RUN_ID + ":" + $env:GITHUB_RUN_ATTEMPT
 
     if ($Action -eq "Create") {
+        $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        if ($null -eq $currentSid) { throw "Current runner identity is unavailable." }
         $phase = "base-check"
         if (Test-Path -LiteralPath $base) {
             $baseItem = Get-Item -LiteralPath $base -Force
@@ -328,34 +355,15 @@ try {
             $phase = "base-create"
             New-Item -ItemType Directory -Path $base | Out-Null
         }
+        $phase = "base-acl"
+        Set-PrivateDirectoryAcl -Path $base -CurrentSid $currentSid
         $phase = "root-create"
         if (Test-Path -LiteralPath $root) { throw "Private staging root already exists." }
         New-Item -ItemType Directory -Path $root | Out-Null
         [IO.File]::WriteAllText($marker, $markerValue, [Text.Encoding]::ASCII)
 
         $phase = "root-acl"
-        $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
-        if ($null -eq $currentSid) { throw "Current runner identity is unavailable." }
-        $acl = [Security.AccessControl.DirectorySecurity]::new()
-        $acl.SetAccessRuleProtection($true, $false)
-        $acl.SetOwner($currentSid)
-        $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
-        $trustedSids = @(
-            $currentSid,
-            [Security.Principal.SecurityIdentifier]::new("S-1-5-18"),
-            [Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")
-        )
-        foreach ($sid in $trustedSids) {
-            $rule = [Security.AccessControl.FileSystemAccessRule]::new(
-                $sid,
-                [Security.AccessControl.FileSystemRights]::FullControl,
-                $inheritance,
-                [Security.AccessControl.PropagationFlags]::None,
-                [Security.AccessControl.AccessControlType]::Allow
-            )
-            $acl.AddAccessRule($rule)
-        }
-        Set-Acl -LiteralPath $root -AclObject $acl
+        Set-PrivateDirectoryAcl -Path $root -CurrentSid $currentSid
         Set-Item -Path ("Env:" + $OutputVariable) -Value $root
 
         $phase = "python-resolution"
@@ -390,20 +398,14 @@ try:
     else:
         stage = "ancestry_acl"
         handles = root._pinned_handles
-        if len(handles) != 4:
+        if len(handles) < 6:
             raise OSError(errno.EIO, "unexpected ancestry handle count")
-        role_handles = {
-            "volume": handles[0],
-            "program_data": handles[1],
-            "base": handles[-2],
-            "root": handles[-1],
-        }
-        ancestry = {
-            role: bool(securefs_module._has_safe_parent_acl(
+        ancestor_acl_results = [
+            bool(securefs_module._has_safe_parent_acl(
                 handle, allow_safe_inherited=True
             ))
-            for role, handle in role_handles.items()
-        }
+            for handle in handles
+        ]
         stage = "volume_query"
         buffer = ctypes.create_string_buffer(1024)
         iosb = securefs_module._IOSB()
@@ -416,7 +418,14 @@ try:
             ctypes.c_uint32.from_address(ctypes.addressof(buffer)).value
             & securefs_module._FILE_PERSISTENT_ACLS
         )
-        ancestry["volume"] = ancestry["volume"] and persistent
+        ancestry = {
+            "all_ancestor_acls_policy_passed": all(ancestor_acl_results),
+            "base": ancestor_acl_results[-2],
+            "local_app_data": ancestor_acl_results[-3],
+            "persistent_acls_supported": persistent,
+            "root": ancestor_acl_results[-1],
+            "volume_acl_policy_passed": ancestor_acl_results[0],
+        }
         result = {"status": "policy_rejected", "stage": stage, "ancestry": ancestry}
 except ModuleNotFoundError:
     result = {"status": "module_missing", "stage": stage}
