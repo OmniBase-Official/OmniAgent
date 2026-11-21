@@ -89,6 +89,102 @@ def test_a_dataset_without_provenance_is_refused(tmp_path: Path) -> None:
         publish(orphan, tmp_path / "drive", teacher="qwen2.5-coder:7b")
 
 
+def _invalid_sidecar_payload(  # noqa: PLR0912 - one branch per malformed sidecar case
+    dataset: Path, kind: str
+) -> bytes:
+    """Build one malformed sidecar case from the valid fixture metadata."""
+    sidecar = sidecar_path(dataset)
+    if kind == "too_large":
+        return b" " * (publish_dataset.MAX_SIDECAR_BYTES + 1)
+    if kind == "invalid_utf8":
+        return bytes([0xFF])
+    if kind == "deep_nesting":
+        depth = publish_dataset.MAX_SIDECAR_JSON_NESTING + 1
+        return b"[" * depth + b"0" + b"]" * depth
+    if kind == "malformed_json":
+        return b"{"
+    duplicate_keys = {
+        "duplicate_dataset_key": "dataset",
+        "duplicate_hash_key": "system_prompt_sha256",
+        "duplicate_match_flag_key": "matches_live_prompt",
+    }
+    if kind in duplicate_keys:
+        value = json.loads(sidecar.read_text(encoding="utf-8"))
+        duplicate_key = duplicate_keys[kind]
+        pairs: list[str] = []
+        for key, item in value.items():
+            encoded_key = json.dumps(key)
+            encoded_item = json.dumps(item)
+            pairs.append(f"{encoded_key}:{encoded_item}")
+            if key == duplicate_key:
+                pairs.append(f"{encoded_key}:{encoded_item}")
+        return ("{" + ",".join(pairs) + "}").encode("utf-8")
+    value = json.loads(sidecar.read_text(encoding="utf-8"))
+    if kind == "wrong_top_level":
+        return json.dumps([]).encode("utf-8")
+    if kind == "missing_field":
+        value.pop("dataset")
+    elif kind == "wrong_dataset":
+        value["dataset"] = "other.jsonl"
+    elif kind == "wrong_examples_type":
+        value["examples"] = True
+    elif kind == "invalid_hash":
+        value["system_prompt_sha256"] = "not-a-sha256"
+    elif kind == "inconsistent_match_flag":
+        value["matches_live_prompt"] = not value["matches_live_prompt"]
+    elif kind == "unexpected_field":
+        value["unexpected"] = "not supported"
+    else:
+        raise AssertionError(f"unknown sidecar case: {kind}")
+    return json.dumps(value).encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    ("kind", "message"),
+    [
+        ("too_large", "exceeds"),
+        ("invalid_utf8", "not valid UTF-8"),
+        ("deep_nesting", "nesting is too deep"),
+        ("malformed_json", "not valid JSON"),
+        ("wrong_top_level", "invalid provenance sidecar schema"),
+        ("missing_field", "invalid provenance sidecar schema"),
+        ("wrong_dataset", "invalid provenance sidecar schema"),
+        ("wrong_examples_type", "invalid provenance sidecar schema"),
+        ("invalid_hash", "invalid provenance sidecar schema"),
+        ("inconsistent_match_flag", "invalid provenance sidecar schema"),
+        ("unexpected_field", "invalid provenance sidecar schema"),
+        ("duplicate_dataset_key", "duplicate JSON object keys"),
+        ("duplicate_hash_key", "duplicate JSON object keys"),
+        ("duplicate_match_flag_key", "duplicate JSON object keys"),
+    ],
+)
+@pytest.mark.parametrize("existing_destination", [False, True])
+def test_invalid_sidecar_is_rejected_before_destination_mutation(
+    dataset: Path,
+    tmp_path: Path,
+    kind: str,
+    message: str,
+    existing_destination: bool,
+) -> None:
+    sidecar_path(dataset).write_bytes(_invalid_sidecar_payload(dataset, kind))
+    dest = tmp_path / "drive"
+    before: dict[str, bytes] = {}
+    if existing_destination:
+        dest.mkdir()
+        sentinel = dest / "keep.txt"
+        sentinel.write_bytes(b"keep")
+        before = {path.name: path.read_bytes() for path in dest.iterdir()}
+
+    with pytest.raises(PublishError, match=message):
+        publish(dataset, dest, teacher="t")
+
+    if existing_destination:
+        after = {path.name: path.read_bytes() for path in dest.iterdir()}
+        assert after == before
+    else:
+        assert not dest.exists()
+
+
 def test_extra_files_travel_with_it(dataset: Path, tmp_path: Path) -> None:
     """The raw log is the source of truth and has to arrive too."""
     raw = dataset.parent / "collect.jsonl"
