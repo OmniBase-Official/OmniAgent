@@ -54,8 +54,15 @@ function ConvertFrom-SafeProbeOutput([string]$Output) {
 function Get-SafeProbeFailureCategory([string]$Phase, [int]$ExitCode, [string]$Output) {
     if ($Phase -eq "probe-launch") { return "probe_launch_error" }
     if ($Phase -eq "environment-export") { return "environment_export_error" }
-    if ($ExitCode -ne 0) { return "probe_exception" }
-    return (ConvertFrom-SafeProbeOutput $Output).status
+    return (Resolve-SafeProbeResult $ExitCode $Output).status
+}
+
+function Resolve-SafeProbeResult([int]$ExitCode, [string]$Output) {
+    $parsed = ConvertFrom-SafeProbeOutput $Output
+    if ($ExitCode -ne 0) {
+        return @{ status = "probe_nonzero_exit"; stage = $parsed.stage; ancestry_policy_passed = $null }
+    }
+    return $parsed
 }
 
 if ($Action -eq "DiagnosticSelfTest") {
@@ -70,7 +77,8 @@ if ($Action -eq "DiagnosticSelfTest") {
     $statusCaseVariant = ConvertFrom-SafeProbeOutput '{"status":"ACCEPTED","stage":"capability_check"}'
     $stageCaseVariant = ConvertFrom-SafeProbeOutput '{"status":"accepted","stage":"CAPABILITY_CHECK"}'
     $empty = Get-SafeProbeFailureCategory "probe-result" 0 ""
-    $nonzero = Get-SafeProbeFailureCategory "probe-result" 1 '{"status":"accepted"}'
+    $nonzero = Resolve-SafeProbeResult 1 '{"status":"accepted","stage":"capability_check"}'
+    $nonzeroMalformed = Resolve-SafeProbeResult 1 '{"status":"accepted","stage":"SENSITIVE_SENTINEL","raw":"SENSITIVE_SENTINEL"}'
     $launch = Get-SafeProbeFailureCategory "probe-launch" 1 "C:\\private\\SENSITIVE_SENTINEL"
     $export = Get-SafeProbeFailureCategory "environment-export" 1 "user=SENSITIVE_SENTINEL"
     $evidence = @{
@@ -85,7 +93,9 @@ if ($Action -eq "DiagnosticSelfTest") {
         unknown_stage_fail_closed = ($unknownStage.status -eq "probe_exception" -and $null -eq $unknownStage.stage)
         case_variants_fail_closed = ($statusCaseVariant.status -eq "probe_exception" -and $stageCaseVariant.status -eq "probe_exception")
         empty_output_fails_closed = ($empty -eq "probe_exception")
-        nonzero_exit_fails_closed = ($nonzero -eq "probe_exception")
+        nonzero_exit_status_allowlisted = ($nonzero.status -eq "probe_nonzero_exit" -and $nonzero.stage -eq "capability_check" -and $null -eq $nonzero.ancestry_policy_passed)
+        malformed_nonzero_stage_cleared = ($nonzeroMalformed.status -eq "probe_nonzero_exit" -and $null -eq $nonzeroMalformed.stage -and $null -eq $nonzeroMalformed.ancestry_policy_passed)
+        nonzero_output_redacted = (($nonzero | ConvertTo-Json -Compress) -notmatch "SENSITIVE_SENTINEL" -and ($nonzeroMalformed | ConvertTo-Json -Compress) -notmatch "SENSITIVE_SENTINEL")
         launch_error_allowlisted = ($launch -eq "probe_launch_error")
         export_error_allowlisted = ($export -eq "environment_export_error")
     }
@@ -266,8 +276,7 @@ except Exception:
         }
         $phase = "probe-result"
         $probeText = $probeOutput -join "`n"
-        $probeResult = ConvertFrom-SafeProbeOutput $probeText
-        if ($probeExitCode -ne 0) { $probeResult = @{ status = "probe_exception"; ancestry_policy_passed = $null } }
+        $probeResult = Resolve-SafeProbeResult $probeExitCode $probeText
         if ($probeResult.status -ne "accepted" -or $probeExitCode -ne 0) {
             $category = Get-SafeProbeFailureCategory "probe-result" $probeExitCode $probeText
             if ($category -eq "policy_rejected" -and $null -ne $probeResult.ancestry_policy_passed) {
