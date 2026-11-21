@@ -177,6 +177,11 @@ goes **3 failed** and G's own PR #3 test goes **4 failed**
 scratchpad copy; hash back to `1e7eb6b…`; `git status` clean; **87 passed, 1
 skipped**. Exactly one guard holds all four vectors.
 
+**Independently reproduced by the PM, 2026-11-21** (REPORTED): same two files,
+their own detached worktrees, 4 failed / 2 passed on O, 6 passed on G, and the
+same mutation reopening all four vectors with the hash restored. Two people,
+two sets of worktrees, same result.
+
 **Which gate.** Contract section 5, **gate 5** — path-boundary regression tests
 on every platform claimed as supported. That gate was already only partly done
 (brief 13 covers Windows junctions; its POSIX case still has no test that
@@ -192,9 +197,11 @@ four vectors leak. **What I have not established is criterion 2 of the threat
 model: name the actor that creates the link.** The agent has no write tool, and
 an ordinary clone or archive extraction does not produce a hard link to an
 arbitrary outside path. So: the boundary fails whenever a hard link is present,
-and who would place one is **UNKNOWN**. Under distribution (readiness block D)
-class 3 stops being hypothetical, so my view is that this is fixed before any
-public release — not that it is an emergency today. **The SE fixes it; I
+and who would place one is **UNKNOWN — OWNER'S QUESTION.** It is not resolved
+here and it should not be resolved by whoever writes the fix. Under
+distribution (readiness block D) class 3 stops being hypothetical, so the PM's
+recommendation and mine agree: **fix it before any public release, not an
+emergency today.** That is a recommendation, not a ruling. **The SE fixes it; I
 measured it.**
 
 **Two costs of G's fix the SE should weigh rather than port blind:** it also
@@ -327,12 +334,22 @@ acceptable — so **A means "G's code history, O's documents carried over", not
 hand what already exists and tests green on G, which is the most expensive of
 the three and the one most likely to be done twice.
 
+**A condition on A, added after the branch measurement below.** The four newest
+G-line branches make `sandbox.py` import a 1,319-line `ctypes` module
+(`securefs.py`, §6). That is the shape the owner parked twice in
+`secure_search.py`, and adopting G's line is also adopting the direction those
+branches are travelling. **A is my recommendation for `3c76fd2` against
+`5005039` — the two pinned commits — and it does not endorse what is queued
+behind G.** If the owner takes A, criterion 5 of the threat model should be
+answered before those branches merge, not after.
+
 ## 6. The `origin/codex/*` branches — where they sit and where they meet G
 
 Taken from `git for-each-ref`, **not** from the brief's paragraph; the list
 differs from it (MEASURED 2026-11-21). "line" is which `main` the branch
 descends from — decided by whether G's PR #2 (`9c60c00`) is an ancestor.
-**Paths only. I verified none of these branches.**
+**Paths only, with one exception the PM asked for: the hard-link guard, below.
+Nothing else on any of these branches was verified or reviewed.**
 
 | branch (`origin/codex/…`) | date | line | ahead | files | ∩ G's PR paths |
 | --- | --- | --- | --- | --- | --- |
@@ -367,15 +384,75 @@ Three things the table says that a branch list does not:
   (28 of 28, 24 of 53). That is the duplication the PM suspected, visible as
   paths.
 
+### Is the hard-link fix already on the origin line, unmerged?
+
+**No.** Nine `origin/codex/*` branches carry the guard; `origin/main` carries
+none; **all nine are on G's history.** Asked by the PM, measured by me
+2026-11-21. The guard function was extracted with `ast` from each branch's
+`sandbox.py`, whitespace-normalised and hashed; G's is `4c87036f41cc`, 13 lines.
+
+| branch (`origin/codex/…`) | guard text | call sites | line | contains PR #3 |
+| --- | --- | --- | --- | --- |
+| `phase2-sandbox-hardlink-windows-ci-20261111` | **identical to G** | same 2 | G | no — its own `8d86a17` |
+| `agentic-task-mode-fast-tools-20261111` | **identical to G** | same 2 | G | yes |
+| `posix-json-ci-fixes-20261112` | **identical to G** | same 2 | G | yes |
+| `security-remediation-batch1-20261112` | **identical to G** | same 2 | G | yes |
+| `security-remediation-batch2-22d6932-validation` | **identical to G** | same 2 | G | yes |
+| `scale-security-hardening-20261113` | **identical to G** | **1 of 2** | G | yes |
+| `security-scans-validation-20261120` | **identical to G** | **1 of 2** | G | yes |
+| `security-runner-fixtures-20261120` | **identical to G** | **1 of 2** | G | yes |
+| `windows-private-root-validation-20261121` | **identical to G** | **1 of 2** | G | yes |
+
+Not one of them has `origin/main` (`3c76fd2`) or brief 14 (`02ba007`) as an
+ancestor. **"Already fixed somewhere on the origin line" is false**: the fix
+sits on branches that are pushed to the `origin` *remote* but built on G's
+*history*. A remote is not a line, and the branch names hide it —
+`phase2-sandbox-hardlink-windows-ci` reads like an O-line port and is not one.
+
+**The four branches with one call site are not weaker — measured, not read.**
+They lost the `list_dir` call because `list_dir` was rewritten around a
+handle-based API; the check became `if not directory and links == 1`. On
+`windows-private-root-validation-20261121` my unchanged reproduction gives
+**6 passed** — all four vectors closed, the listing one included. On
+`posix-json-ci-fixes-20261112`, a two-call-site branch, **6 passed** as well.
+So: **IDENTICAL** on five branches, **PRESENT-EQUIVALENT** on the four newest,
+and nothing on O.
+
+### What that rewrite brought with it — existence only, not a review
+
+The four branches that rewrote `list_dir` also add two modules that
+`sandbox.py` now imports: **`securefs.py`, 1,319 lines, 160 mentions of
+`ctypes`**, and **`publisher_root.py`, 469 lines, 55 mentions** (MEASURED
+2026-11-21: line counts and grep counts only). `securefs.py` first appears on
+`scale-security-hardening-20261113`.
+
+**I did not read either module** — the brief limits me to guard text and paths
+on these branches, and I have kept to it. But the shape has to be named,
+because a standing owner ruling is about exactly this shape: on 2026-11-02 and
+again on 2026-11-04 the owner parked `secure_search.py` — 1,016, 1,199 and
+1,069-line variants of raw `ctypes` handle work — and said reopening it needs a
+new owner decision plus criteria 1 to 5 answered in writing. **A 1,319-line
+`ctypes` filesystem module that `sandbox.py` imports is the same shape, under a
+different name, on the line this ADR recommends adopting.** Whether it *is* the
+parked work resumed, or something the owner would approve on its own merits, is
+**OWNER'S QUESTION** and criterion 5's question in particular: if a module of
+that size is the right shape for this project, then "hand-rolled and small"
+stops being true and should stop being written down.
+
 ## 7. What this brief could not measure
 
 - **PR #4's POSIX filename validation — UNMEASURED.** It is Linux behaviour.
   **WSL is available on this machine** (MEASURED: `kali-linux` default, plus
   `Ubuntu` and `Ubuntu-22.04`, all WSL2; `wsl -e uname -a` answers
   `6.18.58.1-microsoft-standard-WSL2 x86_64`), so this is not permanently
-  unmeasurable. What is **not** established is whether any distro has Python
-  3.12 and this project's dependencies; installing them changes the owner's
-  machine and I did not do it unasked. The PM has the question.
+  unmeasurable. **What a run would have needed, exactly:** one of the installed
+  distros — `Ubuntu-22.04` or `Ubuntu`, not `kali-linux` or `docker-desktop` —
+  with **Python 3.12** (the project's `requires-python = ">=3.12"`), this
+  project's runtime dependencies installed into a venv inside that distro, and
+  the checkout reachable from it; then the same two reproduction files plus
+  G's `tests/test_sandbox.py` run there. That is an install on the owner's
+  machine. **The PM has ruled: hold, install nothing, and ask the owner.**
+  Nothing here is blocked on it.
 - **The POSIX half of gate 5** — the same limitation, and it is the open item
   recorded since 2026-11-04.
 - **The dirty checkout.** `D:\code-project\OmniAgent` holds 54 uncommitted
