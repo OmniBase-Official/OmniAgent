@@ -40,6 +40,12 @@ def test_settings_rejects_hostname_endpoint_during_config_resolution() -> None:
         Settings(base_url="http://localhost:11434/v1")
 
 
+@pytest.mark.parametrize("timeout", [float("inf"), float("nan")])
+def test_agent_config_rejects_nonfinite_request_timeout(timeout: float) -> None:
+    with pytest.raises(ValidationError):
+        AgentConfig(timeout=timeout)
+
+
 @pytest.mark.parametrize(
     "url",
     [
@@ -65,6 +71,19 @@ def test_built_client_disables_proxy_and_redirect_paths(monkeypatch: pytest.Monk
         assert http_client._mounts == {}
         assert type(http_client._transport) is LoopbackOnlyTransport
         assert type(http_client._transport._inner) is httpx.HTTPTransport
+    finally:
+        client.close()
+
+
+def test_guarded_client_requires_sdk_retries_to_be_disabled() -> None:
+    client = build_openai_client(AgentConfig())
+    try:
+        assert client.max_retries == 0
+        assert validate_openai_client_endpoint(client) == "loopback"
+
+        client.max_retries = 2
+        with pytest.raises(EndpointPolicyError, match="SDK retries"):
+            validate_openai_client_endpoint(client)
     finally:
         client.close()
 

@@ -44,6 +44,7 @@ _EVENT_FIELDS: Final[dict[str, frozenset[str]]] = {
     "agent.connection.ok": frozenset({"status"}),
     "agent.turn.start": frozenset({"status", "step_count"}),
     "agent.turn.end": frozenset({"status", "duration_ms", "step_count"}),
+    "agent.run.aborted": frozenset({"status", "step_count"}),
     "agent.step.final_answer": frozenset({"status", "step_count"}),
     "agent.format.violation": frozenset({"status", "step_count"}),
     "agent.budget.exhausted": frozenset({"status", "step_count"}),
