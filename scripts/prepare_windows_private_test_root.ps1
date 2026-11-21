@@ -38,16 +38,31 @@ function ConvertFrom-SafeProbeOutput([string]$Output) {
     }
 }
 
+function Get-SafeProbeFailureCategory([string]$Phase, [int]$ExitCode, [string]$Output) {
+    if ($Phase -eq "probe-launch") { return "probe_launch_error" }
+    if ($Phase -eq "environment-export") { return "environment_export_error" }
+    if ($ExitCode -ne 0) { return "probe_exception" }
+    return (ConvertFrom-SafeProbeOutput $Output).status
+}
+
 if ($Action -eq "DiagnosticSelfTest") {
     $valid = ConvertFrom-SafeProbeOutput '{"status":"policy_rejected","ancestry":{"volume":true,"program_data":true,"base":false,"root":true},"secret":"SENSITIVE_SENTINEL"}'
     $unknown = ConvertFrom-SafeProbeOutput '{"status":"secret-path-SENSITIVE_SENTINEL"}'
     $accepted = ConvertFrom-SafeProbeOutput '{"status":"accepted","raw":"SENSITIVE_SENTINEL"}'
+    $empty = Get-SafeProbeFailureCategory "probe-result" 0 ""
+    $nonzero = Get-SafeProbeFailureCategory "probe-result" 1 '{"status":"accepted"}'
+    $launch = Get-SafeProbeFailureCategory "probe-launch" 1 "C:\\private\\SENSITIVE_SENTINEL"
+    $export = Get-SafeProbeFailureCategory "environment-export" 1 "user=SENSITIVE_SENTINEL"
     $evidence = @{
         policy_rejected = ($valid.status -eq "policy_rejected")
         ancestry_roles_allowlisted = (($valid.ancestry_policy_passed.Keys | Sort-Object) -join ",") -eq "base,program_data,root,volume"
         ancestry_values_boolean = @($valid.ancestry_policy_passed.Values | Where-Object { $_ -isnot [bool] }).Count -eq 0
         unknown_status_fail_closed = ($unknown.status -eq "probe_exception")
         accepted_status_allowlisted = ($accepted.status -eq "accepted")
+        empty_output_fails_closed = ($empty -eq "probe_exception")
+        nonzero_exit_fails_closed = ($nonzero -eq "probe_exception")
+        launch_error_allowlisted = ($launch -eq "probe_launch_error")
+        export_error_allowlisted = ($export -eq "environment_export_error")
     }
     $evidenceOutput = $evidence | ConvertTo-Json -Compress
     $evidence.sensitive_sentinel_redacted = $evidenceOutput -notmatch "SENSITIVE_SENTINEL"
@@ -125,7 +140,7 @@ try {
             [Console]::Error.WriteLine("Private staging root failed [python-resolution/missing-python].")
             exit 1
         }
-        $phase = "root-policy-check"
+        $phase = "probe-launch"
         $probe = @'
 import ctypes
 import errno
@@ -192,11 +207,23 @@ finally:
 print(json.dumps(result, separators=(",", ":")))
 '@
         $probe = $probe.Replace("OUTPUT_VARIABLE", $OutputVariable)
-        $probeOutput = @(& $python.Source -c $probe 2>$null)
-        $probeResult = ConvertFrom-SafeProbeOutput ($probeOutput -join "`n")
-        if ($LASTEXITCODE -ne 0) { $probeResult = @{ status = "probe_exception"; ancestry_policy_passed = $null } }
-        if ($probeResult.status -ne "accepted" -or $LASTEXITCODE -ne 0) {
-            $category = $probeResult.status
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $probeOutput = @(& $python.Source -c $probe 2>$null)
+            $probeExitCode = $LASTEXITCODE
+        } catch {
+            [Console]::Error.WriteLine("Private staging root failed [probe-launch/probe_launch_error].")
+            exit 1
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        $phase = "probe-result"
+        $probeText = $probeOutput -join "`n"
+        $probeResult = ConvertFrom-SafeProbeOutput $probeText
+        if ($probeExitCode -ne 0) { $probeResult = @{ status = "probe_exception"; ancestry_policy_passed = $null } }
+        if ($probeResult.status -ne "accepted" -or $probeExitCode -ne 0) {
+            $category = Get-SafeProbeFailureCategory "probe-result" $probeExitCode $probeText
             if ($category -eq "policy_rejected" -and $null -ne $probeResult.ancestry_policy_passed) {
                 $facts = ($ancestryRoles | ForEach-Object { $_ + "_policy_passed=" + [string]$probeResult.ancestry_policy_passed[$_] }) -join ","
                 [Console]::Error.WriteLine(("Private staging root failed [{0}/{1}] ancestry[{2}]." -f $phase, $category, $facts))
@@ -205,8 +232,14 @@ print(json.dumps(result, separators=(",", ":")))
             }
             exit 1
         }
-        if (-not $env:GITHUB_ENV) { throw "Workflow environment file is unavailable." }
-        [IO.File]::AppendAllText($env:GITHUB_ENV, ($OutputVariable + "=" + $root + "`n"), [Text.UTF8Encoding]::new($false))
+        $phase = "environment-export"
+        try {
+            if (-not $env:GITHUB_ENV) { throw "Workflow environment file is unavailable." }
+            [IO.File]::AppendAllText($env:GITHUB_ENV, ($OutputVariable + "=" + $root + "`n"), [Text.UTF8Encoding]::new($false))
+        } catch {
+            [Console]::Error.WriteLine("Private staging root failed [environment-export/environment_export_error].")
+            exit 1
+        }
         Write-Output "private_staging_root=accepted"
         exit 0
     }
