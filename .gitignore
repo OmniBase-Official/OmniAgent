@@ -65,3 +65,14 @@ omniagent-core/build*/
 .scratch/
 .brief11-worktree/
 .codex-worktrees/
+
+# Local AI handoff, role and instruction files: local-only, never tracked.
+# (The briefs themselves, docs/pm/brief-NN-*.md, stay tracked.)
+/docs/pm/*-prompt.md
+/NEXT_CHAT.md
+/AGENTS.md
+/CLAUDE.md
+/GEMINI.md
+.claude/
+.codex/
+.ai/
