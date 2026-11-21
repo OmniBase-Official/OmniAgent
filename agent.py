@@ -17,18 +17,19 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import logging
+import math
 import re
 import time
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable
 from importlib import import_module
-from threading import Lock
+from threading import Event, Lock
 from typing import Any, cast
 from urllib.parse import urlsplit
 
 import httpcore
 import httpx
-from openai import APIConnectionError, APIStatusError, OpenAI
+from openai import NOT_GIVEN, APIConnectionError, APIStatusError, OpenAI
 from openai.resources.chat import Chat as OpenAIChat
 from openai.resources.chat.completions import Completions as OpenAIChatCompletions
 from openai.resources.models import Models as OpenAIModels
@@ -199,6 +200,8 @@ def _validated_client_methods(
     validate_loopback_url(str(base_url).rstrip("/"))
     if type(client) is not OpenAI:
         raise EndpointPolicyError("an endpoint-bearing client must be the guarded OpenAI client")
+    if type(client.max_retries) is not int or client.max_retries != 0:
+        raise EndpointPolicyError("the model client must disable SDK retries")
     http_client = client._client  # noqa: SLF001 - SDK exposes no public transport inspection API
     transport = getattr(http_client, "_transport", None)
     mounts = getattr(http_client, "_mounts", None)
@@ -476,7 +479,12 @@ class AgentConfig(BaseModel):
     api_key: str = Field(default=DEFAULT_API_KEY, description="Placeholder; Ollama ignores it.")
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     max_steps: int = Field(default=8, ge=1, le=50, description="Max ReAct iterations per question.")
-    timeout: float = Field(default=180.0, gt=0, description="Per-request timeout in seconds.")
+    timeout: float = Field(
+        default=180.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Per-request timeout in seconds.",
+    )
     verbose: bool = Field(default=True, description="Stream the reasoning trace to the console.")
     max_retries: int = Field(
         default=2,
@@ -539,6 +547,91 @@ class Step(BaseModel):
 
 class AgentError(RuntimeError):
     """Raised when the loop cannot continue (e.g. the model is unreachable)."""
+
+
+class AgentTimeoutError(AgentError):
+    """Raised when a soft task budget is observed as exhausted at a boundary."""
+
+
+class AgentCancelledError(AgentError):
+    """Raised when cooperative cancellation is observed at a boundary."""
+
+
+def _monotonic() -> float:
+    """Clock seam for deterministic task-deadline tests."""
+    return time.monotonic()
+
+
+def _sleep(delay: float) -> None:
+    """Sleep seam for deterministic task-deadline tests."""
+    time.sleep(delay)
+
+
+class _RunControl:
+    """One run's absolute monotonic deadline and optional cancellation event."""
+
+    def __init__(self, deadline: float | None, cancellation_event: Event | None) -> None:
+        self.deadline = deadline
+        self.cancellation_event = cancellation_event
+
+    def check(self) -> None:
+        if self.cancellation_event is not None and self.cancellation_event.is_set():
+            raise AgentCancelledError("Task cancelled.") from None
+        if self.deadline is not None and _monotonic() >= self.deadline:
+            raise AgentTimeoutError("Task time budget exhausted.") from None
+
+    def remaining(self) -> float | None:
+        self.check()
+        if self.deadline is None:
+            return None
+        return max(0.0, self.deadline - _monotonic())
+
+    def request_timeout(self, maximum: float) -> float:
+        remaining = self.remaining()
+        return maximum if remaining is None else min(maximum, remaining)
+
+    def wait(self, delay: float) -> None:
+        self.check()
+        remaining = self.remaining()
+        bounded_delay = delay if remaining is None else min(delay, remaining)
+        if bounded_delay > 0:
+            if self.cancellation_event is None:
+                _sleep(bounded_delay)
+            else:
+                self.cancellation_event.wait(bounded_delay)
+        self.check()
+
+
+def _bounded_client_timeout(client: object, request_budget: float) -> float | httpx.Timeout:
+    """Cap the request budget by both OpenAI and underlying HTTPX policies."""
+    inner = getattr(client, "_client", None)
+    policies = (getattr(client, "timeout", None), getattr(inner, "timeout", None))
+    if all(policy is None or policy is NOT_GIVEN for policy in policies):
+        return request_budget
+
+    bounded = [request_budget, request_budget, request_budget, request_budget]
+    for policy in policies:
+        if policy is None or policy is NOT_GIVEN:
+            continue
+        if isinstance(policy, httpx.Timeout):
+            components = (policy.connect, policy.read, policy.write, policy.pool)
+        elif type(policy) in (int, float) and math.isfinite(policy) and policy >= 0:
+            components = (policy, policy, policy, policy)
+        else:
+            raise AgentError("the injected HTTP client has an invalid timeout policy")
+        for index, component in enumerate(components):
+            if component is None:
+                continue
+            if (
+                type(component) not in (int, float)
+                or not math.isfinite(component)
+                or component < 0
+            ):
+                raise AgentError("the injected HTTP client has an invalid timeout policy")
+            bounded[index] = min(bounded[index], float(component))
+    return httpx.Timeout(
+        connect=bounded[0], read=bounded[1], write=bounded[2], pool=bounded[3]
+    )
 
 
 def model_is_installed(requested: str, available: Iterable[str]) -> bool:
@@ -811,20 +904,57 @@ class ReActAgent:
         )
         return available
 
-    def run(self, question: str) -> str:
-        """Answer one question in this instance's serialized conversation."""
+    def run(
+        self,
+        question: str,
+        *,
+        task_timeout: float | None = None,
+        cancellation_event: Event | None = None,
+    ) -> str:
+        """Answer one question with an optional cooperative soft task budget.
+
+        ``task_timeout`` is measured from call ingress and checked across model
+        requests, retries, waits, steps, and tools. This is not a hard wall-clock
+        limit: synchronous model and tool calls cannot be forcibly interrupted,
+        so the error may be raised only after an over-budget call returns. Model
+        requests receive the smaller of the remaining budget and configured
+        request timeout. HTTPX read timeouts are inactivity limits, so a
+        slow-drip response can still outlast the task budget. Cancellation is
+        likewise cooperative, though it can interrupt retry backoff waits.
+        """
+        if task_timeout is not None and (
+            not math.isfinite(task_timeout) or task_timeout <= 0
+        ):
+            raise ValueError("task_timeout must be finite and greater than zero")
+        deadline = None
+        if task_timeout is not None:
+            deadline = _monotonic() + task_timeout
+            if not math.isfinite(deadline):
+                raise ValueError("task_timeout is too large")
+        control = _RunControl(deadline, cancellation_event)
+        control.check()
         self._acquire_execution_slot()
         try:
             self._turn += 1
-            if self.workspace is not None:
-                with workspace_scope(self.workspace), obs.bind(turn=self._turn):
-                    return self._run_turn(question)
-            with obs.bind(turn=self._turn):
-                return self._run_turn(question)
+            try:
+                if self.workspace is not None:
+                    with workspace_scope(self.workspace), obs.bind(turn=self._turn):
+                        return self._run_turn(question, control)
+                with obs.bind(turn=self._turn):
+                    return self._run_turn(question, control)
+            except (AgentTimeoutError, AgentCancelledError):
+                obs.event(
+                    "agent.run.aborted",
+                    logger=_log,
+                    level=logging.WARNING,
+                    status="aborted",
+                    step_count=len(self.last_trace),
+                )
+                raise
         finally:
             self._execution_lock.release()
 
-    def _run_turn(self, question: str) -> str:
+    def _run_turn(self, question: str, control: _RunControl) -> str:
         self.last_trace = []
         attempts: Counter[tuple[str, str]] = Counter()
         started = time.perf_counter()
@@ -835,16 +965,21 @@ class ReActAgent:
             max_steps=self.config.max_steps,
             history_messages=len(self.history),
         )
+        control.check()
 
         wants_model_cli = _is_model_cli_compound_request(question)
         if wants_model_cli or _is_config_precedence_request(question):
-            return self._run_config_inspection_route(question, started, wants_model_cli)
+            return self._run_config_inspection_route(
+                question, started, wants_model_cli, control
+            )
 
         scratchpad: list[ChatCompletionMessageParam] = [_user(question)]
 
         for iteration in range(1, self.config.max_steps + 1):
             with obs.bind(step=iteration):
-                reply = self._complete(scratchpad)
+                control.check()
+                reply = self._complete(scratchpad, control=control)
+                control.check()
                 step = _parse(reply)
                 self.last_trace.append(step)
                 self._trace(iteration, step)
@@ -864,12 +999,14 @@ class ReActAgent:
                     scratchpad.append(_assistant(reply))
 
                 if step.final_answer is not None:
+                    control.check()
                     obs.event(
                         "agent.step.final_answer",
                         logger=_log,
                         thought=step.thought,
                         answer=step.final_answer,
                     )
+                    control.check()
                     return self._finish(question, step.final_answer, started, iteration)
 
                 if step.action is None:
@@ -888,9 +1025,12 @@ class ReActAgent:
                     )
                     scratchpad.append(_user(nudge))
                     step.observation = "(format correction sent)"
+                    control.check()
                     continue
 
-                observation = self._invoke_tool(step)
+                control.check()
+                observation = self._invoke_tool(step, control=control)
+                control.check()
                 if step.action not in self.allowed_tools:
                     return ""
                 # The rut check below still sees the whole thing; only what the
@@ -901,6 +1041,7 @@ class ReActAgent:
                 intervention = self._check_for_a_rut(step, observation, attempts)
                 if intervention is not None:
                     scratchpad.append(_user(intervention))
+                control.check()
 
         # Out of steps: ask for the best answer it can give from what it has.
         obs.event(
@@ -909,11 +1050,17 @@ class ReActAgent:
             level=logging.WARNING,
             max_steps=self.config.max_steps,
         )
-        fallback = self._force_final_answer(scratchpad, question)
+        control.check()
+        fallback = self._force_final_answer(scratchpad, question, control)
+        control.check()
         return self._finish(question, fallback, started, self.config.max_steps)
 
     def _run_config_inspection_route(
-        self, question: str, started: float, wants_model_cli: bool
+        self,
+        question: str,
+        started: float,
+        wants_model_cli: bool,
+        control: _RunControl,
     ) -> str:
         missing_capabilities = set(_CONFIG_PRECEDENCE_CAPABILITIES - self.allowed_tools)
         if wants_model_cli:
@@ -940,12 +1087,19 @@ class ReActAgent:
                 status="rejected",
                 step_count=1,
             )
+            control.check()
             return self._finish(question, answer, started, 1)
 
-        observation = self._invoke_tool(step, trace_observation=False)
+        control.check()
+        observation = self._invoke_tool(
+            step, trace_observation=False, control=control
+        )
+        control.check()
         answer = observation
         if wants_model_cli and not answer.startswith("Error:"):
+            control.check()
             model_cli = inspect_default_model_cli()
+            control.check()
             answer = f"{model_cli}\n\n{observation}"
         step.observation = answer
         self._trace_observation(answer)
@@ -955,6 +1109,7 @@ class ReActAgent:
             status="error" if answer.startswith("Error:") else "completed",
             step_count=1,
         )
+        control.check()
         return self._finish(question, answer, started, 1)
 
     def _check_for_a_rut(
@@ -1008,8 +1163,15 @@ class ReActAgent:
             "your Final Answer."
         )
 
-    def _invoke_tool(self, step: Step, *, trace_observation: bool = True) -> str:
+    def _invoke_tool(
+        self,
+        step: Step,
+        *,
+        trace_observation: bool = True,
+        control: _RunControl,
+    ) -> str:
         """Run the tool a step asked for, logging the call and its result."""
+        control.check()
         tool_name = step.action or ""
         permitted = tool_name in self.allowed_tools
         obs.event(
@@ -1029,6 +1191,7 @@ class ReActAgent:
             )
         else:
             observation = "Error: tool is not allowed for this task."
+        control.check()
         elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
 
         step.observation = observation
@@ -1140,7 +1303,14 @@ class ReActAgent:
         )
         return cast("list[ChatCompletionMessageParam]", assembled())
 
-    def _complete(self, scratchpad: list[ChatCompletionMessageParam], stop: bool = True) -> str:
+    def _complete(
+        self,
+        scratchpad: list[ChatCompletionMessageParam],
+        stop: bool = True,
+        *,
+        control: _RunControl,
+    ) -> str:
+        control.check()
         messages = self._messages(scratchpad)
         obs.event(
             "agent.llm.request",
@@ -1152,7 +1322,8 @@ class ReActAgent:
         )
 
         started = time.perf_counter()
-        response = self._create_with_retries(messages, stop=stop)
+        response = self._create_with_retries(messages, stop=stop, control=control)
+        control.check()
         elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
         content = (response.choices[0].message.content or "").strip()
         usage = response.usage
@@ -1170,7 +1341,11 @@ class ReActAgent:
         return content
 
     def _create_with_retries(
-        self, messages: list[ChatCompletionMessageParam], *, stop: bool
+        self,
+        messages: list[ChatCompletionMessageParam],
+        *,
+        stop: bool,
+        control: _RunControl,
     ) -> ChatCompletion:
         """Call the model, retrying the failures that are worth retrying.
 
@@ -1181,24 +1356,43 @@ class ReActAgent:
         """
         attempts = self.config.max_retries + 1
         for attempt in range(1, attempts + 1):
+            control.check()
             if self._before_model_request is not None:
                 self._before_model_request()
+                control.check()
             try:
-                return cast(
+                request_args: dict[str, Any] = {
+                    "model": self.config.model,
+                    "messages": messages,
+                    "temperature": self.config.temperature,
+                    "stop": ["\nObservation:", "Observation:"] if stop else None,
+                }
+                if control.deadline is not None:
+                    request_budget = control.request_timeout(self.config.timeout)
+                    request_args["timeout"] = _bounded_client_timeout(
+                        self.client, request_budget
+                    )
+                response = cast(
                     ChatCompletion,
-                    self._create_completion(
-                        model=self.config.model,
-                        messages=messages,
-                        temperature=self.config.temperature,
-                        stop=["\nObservation:", "Observation:"] if stop else None,
-                    ),
+                    self._create_completion(**request_args),
                 )
             except APIConnectionError as exc:
-                self._handle_attempt_failure(exc, attempt, attempts, retryable=True)
-            except APIStatusError as exc:
+                control.check()
                 self._handle_attempt_failure(
-                    exc, attempt, attempts, retryable=exc.status_code in _RETRYABLE_STATUS
+                    exc, attempt, attempts, retryable=True, control=control
                 )
+            except APIStatusError as exc:
+                control.check()
+                self._handle_attempt_failure(
+                    exc,
+                    attempt,
+                    attempts,
+                    retryable=exc.status_code in _RETRYABLE_STATUS,
+                    control=control,
+                )
+            else:
+                control.check()
+                return response
 
         raise AssertionError("unreachable: the retry loop either returns or raises")
 
@@ -1209,11 +1403,13 @@ class ReActAgent:
         attempts: int,
         *,
         retryable: bool,
+        control: _RunControl,
     ) -> None:
         """Log an attempt, then either sleep for the next one or give up."""
         status_code = exc.status_code if isinstance(exc, APIStatusError) else None
 
         if retryable and attempt < attempts:
+            control.check()
             delay = self.config.retry_backoff * (2 ** (attempt - 1))
             obs.event(
                 "agent.llm.retry",
@@ -1225,8 +1421,7 @@ class ReActAgent:
                 status_code=status_code,
                 reason=type(exc).__name__,
             )
-            if delay:
-                time.sleep(delay)
+            control.wait(delay)
             return
 
         if isinstance(exc, APIConnectionError):
@@ -1259,7 +1454,10 @@ class ReActAgent:
         raise AgentError(f"Model server error (HTTP {status_code}).{hint}") from exc
 
     def _force_final_answer(
-        self, scratchpad: list[ChatCompletionMessageParam], question: str
+        self,
+        scratchpad: list[ChatCompletionMessageParam],
+        question: str,
+        control: _RunControl,
     ) -> str:
         # The question is restated here because by this point it is the oldest
         # message in the scratchpad, behind every step that has been taken, and
@@ -1283,7 +1481,7 @@ class ReActAgent:
                 "not request another tool."
             )
         )
-        reply = self._complete(scratchpad, stop=False)
+        reply = self._complete(scratchpad, stop=False, control=control)
         step = _parse(reply)
         self.last_trace.append(step)
         if step.final_answer:
