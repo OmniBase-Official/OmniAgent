@@ -64,6 +64,44 @@ def test_private_test_root_falls_back_after_permission_denied(
         shutil.rmtree(root)
 
 
+def test_explicit_private_test_root_is_exclusive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture_module = _load_test_fixtures()
+    helper_name = "_candidate_test_parents"
+    candidates = cast(
+        Callable[[], list[Path]],
+        getattr(fixture_module, helper_name),
+    )
+    explicit = tmp_path / "explicit-private-root"
+    fallback = tmp_path / "otherwise-available"
+    fallback.mkdir()
+    monkeypatch.setenv("OMNIAGENT_PRIVATE_TEST_ROOT", str(explicit))
+
+    assert candidates() == [explicit]
+    monkeypatch.setattr(fixture_module, "_candidate_test_parents", candidates)
+    monkeypatch.setattr(fixture_module, "_supports_private_test_parent", lambda _path: False)
+    create_root_name = "_create_private_test_root_candidate"
+    create_root = cast(
+        Callable[[], Path], getattr(fixture_module, create_root_name)
+    )
+    with pytest.raises(RuntimeError, match="No runner-provided parent"):
+        create_root()
+
+
+def test_explicit_private_test_root_must_be_absolute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture_module = _load_test_fixtures()
+    candidates_name = "_candidate_test_parents"
+    candidates = cast(
+        Callable[[], list[Path]], getattr(fixture_module, candidates_name)
+    )
+    monkeypatch.setenv("OMNIAGENT_PRIVATE_TEST_ROOT", "relative/private-root")
+    with pytest.raises(RuntimeError, match="must be absolute"):
+        candidates()
+
+
 def test_private_test_root_does_not_swallow_unexpected_creation_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -451,6 +451,11 @@ def test_windows_identity_diagnostics_are_allowlisted_and_redacted() -> None:
         "cim_unknown": None,
         "cim_status_access_denied": "access_denied",
         "cim_status_unknown": None,
+        "ownership_description_one": "OmniAgent-0123456789abcdef0123456789abcdef",
+        "ownership_description_two": "OmniAgent-fedcba9876543210fedcba9876543210",
+        "ownership_description_too_long_rejected": True,
     }
+    assert len(evidence["ownership_description_one"]) <= 48
+    assert evidence["ownership_description_one"] != evidence["ownership_description_two"]
     assert "SENSITIVE_SENTINEL" not in completed.stdout
     assert "SENSITIVE_SENTINEL" not in completed.stderr

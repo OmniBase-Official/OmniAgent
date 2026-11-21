@@ -19,6 +19,13 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
+function New-OwnershipDescription([string]$RunId) {
+    if ($RunId -cnotmatch "^[0-9a-f]{32}$") { throw "Run identity is invalid." }
+    $description = "OmniAgent-" + $RunId
+    if ($description.Length -gt 48) { throw "Ownership description exceeds the local account limit." }
+    return $description
+}
+
 function Get-ControlledErrorCategory([System.Exception]$Exception) {
     if ($Exception -is [UnauthorizedAccessException]) { return "access_denied" }
     if ($Exception -is [Security.SecurityException]) { return "security_error" }
@@ -559,6 +566,12 @@ if ($DiagnosticSelfTest) {
         cim_unknown = Get-SanitizedCimNativeErrorCategory $sentinel
         cim_status_access_denied = Get-SanitizedCimStatusCategory 2
         cim_status_unknown = Get-SanitizedCimStatusCategory 9999
+        ownership_description_one = New-OwnershipDescription "0123456789abcdef0123456789abcdef"
+        ownership_description_two = New-OwnershipDescription "fedcba9876543210fedcba9876543210"
+        ownership_description_too_long_rejected = try {
+            New-OwnershipDescription ("a" * 49)
+            $false
+        } catch { $true }
     }
     Write-Output (ConvertTo-Json -InputObject $cases -Depth 4 -Compress)
     exit 0
@@ -591,14 +604,15 @@ if (-not $admin.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not (Get-Command New-LocalUser -ErrorAction SilentlyContinue)) { throw "LocalAccounts module is unavailable." }
 
 $repository = (Resolve-Path -LiteralPath $RepositoryRoot).Path
-$runnerTemp = (Resolve-Path -LiteralPath $env:RUNNER_TEMP).Path
+$artifactRoot = (Resolve-Path -LiteralPath $env:RUNNER_TEMP).Path
+$runnerTemp = if ($RunnerTempPath) { (Resolve-Path -LiteralPath $RunnerTempPath).Path } else { $artifactRoot }
 $tempPrefix = $runnerTemp.TrimEnd("\") + "\"
 $head = (& git.exe -C $repository rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $head -ne $ExpectedCommit) { throw "Checked-out HEAD does not match GITHUB_SHA." }
 $tree = (& git.exe -C $repository rev-parse "HEAD^{tree}").Trim()
 if ($LASTEXITCODE -ne 0) { throw "Could not read the checked-out tree hash." }
-if (-not $EvidencePath) { $EvidencePath = Join-Path $runnerTemp ("publisher-acl-" + $env:GITHUB_RUN_ID + ".json") }
-$evidenceFull = Assert-Within -Path $EvidencePath -Root $runnerTemp
+if (-not $EvidencePath) { $EvidencePath = Join-Path $artifactRoot ("publisher-acl-" + $env:GITHUB_RUN_ID + ".json") }
+$evidenceFull = Assert-Within -Path $EvidencePath -Root $artifactRoot
 $evidenceStream = [IO.File]::Open($evidenceFull, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
 
 $runId = [Guid]::NewGuid().ToString("N")
@@ -677,7 +691,7 @@ try {
     $publisherCredential = New-RandomCredential $publisherName
     $identitySubphase = "peer-credential"
     $peerCredential = New-RandomCredential $peerName
-    $ownerDescription = "OmniAgent ACL validation run " + $runId
+    $ownerDescription = New-OwnershipDescription $runId
     $identitySubphase = "account-collision-check"
     if ((Get-LocalUser -Name $publisherName -ErrorAction SilentlyContinue) -or
         (Get-LocalUser -Name $peerName -ErrorAction SilentlyContinue)) {

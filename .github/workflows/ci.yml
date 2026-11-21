@@ -197,8 +197,17 @@ jobs:
           python -m pip install "setuptools>=68" wheel
           python -m pip install -e ".[dev]"
 
+      - name: Prepare private pytest staging root
+        shell: powershell
+        run: .\scripts\prepare_windows_private_test_root.ps1 -Action Create -OutputVariable OMNIAGENT_PRIVATE_TEST_ROOT
+
       - name: Test
         run: pytest
+
+      - name: Cleanup private pytest staging root
+        if: always()
+        shell: powershell
+        run: .\scripts\prepare_windows_private_test_root.ps1 -Action Cleanup -OutputVariable OMNIAGENT_PRIVATE_TEST_ROOT
 
   windows-publisher-acl:
     name: Windows / publisher cross-SID ACL
@@ -233,11 +242,15 @@ jobs:
           python -m pip install "setuptools>=68" wheel
           python -m pip install -e ".[dev]"
 
+      - name: Prepare private publisher staging root
+        shell: powershell
+        run: .\scripts\prepare_windows_private_test_root.ps1 -Action Create -OutputVariable OMNIAGENT_PUBLISHER_STAGING_ROOT
+
       - name: Validate publisher staging across Windows SIDs
         shell: powershell
         run: |
           $evidence = Join-Path $env:RUNNER_TEMP ("publisher-acl-" + $env:GITHUB_RUN_ID + "-" + $env:GITHUB_RUN_ATTEMPT + ".json")
-          .\scripts\validate_windows_publish_acl.ps1 -RepositoryRoot $env:GITHUB_WORKSPACE -ExpectedCommit $env:GITHUB_SHA -EvidencePath $evidence
+          .\scripts\validate_windows_publish_acl.ps1 -RepositoryRoot $env:GITHUB_WORKSPACE -ExpectedCommit $env:GITHUB_SHA -EvidencePath $evidence -RunnerTempPath $env:OMNIAGENT_PUBLISHER_STAGING_ROOT
 
       - name: Preserve sanitized Windows ACL evidence
         if: always()
@@ -247,3 +260,8 @@ jobs:
           path: ${{ runner.temp }}/publisher-acl-${{ github.run_id }}-${{ github.run_attempt }}.json
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Cleanup private publisher staging root
+        if: always()
+        shell: powershell
+        run: .\scripts\prepare_windows_private_test_root.ps1 -Action Cleanup -OutputVariable OMNIAGENT_PUBLISHER_STAGING_ROOT

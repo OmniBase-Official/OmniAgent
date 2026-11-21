@@ -60,6 +60,12 @@ def explicit_repository_workspace() -> Iterator[None]:
 
 
 def _candidate_test_parents() -> list[Path]:
+    explicit_root = os.environ.get("OMNIAGENT_PRIVATE_TEST_ROOT")
+    if explicit_root:
+        candidate = Path(explicit_root)
+        if not candidate.is_absolute():
+            raise RuntimeError("Configured private test root must be absolute.")
+        return [candidate]
     if os.name == "nt":
         values = [
             os.environ.get("RUNNER_TEMP"),
