@@ -30,7 +30,7 @@ Scope: single-user local CLI. Shared publisher destinations and multi-user servi
 ### P2: PR disposition
 
 - [x] Reviewed PR #1: it is stale/non-mergeable and includes `NEXT_CHAT.md`, `questions/bank-2026-10-10.txt`, and numerous `docs/pm` handoff files; decision is to close it to prevent accidental merge.
-- [ ] Close PR #1 through a GitHub account with write access; the connected integration returned HTTP 403 `Resource not accessible by integration`.
+- [ ] Close PR #1 through a GitHub account with write access; the connected integration returned HTTP 403 `Resource not accessible by integration`, and the PR remains open.
 - [ ] Review PR #5 diff and decide whether it is ready for non-draft review; CI passes but no formal review exists.
 - [ ] Review PR #8 diff and decide whether it is ready for non-draft review; its task deadline is cooperative, not a hard cutoff.
 - [ ] Review PR #9 diff and decide whether it is ready for non-draft review; CI passes, but Windows cross-SID/ACL is not covered.
@@ -49,6 +49,8 @@ Scope: single-user local CLI. Shared publisher destinations and multi-user servi
 - Candidate branch: `codex/security-ci-release-hardening-20261121`, based on `5005039144d18da45b646347b62d9753baae94f7`.
 - Candidate files: `.github/workflows/ci.yml`, `.github/workflows/security-gate.yml`, `pyproject.toml`, and this `task.md`.
 - Local candidate checks: pytest 860 passed, 2 skipped; Ruff passed; workflow YAML and embedded Bash syntax passed; TOML parsing and `git diff --check` passed. Mypy is unavailable; wheel build and vulnerability scanning remain hosted-only.
-- No commit or push was made. The candidate has not received an independent SE review or hosted CI result.
+- Candidate commit: `0bf5713e394a2a674c8f0d4f57ab4589ac427300`, pushed fast-forward to both `origin` and `organization`; both remote refs were verified at this SHA.
+- Hosted CI remains pending because this branch has not yet been dispatched or opened as a PR. No merge was made.
+- The candidate has not yet received the independent SE review; Claude CLI was unavailable because its 5-hour limit was reached.
 
 No PR was merged or closed as part of this audit. PR #1 remains open because the connected GitHub integration rejected the close request with HTTP 403.
