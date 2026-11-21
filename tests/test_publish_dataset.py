@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import publish_dataset
 from publish_dataset import PublishError, publish, verify
 
-from dataset_provenance import write_sidecar
+from dataset_provenance import sidecar_path, write_sidecar
 
 
 def _create_junction(link: Path, target: Path) -> None:
@@ -98,6 +98,98 @@ def test_extra_files_travel_with_it(dataset: Path, tmp_path: Path) -> None:
     publish(dataset, dest, teacher="t", extras=(raw,))
 
     assert (dest / "collect.jsonl").is_file()
+
+
+def _assert_collision_does_not_touch_destination(
+    dataset: Path, dest: Path, extras: tuple[Path, ...], match: str
+) -> None:
+    """A name collision must fail before destination creation or writes."""
+    with pytest.raises(PublishError, match=match):
+        publish(dataset, dest, teacher="t", extras=extras)
+    assert not dest.exists()
+
+
+def test_extra_colliding_with_dataset_is_rejected_before_destination_creation(
+    dataset: Path, tmp_path: Path
+) -> None:
+    extra = tmp_path / "other" / dataset.name
+    extra.parent.mkdir()
+    extra.write_text("not the dataset", encoding="utf-8")
+
+    _assert_collision_does_not_touch_destination(
+        dataset, tmp_path / "drive", (extra,), "duplicate destination filename"
+    )
+
+
+def test_extra_colliding_with_sidecar_is_rejected_before_destination_creation(
+    dataset: Path, tmp_path: Path
+) -> None:
+    sidecar_name = sidecar_path(dataset).name
+    extra = tmp_path / "other" / sidecar_name
+    extra.parent.mkdir()
+    extra.write_text("not the sidecar", encoding="utf-8")
+
+    _assert_collision_does_not_touch_destination(
+        dataset, tmp_path / "drive", (extra,), "duplicate destination filename"
+    )
+
+
+def test_duplicate_extras_are_rejected_before_destination_creation(
+    dataset: Path, tmp_path: Path
+) -> None:
+    left = tmp_path / "left" / "same.log"
+    right = tmp_path / "right" / "same.log"
+    left.parent.mkdir()
+    right.parent.mkdir()
+    left.write_text("left", encoding="utf-8")
+    right.write_text("right", encoding="utf-8")
+
+    _assert_collision_does_not_touch_destination(
+        dataset, tmp_path / "drive", (left, right), "duplicate destination filename"
+    )
+
+
+@pytest.mark.parametrize("name", ["MANIFEST.json", "SHA256SUMS"])
+def test_extras_with_reserved_bundle_names_are_rejected_before_destination_creation(
+    dataset: Path, tmp_path: Path, name: str
+) -> None:
+    extra = tmp_path / "other" / name
+    extra.parent.mkdir()
+    extra.write_text("reserved", encoding="utf-8")
+
+    _assert_collision_does_not_touch_destination(
+        dataset, tmp_path / "drive", (extra,), "reserved destination filename"
+    )
+
+
+def test_case_insensitive_dataset_collision_is_rejected(
+    dataset: Path, tmp_path: Path
+) -> None:
+    extra = tmp_path / "other" / dataset.name.upper()
+    extra.parent.mkdir()
+    extra.write_text("case alias", encoding="utf-8")
+
+    _assert_collision_does_not_touch_destination(
+        dataset, tmp_path / "drive", (extra,), "duplicate destination filename"
+    )
+
+
+def test_collision_leaves_existing_destination_unchanged(
+    dataset: Path, tmp_path: Path
+) -> None:
+    extra = tmp_path / "other" / dataset.name
+    extra.parent.mkdir()
+    extra.write_text("not the dataset", encoding="utf-8")
+    dest = tmp_path / "drive"
+    dest.mkdir()
+    sentinel = dest / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(PublishError, match="duplicate destination filename"):
+        publish(dataset, dest, teacher="t", extras=(extra,))
+
+    assert list(dest.iterdir()) == [sentinel]
+    assert sentinel.read_text(encoding="utf-8") == "keep"
 
 
 def test_the_manifest_records_what_the_sidecar_cannot(dataset: Path, tmp_path: Path) -> None:

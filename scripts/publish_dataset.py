@@ -127,6 +127,26 @@ def _safe_bundle_name(name: str) -> bool:
     )
 
 
+def _preflight_source_names(sources: Sequence[Path]) -> None:
+    """Reject names that collide on portable filesystems before destination I/O."""
+    reserved = {name.casefold() for name in SELF_DESCRIBING}
+    seen: dict[str, str] = {}
+    for source in sources:
+        name = source.name
+        if not _safe_bundle_name(name):
+            raise PublishError(f"not a safe destination filename: {name!r}")
+        # Windows-compatible filesystems may ignore case and trim trailing dots
+        # or spaces. Reject aliases here so a bundle has one meaning everywhere.
+        key = name.rstrip(" .").casefold()
+        if not key:
+            raise PublishError(f"not a safe destination filename: {name!r}")
+        if key in reserved:
+            raise PublishError(f"reserved destination filename: {name!r}")
+        if key in seen:
+            raise PublishError(f"duplicate destination filename: {name!r}")
+        seen[key] = name
+
+
 def digest(path: Path) -> str:
     """The sha256 of a file, read in chunks so a large log does not load whole."""
     hasher = hashlib.sha256()
@@ -179,6 +199,8 @@ def publish(  # noqa: PLR0913 - each argument is a separate fact the manifest ha
     if missing:
         raise PublishError(f"not a file: {', '.join(missing)}")
 
+    # Check every source name before creating or changing the destination.
+    _preflight_source_names(sources)
     dest_root = _destination_root(dest, create=True)
     output_names = {source.name for source in sources} | {SUMS_NAME, MANIFEST_NAME}
     for name in output_names:
