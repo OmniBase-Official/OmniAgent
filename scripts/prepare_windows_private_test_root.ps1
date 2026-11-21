@@ -9,8 +9,8 @@ param(
 $ErrorActionPreference = "Stop"
 $phase = "preflight"
 
-$probeStatuses = @("accepted", "policy_rejected", "securefs_rejected", "module_missing", "probe_import_error", "probe_attribute_error", "probe_argument_error", "probe_type_error", "probe_value_error", "probe_os_error", "probe_exception")
-$probeStages = @("import", "root_open", "capability_check", "ancestry_acl", "volume_query", "root_close", "serialize")
+$probeStatuses = @("accepted", "policy_rejected", "securefs_rejected", "module_missing", "probe_import_error", "probe_attribute_error", "probe_argument_error", "probe_type_error", "probe_value_error", "probe_os_error", "probe_bootstrap_error", "probe_output_overflow", "probe_timeout", "probe_exception")
+$probeStages = @("bootstrap", "import", "root_open", "capability_check", "ancestry_acl", "volume_query", "root_close", "serialize")
 $ancestryRoles = @("volume", "program_data", "base", "root")
 
 function ConvertFrom-SafeProbeOutput([string]$Output) {
@@ -57,8 +57,10 @@ function Get-SafeProbeFailureCategory([string]$Phase, [int]$ExitCode, [string]$O
     return (Resolve-SafeProbeResult $ExitCode $Output).status
 }
 
-function Resolve-SafeProbeResult([int]$ExitCode, [string]$Output) {
+function Resolve-SafeProbeResult([int]$ExitCode, [string]$Output, [bool]$TimedOut = $false, [bool]$OutputOverflow = $false) {
     $parsed = ConvertFrom-SafeProbeOutput $Output
+    if ($TimedOut) { return @{ status = "probe_timeout"; stage = "bootstrap"; ancestry_policy_passed = $null } }
+    if ($OutputOverflow) { return @{ status = "probe_output_overflow"; stage = "bootstrap"; ancestry_policy_passed = $null } }
     if ($ExitCode -ne 0) {
         $outcome = "output_invalid"
         if ([string]::IsNullOrWhiteSpace($Output)) {
@@ -82,6 +84,122 @@ function Format-SafeNonzeroProbeFailure($Result) {
     return ("Private staging root failed [probe-result/probe_nonzero_exit] output[{0}]." -f $outcome)
 }
 
+function New-SafeProbeBootstrap([string]$ProbeSource) {
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ProbeSource))
+    $bootstrap = @'
+import base64
+import json
+try:
+    source = base64.b64decode("PROBE_SOURCE_BASE64", validate=True).decode("utf-8")
+    code = compile(source, "<omniagent-private-root-probe>", "exec")
+    exec(code, {"__name__": "__main__"})
+except BaseException:
+    print('{"status":"probe_bootstrap_error","stage":"bootstrap"}')
+'@
+    return $bootstrap.Replace("PROBE_SOURCE_BASE64", $encoded)
+}
+
+function Invoke-SafePythonProbe([string]$PythonPath, [string]$ProbeSource, [int]$TimeoutMilliseconds = 30000, [int]$MaximumOutputBytes = 4096) {
+    if ($ProbeSource.Length -gt 65536) {
+        return @{ ExitCode = 1; Output = '{"status":"probe_bootstrap_error","stage":"bootstrap"}'; TimedOut = $false }
+    }
+    try {
+        if ($null -eq ("OmniAgent.PrivateProbeProcess" -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace OmniAgent {
+    public sealed class PrivateProbeResult {
+        public int ExitCode;
+        public string Output;
+        public bool TimedOut;
+        public bool Overflow;
+    }
+
+    internal sealed class CappedCaptureStream : Stream {
+        private readonly MemoryStream captured = new MemoryStream();
+        private readonly int maximum;
+        public bool Dropped { get; private set; }
+        public CappedCaptureStream(int maximumBytes) { maximum = maximumBytes; }
+        public override bool CanRead { get { return false; } }
+        public override bool CanSeek { get { return false; } }
+        public override bool CanWrite { get { return true; } }
+        public override long Length { get { return captured.Length; } }
+        public override long Position { get { throw new NotSupportedException(); } set { throw new NotSupportedException(); } }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+        public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
+        public override void SetLength(long value) { throw new NotSupportedException(); }
+        public override void Write(byte[] buffer, int offset, int count) {
+            int remaining = maximum - (int)captured.Length;
+            if (remaining > 0) captured.Write(buffer, offset, Math.Min(remaining, count));
+            if (count > remaining) Dropped = true;
+        }
+        public string GetCapturedText() { return Encoding.UTF8.GetString(captured.ToArray()); }
+    }
+
+    public static class PrivateProbeProcess {
+        public static PrivateProbeResult Run(string executable, string source, int timeoutMilliseconds, int maximumOutputBytes) {
+            Stopwatch deadline = Stopwatch.StartNew();
+            using (Process process = new Process()) {
+                process.StartInfo = new ProcessStartInfo {
+                    FileName = executable,
+                    Arguments = "-",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                if (!process.Start()) return new PrivateProbeResult { ExitCode = 1, Output = "", TimedOut = false };
+                using (CappedCaptureStream stdout = new CappedCaptureStream(maximumOutputBytes)) {
+                    Task stdoutDrain = process.StandardOutput.BaseStream.CopyToAsync(stdout);
+                    Task stderrDrain = process.StandardError.BaseStream.CopyToAsync(Stream.Null);
+                    Task stdinWrite = process.StandardInput.WriteAsync(source);
+                    int remaining = timeoutMilliseconds - (int)deadline.ElapsedMilliseconds;
+                    if (remaining <= 0 || !stdinWrite.Wait(Math.Max(0, remaining))) {
+                        try { process.Kill(); } catch { }
+                        if (process.WaitForExit(1000)) Task.WaitAll(new Task[] { stdoutDrain, stderrDrain }, 1000);
+                        return new PrivateProbeResult { ExitCode = 1, Output = "", TimedOut = true };
+                    }
+                    stdinWrite.GetAwaiter().GetResult();
+                    process.StandardInput.Close();
+                    remaining = timeoutMilliseconds - (int)deadline.ElapsedMilliseconds;
+                    if (remaining <= 0 || !process.WaitForExit(Math.Max(0, remaining))) {
+                        try { process.Kill(); } catch { }
+                        if (process.WaitForExit(1000)) Task.WaitAll(new Task[] { stdoutDrain, stderrDrain }, 1000);
+                        return new PrivateProbeResult { ExitCode = 1, Output = "", TimedOut = true };
+                    }
+                    remaining = timeoutMilliseconds - (int)deadline.ElapsedMilliseconds;
+                    if (remaining <= 0 || !Task.WaitAll(new Task[] { stdoutDrain, stderrDrain }, Math.Max(0, remaining)))
+                        return new PrivateProbeResult { ExitCode = 1, Output = "", TimedOut = true };
+                    if (stdout.Dropped) return new PrivateProbeResult { ExitCode = 1, Output = "", TimedOut = false, Overflow = true };
+                    return new PrivateProbeResult {
+                        ExitCode = process.ExitCode,
+                        Output = stdout.GetCapturedText().TrimEnd('\r', '\n'),
+                        TimedOut = false,
+                        Overflow = false
+                    };
+                }
+            }
+        }
+    }
+}
+'@ -ErrorAction Stop | Out-Null
+        }
+        $result = [OmniAgent.PrivateProbeProcess]::Run($PythonPath, $ProbeSource, $TimeoutMilliseconds, $MaximumOutputBytes)
+        if ($result.TimedOut) { return @{ ExitCode = 1; Output = ""; TimedOut = $true; OutputOverflow = $false } }
+        if ($result.Overflow) { return @{ ExitCode = 1; Output = ""; TimedOut = $false; OutputOverflow = $true } }
+        return @{ ExitCode = $result.ExitCode; Output = $result.Output; TimedOut = $false; OutputOverflow = $false }
+    } catch {
+        return @{ ExitCode = 1; Output = '{"status":"probe_bootstrap_error","stage":"bootstrap"}'; TimedOut = $false; OutputOverflow = $false }
+    }
+}
+
 if ($Action -eq "DiagnosticSelfTest") {
     $valid = ConvertFrom-SafeProbeOutput '{"status":"policy_rejected","stage":"ancestry_acl","ancestry":{"volume":true,"program_data":true,"base":false,"root":true}}'
     $unknown = ConvertFrom-SafeProbeOutput '{"status":"secret-path-SENSITIVE_SENTINEL"}'
@@ -99,6 +217,45 @@ if ($Action -eq "DiagnosticSelfTest") {
     $nonzeroMissing = Resolve-SafeProbeResult 1 " `t "
     $nonzeroInvalid = Resolve-SafeProbeResult 1 '{"status":"accepted","stage":"root_open","raw":"SENSITIVE_SENTINEL"}'
     $nonzeroMessage = Format-SafeNonzeroProbeFailure $nonzero
+    $testPython = Get-Command python.exe -ErrorAction SilentlyContinue
+    $bootstrapValid = $false
+    $bootstrapFailure = $false
+    $bootstrapRedacted = $false
+    $bootstrapNonzero = $false
+    $bootstrapTimeout = $false
+    $bootstrapStdoutBounded = $false
+    $bootstrapStderrDiscarded = $false
+    if ($null -ne $testPython) {
+        $validSource = 'import json; print(json.dumps({"status":"accepted","stage":"capability_check"},separators=(",",":")))'
+        $validBootstrapSource = New-SafeProbeBootstrap $validSource
+        $validInvocation = Invoke-SafePythonProbe -PythonPath $testPython.Source -ProbeSource $validBootstrapSource
+        $validResult = Resolve-SafeProbeResult $validInvocation.ExitCode $validInvocation.Output
+        $invalidSource = 'if True print("SENSITIVE_SENTINEL")'
+        $invalidBootstrapSource = New-SafeProbeBootstrap $invalidSource
+        $invalidInvocation = Invoke-SafePythonProbe -PythonPath $testPython.Source -ProbeSource $invalidBootstrapSource
+        $invalidResult = Resolve-SafeProbeResult $invalidInvocation.ExitCode $invalidInvocation.Output
+        $nonzeroSource = 'import os; print("{" + chr(34) + "status" + chr(34) + ":" + chr(34) + "accepted" + chr(34) + "," + chr(34) + "stage" + chr(34) + ":" + chr(34) + "capability_check" + chr(34) + "}", flush=True); os._exit(7)'
+        $nonzeroInvocation = Invoke-SafePythonProbe -PythonPath $testPython.Source -ProbeSource (New-SafeProbeBootstrap $nonzeroSource)
+        $nonzeroResult = Resolve-SafeProbeResult $nonzeroInvocation.ExitCode $nonzeroInvocation.Output
+        $timeoutSource = New-SafeProbeBootstrap 'import time; time.sleep(10)'
+        $timeoutInvocation = Invoke-SafePythonProbe -PythonPath $testPython.Source -ProbeSource $timeoutSource -TimeoutMilliseconds 100
+        $timeoutResult = Resolve-SafeProbeResult $timeoutInvocation.ExitCode $timeoutInvocation.Output $timeoutInvocation.TimedOut $timeoutInvocation.OutputOverflow
+        $largeStdoutSource = New-SafeProbeBootstrap 'import os; os.write(1, b"x" * 100000)'
+        $largeStdoutInvocation = Invoke-SafePythonProbe -PythonPath $testPython.Source -ProbeSource $largeStdoutSource -TimeoutMilliseconds 5000 -MaximumOutputBytes 256
+        $overflowSource = New-SafeProbeBootstrap 'import os; print("{" + chr(34) + "status" + chr(34) + ":" + chr(34) + "accepted" + chr(34) + "," + chr(34) + "stage" + chr(34) + ":" + chr(34) + "capability_check" + chr(34) + "}", end=""); os.write(1, b" " * 5000)'
+        $overflowInvocation = Invoke-SafePythonProbe -PythonPath $testPython.Source -ProbeSource $overflowSource -TimeoutMilliseconds 5000 -MaximumOutputBytes 256
+        $overflowResult = Resolve-SafeProbeResult $overflowInvocation.ExitCode $overflowInvocation.Output $overflowInvocation.TimedOut $overflowInvocation.OutputOverflow
+        $bootstrapStdoutBounded = ($largeStdoutInvocation.Output.Length -le 256 -and $largeStdoutInvocation.OutputOverflow)
+        $largeStderrSource = New-SafeProbeBootstrap 'import os; os.write(2, b"SENSITIVE_SENTINEL" * 100000); print("{" + chr(34) + "status" + chr(34) + ":" + chr(34) + "accepted" + chr(34) + "," + chr(34) + "stage" + chr(34) + ":" + chr(34) + "capability_check" + chr(34) + "}", flush=True)'
+        $largeStderrInvocation = Invoke-SafePythonProbe -PythonPath $testPython.Source -ProbeSource $largeStderrSource -TimeoutMilliseconds 5000
+        $bootstrapStderrDiscarded = ($largeStderrInvocation.ExitCode -eq 0 -and $largeStderrInvocation.Output -ceq '{"status":"accepted","stage":"capability_check"}' -and $largeStderrInvocation.Output -notmatch "SENSITIVE_SENTINEL")
+        $bootstrapValid = ($validInvocation.ExitCode -eq 0 -and $validInvocation.Output -ceq '{"status":"accepted","stage":"capability_check"}' -and $validResult.status -eq "accepted" -and $validResult.stage -eq "capability_check")
+        $bootstrapFailure = ($invalidInvocation.ExitCode -eq 0 -and $invalidInvocation.Output -ceq '{"status":"probe_bootstrap_error","stage":"bootstrap"}' -and $invalidResult.status -eq "probe_bootstrap_error" -and $invalidResult.stage -eq "bootstrap")
+        $bootstrapRedacted = ($invalidInvocation.Output -notmatch "SENSITIVE_SENTINEL")
+        $bootstrapNonzero = ($nonzeroResult.status -eq "probe_nonzero_exit" -and $nonzeroResult.stage -eq "capability_check" -and $nonzeroResult.output_outcome -eq "output_valid" -and $null -eq $nonzeroResult.ancestry_policy_passed)
+        $bootstrapTimeout = ($timeoutResult.status -eq "probe_timeout" -and $timeoutResult.stage -eq "bootstrap" -and $null -eq $timeoutResult.ancestry_policy_passed)
+        $bootstrapOverflow = ($overflowResult.status -eq "probe_output_overflow" -and $overflowResult.stage -eq "bootstrap" -and $null -eq $overflowResult.ancestry_policy_passed -and $overflowInvocation.Output -eq "")
+    }
     $launch = Get-SafeProbeFailureCategory "probe-launch" 1 "C:\\private\\SENSITIVE_SENTINEL"
     $export = Get-SafeProbeFailureCategory "environment-export" 1 "user=SENSITIVE_SENTINEL"
     $evidence = @{
@@ -120,6 +277,14 @@ if ($Action -eq "DiagnosticSelfTest") {
         malformed_nonzero_stage_cleared = ($nonzeroMalformed.status -eq "probe_nonzero_exit" -and $null -eq $nonzeroMalformed.stage -and $null -eq $nonzeroMalformed.ancestry_policy_passed)
         nonzero_output_redacted = (($nonzero | ConvertTo-Json -Compress) -notmatch "SENSITIVE_SENTINEL" -and ($nonzeroMalformed | ConvertTo-Json -Compress) -notmatch "SENSITIVE_SENTINEL" -and ($nonzeroInvalid | ConvertTo-Json -Compress) -notmatch "SENSITIVE_SENTINEL")
         nonzero_message_uses_fixed_tokens = ($nonzeroMessage -eq "Private staging root failed [probe-result/probe_nonzero_exit] output[output_valid] stage[capability_check]." -and $nonzeroMessage -notmatch "SENSITIVE_SENTINEL")
+        python_bootstrap_valid_probe = $bootstrapValid
+        python_bootstrap_syntax_failure_sanitized = $bootstrapFailure
+        python_bootstrap_output_redacted = $bootstrapRedacted
+        python_bootstrap_nonzero_exit_classified = $bootstrapNonzero
+        python_bootstrap_timeout_bounded = $bootstrapTimeout
+        python_bootstrap_stdout_bounded = $bootstrapStdoutBounded
+        python_bootstrap_valid_json_overflow_rejected = $bootstrapOverflow
+        python_bootstrap_stderr_discarded = $bootstrapStderrDiscarded
         launch_error_allowlisted = ($launch -eq "probe_launch_error")
         export_error_allowlisted = ($export -eq "environment_export_error")
     }
@@ -287,11 +452,13 @@ except Exception:
     print('{"status":"probe_exception","stage":"serialize"}')
 '@
         $probe = $probe.Replace("OUTPUT_VARIABLE", $OutputVariable)
+        $probe = New-SafeProbeBootstrap $probe
         $previousErrorActionPreference = $ErrorActionPreference
         try {
             $ErrorActionPreference = "Continue"
-            $probeOutput = @(& $python.Source -c $probe 2>$null)
-            $probeExitCode = $LASTEXITCODE
+            $probeInvocation = Invoke-SafePythonProbe $python.Source $probe
+            $probeOutput = $probeInvocation.Output
+            $probeExitCode = $probeInvocation.ExitCode
         } catch {
             [Console]::Error.WriteLine("Private staging root failed [probe-launch/probe_launch_error].")
             exit 1
@@ -299,10 +466,10 @@ except Exception:
             $ErrorActionPreference = $previousErrorActionPreference
         }
         $phase = "probe-result"
-        $probeText = $probeOutput -join "`n"
-        $probeResult = Resolve-SafeProbeResult $probeExitCode $probeText
+        $probeText = $probeOutput
+        $probeResult = Resolve-SafeProbeResult $probeExitCode $probeText $probeInvocation.TimedOut $probeInvocation.OutputOverflow
         if ($probeResult.status -ne "accepted" -or $probeExitCode -ne 0) {
-            $category = Get-SafeProbeFailureCategory "probe-result" $probeExitCode $probeText
+            $category = $probeResult.status
             if ($category -eq "probe_nonzero_exit") {
                 [Console]::Error.WriteLine((Format-SafeNonzeroProbeFailure $probeResult))
             } elseif ($category -eq "policy_rejected" -and $null -ne $probeResult.ancestry_policy_passed) {
