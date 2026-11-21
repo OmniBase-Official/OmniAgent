@@ -1,13 +1,61 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("Create", "Cleanup")]
+    [ValidateSet("Create", "Cleanup", "DiagnosticSelfTest")]
     [string]$Action,
     [ValidateSet("OMNIAGENT_PRIVATE_TEST_ROOT", "OMNIAGENT_PUBLISHER_STAGING_ROOT")]
     [string]$OutputVariable = "OMNIAGENT_PRIVATE_TEST_ROOT"
 )
 $ErrorActionPreference = "Stop"
 $phase = "preflight"
+
+$probeStatuses = @("accepted", "policy_rejected", "module_missing", "probe_os_error", "probe_exception")
+$ancestryRoles = @("volume", "program_data", "base", "root")
+
+function ConvertFrom-SafeProbeOutput([string]$Output) {
+    try {
+        $result = ConvertFrom-Json -InputObject $Output -ErrorAction Stop
+        if ($null -eq $result -or $result.status -isnot [string] -or $result.status -notin $probeStatuses) {
+            return @{ status = "probe_exception"; ancestry = $null }
+        }
+        if ($result.status -ne "policy_rejected") {
+            return @{ status = $result.status; ancestry = $null }
+        }
+        if ($null -eq $result.ancestry) {
+            return @{ status = "policy_rejected"; ancestry = $null }
+        }
+        $facts = @{}
+        foreach ($role in $ancestryRoles) {
+            $value = $result.ancestry.$role
+            if ($value -isnot [bool]) {
+                return @{ status = "probe_exception"; ancestry = $null }
+            }
+            $facts[$role] = $value
+        }
+        return @{ status = "policy_rejected"; ancestry_policy_passed = $facts }
+    } catch {
+        return @{ status = "probe_exception"; ancestry = $null }
+    }
+}
+
+if ($Action -eq "DiagnosticSelfTest") {
+    $valid = ConvertFrom-SafeProbeOutput '{"status":"policy_rejected","ancestry":{"volume":true,"program_data":true,"base":false,"root":true},"secret":"SENSITIVE_SENTINEL"}'
+    $unknown = ConvertFrom-SafeProbeOutput '{"status":"secret-path-SENSITIVE_SENTINEL"}'
+    $accepted = ConvertFrom-SafeProbeOutput '{"status":"accepted","raw":"SENSITIVE_SENTINEL"}'
+    $evidence = @{
+        policy_rejected = ($valid.status -eq "policy_rejected")
+        ancestry_roles_allowlisted = (($valid.ancestry_policy_passed.Keys | Sort-Object) -join ",") -eq "base,program_data,root,volume"
+        ancestry_values_boolean = @($valid.ancestry_policy_passed.Values | Where-Object { $_ -isnot [bool] }).Count -eq 0
+        unknown_status_fail_closed = ($unknown.status -eq "probe_exception")
+        accepted_status_allowlisted = ($accepted.status -eq "accepted")
+    }
+    $evidenceOutput = $evidence | ConvertTo-Json -Compress
+    $evidence.sensitive_sentinel_redacted = $evidenceOutput -notmatch "SENSITIVE_SENTINEL"
+    $evidenceOutput = $evidence | ConvertTo-Json -Compress
+    $evidenceOutput
+    if ($evidence.Values -contains $false) { exit 1 }
+    exit 0
+}
 
 function Get-SafeFailureCategory([System.Exception]$Exception) {
     $current = $Exception
@@ -71,10 +119,92 @@ try {
         Set-Acl -LiteralPath $root -AclObject $acl
         Set-Item -Path ("Env:" + $OutputVariable) -Value $root
 
+        $phase = "python-resolution"
+        $python = Get-Command python.exe -ErrorAction SilentlyContinue
+        if ($null -eq $python) {
+            [Console]::Error.WriteLine("Private staging root failed [python-resolution/missing-python].")
+            exit 1
+        }
         $phase = "root-policy-check"
-        $probe = "import os; from securefs import SecureRoot; root = SecureRoot(os.environ['$OutputVariable'], writable=True, _allow_safe_inherited_ancestors=True); ok = root.supports_private_staging(); root.close(); raise SystemExit(0 if ok else 1)"
-        python -c $probe *> $null
-        if ($LASTEXITCODE -ne 0) { throw "Private staging root failed SecureRoot ancestry validation." }
+        $probe = @'
+import ctypes
+import errno
+import json
+import os
+import sys
+
+result = {"status": "probe_exception"}
+root = None
+try:
+    try:
+        import securefs
+    except ModuleNotFoundError:
+        result = {"status": "module_missing"}
+    else:
+        try:
+            root = securefs.SecureRoot(
+                os.environ["OUTPUT_VARIABLE"], writable=True,
+                _allow_safe_inherited_ancestors=True,
+            )
+            if root.supports_private_staging():
+                result = {"status": "accepted"}
+            else:
+                handles = root._pinned_handles
+                if len(handles) != 4:
+                    raise OSError(errno.EIO, "unexpected ancestry handle count")
+                role_handles = {
+                    "volume": handles[0],
+                    "program_data": handles[1],
+                    "base": handles[-2],
+                    "root": handles[-1],
+                }
+                ancestry = {
+                    role: bool(securefs._has_safe_parent_acl(
+                        handle, allow_safe_inherited=True
+                    ))
+                    for role, handle in role_handles.items()
+                }
+                buffer = ctypes.create_string_buffer(1024)
+                iosb = securefs._IOSB()
+                status = securefs._nt.NtQueryVolumeInformationFile(
+                    root.handle, ctypes.byref(iosb), buffer, len(buffer), 5
+                )
+                if status < 0:
+                    raise OSError(errno.EIO, "volume capability probe failed")
+                persistent = bool(
+                    ctypes.c_uint32.from_address(ctypes.addressof(buffer)).value
+                    & securefs._FILE_PERSISTENT_ACLS
+                )
+                ancestry["volume"] = ancestry["volume"] and persistent
+                result = {"status": "policy_rejected", "ancestry": ancestry}
+        except securefs.SecureFSError:
+            result = {"status": "probe_exception"}
+        except OSError:
+            result = {"status": "probe_os_error"}
+        except Exception:
+            result = {"status": "probe_exception"}
+finally:
+    if root is not None:
+        try:
+            root.close()
+        except Exception:
+            result = {"status": "probe_exception"}
+print(json.dumps(result, separators=(",", ":")))
+'@
+        $probe = $probe.Replace("OUTPUT_VARIABLE", $OutputVariable)
+        $probeOutput = @(& $python.Source -c $probe 2>$null)
+        $probeResult = ConvertFrom-SafeProbeOutput ($probeOutput -join "`n")
+        if ($LASTEXITCODE -ne 0) { $probeResult = @{ status = "probe_exception"; ancestry_policy_passed = $null } }
+        if ($probeResult.status -ne "accepted" -or $LASTEXITCODE -ne 0) {
+            $category = $probeResult.status
+            if ($category -eq "policy_rejected" -and $null -ne $probeResult.ancestry_policy_passed) {
+                $facts = ($ancestryRoles | ForEach-Object { $_ + "_policy_passed=" + [string]$probeResult.ancestry_policy_passed[$_] }) -join ","
+                [Console]::Error.WriteLine(("Private staging root failed [{0}/{1}] ancestry[{2}]." -f $phase, $category, $facts))
+            } else {
+                [Console]::Error.WriteLine(("Private staging root failed [{0}/{1}]." -f $phase, $category))
+            }
+            exit 1
+        }
         if (-not $env:GITHUB_ENV) { throw "Workflow environment file is unavailable." }
         [IO.File]::AppendAllText($env:GITHUB_ENV, ($OutputVariable + "=" + $root + "`n"), [Text.UTF8Encoding]::new($false))
         Write-Output "private_staging_root=accepted"

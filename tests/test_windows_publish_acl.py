@@ -459,3 +459,36 @@ def test_windows_identity_diagnostics_are_allowlisted_and_redacted() -> None:
     assert evidence["ownership_description_one"] != evidence["ownership_description_two"]
     assert "SENSITIVE_SENTINEL" not in completed.stdout
     assert "SENSITIVE_SENTINEL" not in completed.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell diagnostics require Windows")
+def test_private_root_diagnostics_are_allowlisted_and_redacted() -> None:
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    assert powershell is not None, "PowerShell is required for private-root diagnostics validation"
+    script = PROJECT / "scripts" / "prepare_windows_private_test_root.ps1"
+    completed = subprocess.run(  # noqa: S603 - fixed repository-owned PowerShell self-test
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(script),
+            "-Action",
+            "DiagnosticSelfTest",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=20,
+    )
+    evidence = json.loads(completed.stdout)
+    assert evidence == {
+        "policy_rejected": True,
+        "ancestry_roles_allowlisted": True,
+        "ancestry_values_boolean": True,
+        "unknown_status_fail_closed": True,
+        "accepted_status_allowlisted": True,
+        "sensitive_sentinel_redacted": True,
+    }
+    assert "SENSITIVE_SENTINEL" not in completed.stdout
+    assert "SENSITIVE_SENTINEL" not in completed.stderr
