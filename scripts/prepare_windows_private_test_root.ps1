@@ -60,9 +60,26 @@ function Get-SafeProbeFailureCategory([string]$Phase, [int]$ExitCode, [string]$O
 function Resolve-SafeProbeResult([int]$ExitCode, [string]$Output) {
     $parsed = ConvertFrom-SafeProbeOutput $Output
     if ($ExitCode -ne 0) {
-        return @{ status = "probe_nonzero_exit"; stage = $parsed.stage; ancestry_policy_passed = $null }
+        $outcome = "output_invalid"
+        if ([string]::IsNullOrWhiteSpace($Output)) {
+            $outcome = "output_missing"
+        } elseif ($parsed.status -in $probeStatuses -and $parsed.stage -is [string] -and $parsed.stage -in $probeStages) {
+            $outcome = "output_valid"
+        }
+        return @{ status = "probe_nonzero_exit"; stage = $parsed.stage; output_outcome = $outcome; ancestry_policy_passed = $null }
     }
     return $parsed
+}
+
+function Format-SafeNonzeroProbeFailure($Result) {
+    $outcomes = @("output_missing", "output_invalid", "output_valid")
+    $stages = $probeStages
+    $outcome = "output_invalid"
+    if ($Result.output_outcome -in $outcomes) { $outcome = $Result.output_outcome }
+    if ($Result.stage -is [string] -and $Result.stage -in $stages) {
+        return ("Private staging root failed [probe-result/probe_nonzero_exit] output[{0}] stage[{1}]." -f $outcome, $Result.stage)
+    }
+    return ("Private staging root failed [probe-result/probe_nonzero_exit] output[{0}]." -f $outcome)
 }
 
 if ($Action -eq "DiagnosticSelfTest") {
@@ -79,6 +96,9 @@ if ($Action -eq "DiagnosticSelfTest") {
     $empty = Get-SafeProbeFailureCategory "probe-result" 0 ""
     $nonzero = Resolve-SafeProbeResult 1 '{"status":"accepted","stage":"capability_check"}'
     $nonzeroMalformed = Resolve-SafeProbeResult 1 '{"status":"accepted","stage":"SENSITIVE_SENTINEL","raw":"SENSITIVE_SENTINEL"}'
+    $nonzeroMissing = Resolve-SafeProbeResult 1 " `t "
+    $nonzeroInvalid = Resolve-SafeProbeResult 1 '{"status":"accepted","stage":"root_open","raw":"SENSITIVE_SENTINEL"}'
+    $nonzeroMessage = Format-SafeNonzeroProbeFailure $nonzero
     $launch = Get-SafeProbeFailureCategory "probe-launch" 1 "C:\\private\\SENSITIVE_SENTINEL"
     $export = Get-SafeProbeFailureCategory "environment-export" 1 "user=SENSITIVE_SENTINEL"
     $evidence = @{
@@ -94,8 +114,12 @@ if ($Action -eq "DiagnosticSelfTest") {
         case_variants_fail_closed = ($statusCaseVariant.status -eq "probe_exception" -and $stageCaseVariant.status -eq "probe_exception")
         empty_output_fails_closed = ($empty -eq "probe_exception")
         nonzero_exit_status_allowlisted = ($nonzero.status -eq "probe_nonzero_exit" -and $nonzero.stage -eq "capability_check" -and $null -eq $nonzero.ancestry_policy_passed)
+        nonzero_output_valid_token = ($nonzero.output_outcome -eq "output_valid")
+        nonzero_output_missing_token = ($nonzeroMissing.output_outcome -eq "output_missing" -and $null -eq $nonzeroMissing.stage)
+        nonzero_output_invalid_token = ($nonzeroInvalid.output_outcome -eq "output_invalid" -and $null -eq $nonzeroInvalid.stage)
         malformed_nonzero_stage_cleared = ($nonzeroMalformed.status -eq "probe_nonzero_exit" -and $null -eq $nonzeroMalformed.stage -and $null -eq $nonzeroMalformed.ancestry_policy_passed)
-        nonzero_output_redacted = (($nonzero | ConvertTo-Json -Compress) -notmatch "SENSITIVE_SENTINEL" -and ($nonzeroMalformed | ConvertTo-Json -Compress) -notmatch "SENSITIVE_SENTINEL")
+        nonzero_output_redacted = (($nonzero | ConvertTo-Json -Compress) -notmatch "SENSITIVE_SENTINEL" -and ($nonzeroMalformed | ConvertTo-Json -Compress) -notmatch "SENSITIVE_SENTINEL" -and ($nonzeroInvalid | ConvertTo-Json -Compress) -notmatch "SENSITIVE_SENTINEL")
+        nonzero_message_uses_fixed_tokens = ($nonzeroMessage -eq "Private staging root failed [probe-result/probe_nonzero_exit] output[output_valid] stage[capability_check]." -and $nonzeroMessage -notmatch "SENSITIVE_SENTINEL")
         launch_error_allowlisted = ($launch -eq "probe_launch_error")
         export_error_allowlisted = ($export -eq "environment_export_error")
     }
@@ -279,7 +303,9 @@ except Exception:
         $probeResult = Resolve-SafeProbeResult $probeExitCode $probeText
         if ($probeResult.status -ne "accepted" -or $probeExitCode -ne 0) {
             $category = Get-SafeProbeFailureCategory "probe-result" $probeExitCode $probeText
-            if ($category -eq "policy_rejected" -and $null -ne $probeResult.ancestry_policy_passed) {
+            if ($category -eq "probe_nonzero_exit") {
+                [Console]::Error.WriteLine((Format-SafeNonzeroProbeFailure $probeResult))
+            } elseif ($category -eq "policy_rejected" -and $null -ne $probeResult.ancestry_policy_passed) {
                 $facts = ($ancestryRoles | ForEach-Object { $_ + "_policy_passed=" + [string]$probeResult.ancestry_policy_passed[$_] }) -join ","
                 [Console]::Error.WriteLine(("Private staging root failed [{0}/{1}] stage[{2}] ancestry[{3}]." -f $phase, $category, $probeResult.stage, $facts))
             } elseif ($null -ne $probeResult.stage) {
