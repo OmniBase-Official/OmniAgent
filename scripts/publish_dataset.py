@@ -55,6 +55,9 @@ _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 MAX_SUMS_BYTES = 16 * 1024 * 1024
 MAX_SUMS_LINE_BYTES = 4 * 1024
 MAX_SUMS_ENTRIES = 100_000
+MAX_SIDECAR_BYTES = 64 * 1024
+MAX_SIDECAR_JSON_NESTING = 16
+MAX_SIDECAR_EXAMPLES = 100_000
 
 
 class PublishError(RuntimeError):
@@ -127,6 +130,124 @@ def _safe_bundle_name(name: str) -> bool:
     )
 
 
+def _preflight_source_names(sources: Sequence[Path]) -> None:
+    """Reject names that collide on portable filesystems before destination I/O."""
+    reserved = {name.casefold() for name in SELF_DESCRIBING}
+    seen: dict[str, str] = {}
+    for source in sources:
+        name = source.name
+        if not _safe_bundle_name(name):
+            raise PublishError(f"not a safe destination filename: {name!r}")
+        # Windows-compatible filesystems may ignore case and trim trailing dots
+        # or spaces. Reject aliases here so a bundle has one meaning everywhere.
+        key = name.rstrip(" .").casefold()
+        if not key:
+            raise PublishError(f"not a safe destination filename: {name!r}")
+        if key in reserved:
+            raise PublishError(f"reserved destination filename: {name!r}")
+        if key in seen:
+            raise PublishError(f"duplicate destination filename: {name!r}")
+        seen[key] = name
+
+
+def _json_nesting_exceeds_limit(text: str, limit: int) -> bool:
+    """Bound JSON container depth before parsing untrusted sidecar text."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > limit:
+                return True
+        elif character in "]}" and depth:
+            depth -= 1
+    return False
+
+
+class _DuplicateJSONKeyError(ValueError):
+    """Raised when a JSON object repeats a member name."""
+
+
+def _json_object_without_duplicate_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    """Build a JSON object only when every member name occurs once."""
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJSONKeyError
+        result[key] = value
+    return result
+
+
+def _read_sidecar_metadata(path: Path, dataset_name: str) -> dict[str, object]:
+    """Read and validate bounded provenance metadata before publishing."""
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_SIDECAR_BYTES + 1)
+    except OSError as exc:
+        raise PublishError(f"could not read provenance sidecar: {path.name}") from exc
+    if len(raw) > MAX_SIDECAR_BYTES:
+        raise PublishError(
+            f"provenance sidecar exceeds the {MAX_SIDECAR_BYTES}-byte limit"
+        )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PublishError("provenance sidecar is not valid UTF-8") from exc
+    if _json_nesting_exceeds_limit(text, MAX_SIDECAR_JSON_NESTING):
+        raise PublishError("provenance sidecar JSON nesting is too deep")
+    try:
+        value = json.loads(text, object_pairs_hook=_json_object_without_duplicate_keys)
+    except _DuplicateJSONKeyError as exc:
+        raise PublishError("provenance sidecar contains duplicate JSON object keys") from exc
+    except (ValueError, RecursionError, MemoryError) as exc:
+        raise PublishError("provenance sidecar is not valid JSON") from exc
+    required = {
+        "dataset",
+        "examples",
+        "system_prompt_sha256",
+        "live_prompt_sha256",
+        "matches_live_prompt",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise PublishError("invalid provenance sidecar schema")
+    sidecar_dataset = value["dataset"]
+    examples = value["examples"]
+    system_hash = value["system_prompt_sha256"]
+    live_hash = value["live_prompt_sha256"]
+    matches_live = value["matches_live_prompt"]
+    if sidecar_dataset != dataset_name or not isinstance(sidecar_dataset, str):
+        raise PublishError("invalid provenance sidecar schema")
+    if (
+        isinstance(examples, bool)
+        or not isinstance(examples, int)
+        or not 1 <= examples <= MAX_SIDECAR_EXAMPLES
+    ):
+        raise PublishError("invalid provenance sidecar schema")
+    if (
+        not isinstance(system_hash, str)
+        or not _SHA256_PATTERN.fullmatch(system_hash)
+        or not isinstance(live_hash, str)
+        or not _SHA256_PATTERN.fullmatch(live_hash)
+    ):
+        raise PublishError("invalid provenance sidecar schema")
+    if not isinstance(matches_live, bool) or matches_live != (system_hash == live_hash):
+        raise PublishError("invalid provenance sidecar schema")
+    return {"examples": examples, "system_prompt_sha256": system_hash}
+
+
 def digest(path: Path) -> str:
     """The sha256 of a file, read in chunks so a large log does not load whole."""
     hasher = hashlib.sha256()
@@ -179,6 +300,9 @@ def publish(  # noqa: PLR0913 - each argument is a separate fact the manifest ha
     if missing:
         raise PublishError(f"not a file: {', '.join(missing)}")
 
+    # Validate all input metadata before creating or changing the destination.
+    _preflight_source_names(sources)
+    recorded = _read_sidecar_metadata(sidecar, dataset.name)
     dest_root = _destination_root(dest, create=True)
     output_names = {source.name for source in sources} | {SUMS_NAME, MANIFEST_NAME}
     for name in output_names:
@@ -205,11 +329,10 @@ def publish(  # noqa: PLR0913 - each argument is a separate fact the manifest ha
         encoding="utf-8",
     )
 
-    recorded = json.loads(sidecar.read_text(encoding="utf-8"))
     manifest: dict[str, object] = {
         "dataset": dataset.name,
-        "examples": recorded.get("examples"),
-        "system_prompt_sha256": recorded.get("system_prompt_sha256"),
+        "examples": recorded["examples"],
+        "system_prompt_sha256": recorded["system_prompt_sha256"],
         "teacher_model": teacher,
         "workspace_rule": workspace_rule,
         "source_commit": source_commit if source_commit is not None else _head_commit(),

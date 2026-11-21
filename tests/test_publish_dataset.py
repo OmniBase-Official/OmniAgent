@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import publish_dataset
 from publish_dataset import PublishError, publish, verify
 
-from dataset_provenance import write_sidecar
+from dataset_provenance import sidecar_path, write_sidecar
 
 
 def _create_junction(link: Path, target: Path) -> None:
@@ -89,6 +89,102 @@ def test_a_dataset_without_provenance_is_refused(tmp_path: Path) -> None:
         publish(orphan, tmp_path / "drive", teacher="qwen2.5-coder:7b")
 
 
+def _invalid_sidecar_payload(  # noqa: PLR0912 - one branch per malformed sidecar case
+    dataset: Path, kind: str
+) -> bytes:
+    """Build one malformed sidecar case from the valid fixture metadata."""
+    sidecar = sidecar_path(dataset)
+    if kind == "too_large":
+        return b" " * (publish_dataset.MAX_SIDECAR_BYTES + 1)
+    if kind == "invalid_utf8":
+        return bytes([0xFF])
+    if kind == "deep_nesting":
+        depth = publish_dataset.MAX_SIDECAR_JSON_NESTING + 1
+        return b"[" * depth + b"0" + b"]" * depth
+    if kind == "malformed_json":
+        return b"{"
+    duplicate_keys = {
+        "duplicate_dataset_key": "dataset",
+        "duplicate_hash_key": "system_prompt_sha256",
+        "duplicate_match_flag_key": "matches_live_prompt",
+    }
+    if kind in duplicate_keys:
+        value = json.loads(sidecar.read_text(encoding="utf-8"))
+        duplicate_key = duplicate_keys[kind]
+        pairs: list[str] = []
+        for key, item in value.items():
+            encoded_key = json.dumps(key)
+            encoded_item = json.dumps(item)
+            pairs.append(f"{encoded_key}:{encoded_item}")
+            if key == duplicate_key:
+                pairs.append(f"{encoded_key}:{encoded_item}")
+        return ("{" + ",".join(pairs) + "}").encode("utf-8")
+    value = json.loads(sidecar.read_text(encoding="utf-8"))
+    if kind == "wrong_top_level":
+        return json.dumps([]).encode("utf-8")
+    if kind == "missing_field":
+        value.pop("dataset")
+    elif kind == "wrong_dataset":
+        value["dataset"] = "other.jsonl"
+    elif kind == "wrong_examples_type":
+        value["examples"] = True
+    elif kind == "invalid_hash":
+        value["system_prompt_sha256"] = "not-a-sha256"
+    elif kind == "inconsistent_match_flag":
+        value["matches_live_prompt"] = not value["matches_live_prompt"]
+    elif kind == "unexpected_field":
+        value["unexpected"] = "not supported"
+    else:
+        raise AssertionError(f"unknown sidecar case: {kind}")
+    return json.dumps(value).encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    ("kind", "message"),
+    [
+        ("too_large", "exceeds"),
+        ("invalid_utf8", "not valid UTF-8"),
+        ("deep_nesting", "nesting is too deep"),
+        ("malformed_json", "not valid JSON"),
+        ("wrong_top_level", "invalid provenance sidecar schema"),
+        ("missing_field", "invalid provenance sidecar schema"),
+        ("wrong_dataset", "invalid provenance sidecar schema"),
+        ("wrong_examples_type", "invalid provenance sidecar schema"),
+        ("invalid_hash", "invalid provenance sidecar schema"),
+        ("inconsistent_match_flag", "invalid provenance sidecar schema"),
+        ("unexpected_field", "invalid provenance sidecar schema"),
+        ("duplicate_dataset_key", "duplicate JSON object keys"),
+        ("duplicate_hash_key", "duplicate JSON object keys"),
+        ("duplicate_match_flag_key", "duplicate JSON object keys"),
+    ],
+)
+@pytest.mark.parametrize("existing_destination", [False, True])
+def test_invalid_sidecar_is_rejected_before_destination_mutation(
+    dataset: Path,
+    tmp_path: Path,
+    kind: str,
+    message: str,
+    existing_destination: bool,
+) -> None:
+    sidecar_path(dataset).write_bytes(_invalid_sidecar_payload(dataset, kind))
+    dest = tmp_path / "drive"
+    before: dict[str, bytes] = {}
+    if existing_destination:
+        dest.mkdir()
+        sentinel = dest / "keep.txt"
+        sentinel.write_bytes(b"keep")
+        before = {path.name: path.read_bytes() for path in dest.iterdir()}
+
+    with pytest.raises(PublishError, match=message):
+        publish(dataset, dest, teacher="t")
+
+    if existing_destination:
+        after = {path.name: path.read_bytes() for path in dest.iterdir()}
+        assert after == before
+    else:
+        assert not dest.exists()
+
+
 def test_extra_files_travel_with_it(dataset: Path, tmp_path: Path) -> None:
     """The raw log is the source of truth and has to arrive too."""
     raw = dataset.parent / "collect.jsonl"
@@ -98,6 +194,98 @@ def test_extra_files_travel_with_it(dataset: Path, tmp_path: Path) -> None:
     publish(dataset, dest, teacher="t", extras=(raw,))
 
     assert (dest / "collect.jsonl").is_file()
+
+
+def _assert_collision_does_not_touch_destination(
+    dataset: Path, dest: Path, extras: tuple[Path, ...], match: str
+) -> None:
+    """A name collision must fail before destination creation or writes."""
+    with pytest.raises(PublishError, match=match):
+        publish(dataset, dest, teacher="t", extras=extras)
+    assert not dest.exists()
+
+
+def test_extra_colliding_with_dataset_is_rejected_before_destination_creation(
+    dataset: Path, tmp_path: Path
+) -> None:
+    extra = tmp_path / "other" / dataset.name
+    extra.parent.mkdir()
+    extra.write_text("not the dataset", encoding="utf-8")
+
+    _assert_collision_does_not_touch_destination(
+        dataset, tmp_path / "drive", (extra,), "duplicate destination filename"
+    )
+
+
+def test_extra_colliding_with_sidecar_is_rejected_before_destination_creation(
+    dataset: Path, tmp_path: Path
+) -> None:
+    sidecar_name = sidecar_path(dataset).name
+    extra = tmp_path / "other" / sidecar_name
+    extra.parent.mkdir()
+    extra.write_text("not the sidecar", encoding="utf-8")
+
+    _assert_collision_does_not_touch_destination(
+        dataset, tmp_path / "drive", (extra,), "duplicate destination filename"
+    )
+
+
+def test_duplicate_extras_are_rejected_before_destination_creation(
+    dataset: Path, tmp_path: Path
+) -> None:
+    left = tmp_path / "left" / "same.log"
+    right = tmp_path / "right" / "same.log"
+    left.parent.mkdir()
+    right.parent.mkdir()
+    left.write_text("left", encoding="utf-8")
+    right.write_text("right", encoding="utf-8")
+
+    _assert_collision_does_not_touch_destination(
+        dataset, tmp_path / "drive", (left, right), "duplicate destination filename"
+    )
+
+
+@pytest.mark.parametrize("name", ["MANIFEST.json", "SHA256SUMS"])
+def test_extras_with_reserved_bundle_names_are_rejected_before_destination_creation(
+    dataset: Path, tmp_path: Path, name: str
+) -> None:
+    extra = tmp_path / "other" / name
+    extra.parent.mkdir()
+    extra.write_text("reserved", encoding="utf-8")
+
+    _assert_collision_does_not_touch_destination(
+        dataset, tmp_path / "drive", (extra,), "reserved destination filename"
+    )
+
+
+def test_case_insensitive_dataset_collision_is_rejected(
+    dataset: Path, tmp_path: Path
+) -> None:
+    extra = tmp_path / "other" / dataset.name.upper()
+    extra.parent.mkdir()
+    extra.write_text("case alias", encoding="utf-8")
+
+    _assert_collision_does_not_touch_destination(
+        dataset, tmp_path / "drive", (extra,), "duplicate destination filename"
+    )
+
+
+def test_collision_leaves_existing_destination_unchanged(
+    dataset: Path, tmp_path: Path
+) -> None:
+    extra = tmp_path / "other" / dataset.name
+    extra.parent.mkdir()
+    extra.write_text("not the dataset", encoding="utf-8")
+    dest = tmp_path / "drive"
+    dest.mkdir()
+    sentinel = dest / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(PublishError, match="duplicate destination filename"):
+        publish(dataset, dest, teacher="t", extras=(extra,))
+
+    assert list(dest.iterdir()) == [sentinel]
+    assert sentinel.read_text(encoding="utf-8") == "keep"
 
 
 def test_the_manifest_records_what_the_sidecar_cannot(dataset: Path, tmp_path: Path) -> None:
