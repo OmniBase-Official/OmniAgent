@@ -113,7 +113,9 @@ Thai to me, English in the repository.
 Not a brief — you do not execute briefs. This is the decision I need prepared.
 
 ```
-Your next document of record is ADR-0003: the model question, which is
+Your next document of record is ADR-0004 (first numbered ADR-0003; renumbered
+2026-11-21 because ADR-0003 is now the two-mains overlap, brief 18. The
+document itself still exists on no ref): the model question, which is
 readiness block D3 and the only block with no owner and no plan.
 
 The problem, measured: every figure this project owns was measured on
