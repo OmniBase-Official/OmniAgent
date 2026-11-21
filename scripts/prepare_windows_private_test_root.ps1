@@ -9,7 +9,7 @@ param(
 $ErrorActionPreference = "Stop"
 $phase = "preflight"
 
-$probeStatuses = @("accepted", "policy_rejected", "module_missing", "probe_os_error", "probe_exception")
+$probeStatuses = @("accepted", "policy_rejected", "securefs_rejected", "module_missing", "probe_os_error", "probe_exception")
 $ancestryRoles = @("volume", "program_data", "base", "root")
 
 function ConvertFrom-SafeProbeOutput([string]$Output) {
@@ -49,6 +49,7 @@ if ($Action -eq "DiagnosticSelfTest") {
     $valid = ConvertFrom-SafeProbeOutput '{"status":"policy_rejected","ancestry":{"volume":true,"program_data":true,"base":false,"root":true},"secret":"SENSITIVE_SENTINEL"}'
     $unknown = ConvertFrom-SafeProbeOutput '{"status":"secret-path-SENSITIVE_SENTINEL"}'
     $accepted = ConvertFrom-SafeProbeOutput '{"status":"accepted","raw":"SENSITIVE_SENTINEL"}'
+    $securefsRejected = ConvertFrom-SafeProbeOutput '{"status":"securefs_rejected"}'
     $empty = Get-SafeProbeFailureCategory "probe-result" 0 ""
     $nonzero = Get-SafeProbeFailureCategory "probe-result" 1 '{"status":"accepted"}'
     $launch = Get-SafeProbeFailureCategory "probe-launch" 1 "C:\\private\\SENSITIVE_SENTINEL"
@@ -59,6 +60,7 @@ if ($Action -eq "DiagnosticSelfTest") {
         ancestry_values_boolean = @($valid.ancestry_policy_passed.Values | Where-Object { $_ -isnot [bool] }).Count -eq 0
         unknown_status_fail_closed = ($unknown.status -eq "probe_exception")
         accepted_status_allowlisted = ($accepted.status -eq "accepted")
+        securefs_rejected_allowlisted = ($securefsRejected.status -eq "securefs_rejected")
         empty_output_fails_closed = ($empty -eq "probe_exception")
         nonzero_exit_fails_closed = ($nonzero -eq "probe_exception")
         launch_error_allowlisted = ($launch -eq "probe_launch_error")
@@ -193,7 +195,7 @@ try:
                 ancestry["volume"] = ancestry["volume"] and persistent
                 result = {"status": "policy_rejected", "ancestry": ancestry}
         except securefs.SecureFSError:
-            result = {"status": "probe_exception"}
+            result = {"status": "securefs_rejected"}
         except OSError:
             result = {"status": "probe_os_error"}
         except Exception:

@@ -488,6 +488,7 @@ def test_private_root_diagnostics_are_allowlisted_and_redacted() -> None:
         "ancestry_values_boolean": True,
         "unknown_status_fail_closed": True,
         "accepted_status_allowlisted": True,
+        "securefs_rejected_allowlisted": True,
         "empty_output_fails_closed": True,
         "nonzero_exit_fails_closed": True,
         "launch_error_allowlisted": True,
