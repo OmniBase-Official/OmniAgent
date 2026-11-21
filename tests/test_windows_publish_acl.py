@@ -24,6 +24,17 @@ import publisher_root  # noqa: E402
 from dataset_provenance import write_sidecar  # noqa: E402
 from publish_dataset import PublishError  # noqa: E402
 
+
+def test_private_root_probe_passes_path_to_secure_root() -> None:
+    script_path = PROJECT / "scripts" / "prepare_windows_private_test_root.ps1"
+    script = script_path.read_text(encoding="utf-8")
+
+    assert "from pathlib import Path" in script
+    assert re.search(
+        r"SecureRoot\s*\(\s*Path\(os\.environ\[\"OUTPUT_VARIABLE\"\]\)",
+        script,
+    )
+
 _CONFIG_ENV = "OMNIAGENT_WINDOWS_ACL_CONFIG"
 _ADMINISTRATORS_SID = "S-1-5-32-544"
 _PRIVILEGED_GROUP_SIDS = {

@@ -371,6 +371,7 @@ import errno
 import json
 import os
 import sys
+from pathlib import Path
 
 result = {"status": "probe_exception"}
 root = None
@@ -380,7 +381,7 @@ try:
     import securefs as securefs_module
     stage = "root_open"
     root = securefs_module.SecureRoot(
-        os.environ["OUTPUT_VARIABLE"], writable=True,
+        Path(os.environ["OUTPUT_VARIABLE"]), writable=True,
         _allow_safe_inherited_ancestors=True,
     )
     stage = "capability_check"
