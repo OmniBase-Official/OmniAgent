@@ -335,13 +335,15 @@ hand what already exists and tests green on G, which is the most expensive of
 the three and the one most likely to be done twice.
 
 **A condition on A, added after the branch measurement below.** The four newest
-G-line branches make `sandbox.py` import a 1,319-line `ctypes` module
-(`securefs.py`, §6). That is the shape the owner parked twice in
+G-line branches make `sandbox.py` import `securefs.py`, a `ctypes` module that
+is **954 lines on the oldest of them and 1,319 on the three newest** (§6).
+Neither pinned commit contains it. That is the shape the owner parked twice in
 `secure_search.py`, and adopting G's line is also adopting the direction those
 branches are travelling. **A is my recommendation for `3c76fd2` against
 `5005039` — the two pinned commits — and it does not endorse what is queued
-behind G.** If the owner takes A, criterion 5 of the threat model should be
-answered before those branches merge, not after.
+behind G.** If the owner takes A, criteria 1 to 5 of the threat model should be
+answered before those branches merge, not after; by the criteria's own wording
+they already apply, since they cover "`secure_search.py` **or a successor**".
 
 ## 6. The `origin/codex/*` branches — where they sit and where they meet G
 
@@ -420,24 +422,61 @@ and nothing on O.
 
 ### What that rewrite brought with it — existence only, not a review
 
-The four branches that rewrote `list_dir` also add two modules that
-`sandbox.py` now imports: **`securefs.py`, 1,319 lines, 160 mentions of
-`ctypes`**, and **`publisher_root.py`, 469 lines, 55 mentions** (MEASURED
-2026-11-21: line counts and grep counts only). `securefs.py` first appears on
-`scale-security-hardening-20261113`.
+The four branches that rewrote `list_dir` also add modules that `sandbox.py`
+imports — `sandbox.py:58` on the newest reads
+`from securefs import DirectoryLimitError, SecureRoot`. They do **not** all
+carry the same thing, and the difference is the point (MEASURED 2026-11-21,
+line counts and `grep -c ctypes` only; the correction below is the PM's catch,
+re-derived by me before it was written in):
+
+| ref | `securefs.py` | `publisher_root.py` |
+| --- | --- | --- |
+| **O** `3c76fd2` | **absent** | **absent** |
+| **G** `5005039` | **absent** | **absent** |
+| `posix-json-ci-fixes-20261112` | absent | absent |
+| `scale-security-hardening-20261113` | **954 lines / 107 `ctypes`** | absent |
+| `security-scans-validation-20261120` | **1,319 / 160** | **469 / 55** |
+| `security-runner-fixtures-20261120` | **1,319 / 160** | **469 / 55** |
+| `windows-private-root-validation-20261121` | **1,319 / 160** | **469 / 55** |
+
+So it is **three branches at 1,319 + 469 and one at 954 with no
+`publisher_root.py`** — not four alike, as an earlier draft of this section
+said. **`securefs.py` grew from 954 to 1,319 lines in the seven days between
+2026-11-13 and 2026-11-20, and `publisher_root.py` appeared in the same
+window. That growth is the visible part of the stacking** — the module is not a
+finished thing being carried along, it is being built while the branches pile
+up.
+
+**Neither pinned commit has any of it.** `securefs.py` and `publisher_root.py`
+are absent from **G (`5005039`) itself** and from **O (`3c76fd2`)**. They exist
+only on later Codex branches stacked on G. That is precisely what keeps
+recommendation A a statement about the two pinned commits and not about the
+queue behind them.
 
 **I did not read either module** — the brief limits me to guard text and paths
-on these branches, and I have kept to it. But the shape has to be named,
-because a standing owner ruling is about exactly this shape: on 2026-11-02 and
-again on 2026-11-04 the owner parked `secure_search.py` — 1,016, 1,199 and
-1,069-line variants of raw `ctypes` handle work — and said reopening it needs a
-new owner decision plus criteria 1 to 5 answered in writing. **A 1,319-line
-`ctypes` filesystem module that `sandbox.py` imports is the same shape, under a
-different name, on the line this ADR recommends adopting.** Whether it *is* the
-parked work resumed, or something the owner would approve on its own merits, is
-**OWNER'S QUESTION** and criterion 5's question in particular: if a module of
-that size is the right shape for this project, then "hand-rolled and small"
-stops being true and should stop being written down.
+on these branches, and I have kept to it. The PM has not read them either; both
+of us have counted lines and `ctypes` mentions and nothing more. But the shape
+has to be named, because a standing owner ruling is about exactly this shape:
+on 2026-11-02 and again on 2026-11-04 the owner parked `secure_search.py` —
+1,016, 1,199 and 1,069-line variants of raw `ctypes` handle work — **parked,
+not continued and not deleted**, reopening it needing a new owner decision plus
+criteria 1 to 5 answered in writing
+([threat model](../pm/threat-model-2026-11-02-the-search-boundary.md), the
+criteria at lines 105–128 and the ruling at 188–192).
+
+**The criteria do not need an argument about resemblance to apply.** Their own
+first sentence is: *"Any change to the search boundary — `secure_search.py`
+**or a successor** — is merged only when all five are answered in writing, with
+evidence."* A module that `sandbox.py` imports in order to walk and admit
+directory entries **is** a change to the search boundary, whatever its
+provenance. And criterion 5 names the size directly: *"If a 1,200-line ctypes
+module is the right shape for this project, then 'hand-rolled and small' stops
+being true and should stop being written down."* One of these branches is
+already past that number and one is approaching it.
+
+Whether `securefs.py` *is* the parked work resumed, or a new thing the owner
+would approve on its own merits, is **OWNER'S QUESTION.** Neither the PM nor I
+will answer it from a line count.
 
 ## 7. What this brief could not measure
 
