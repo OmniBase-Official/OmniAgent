@@ -9,11 +9,14 @@ from gitleaks_report import (
     MAX_CAPTURE,
     MAX_REPORT,
     ScanError,
+    StageError,
     capture,
+    contract_clean_scan,
     docker_cp,
     fail_stage,
     parse_report,
     render,
+    report_error,
     safe_path,
     scanner_status_consistent,
     summary_count,
@@ -175,7 +178,9 @@ def test_stage_diagnostics_emit_only_allowlisted_ids(tmp_path: Path) -> None:
     canary = "ghp_" + hashlib.sha256(b"omniagent-gitleaks-contract").hexdigest()[:36]
     private_path = str(tmp_path / "private-report-path")
     stage_ids = (
-        "contract_clean_scan",
+        "contract_clean_repo_setup",
+        "contract_clean_scan_execution",
+        "contract_clean_assertions",
         "contract_canary_scan",
         "contract_mutant_scan",
         "contract_cli_validation",
@@ -217,6 +222,50 @@ def test_stage_diagnostics_emit_only_allowlisted_ids(tmp_path: Path) -> None:
         raise AssertionError("unallowlisted stage diagnostic was not generic")
     if invalid_id.encode() in diagnostic:
         raise AssertionError("unallowlisted stage identifier leaked")
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected_stage"),
+    [
+        ("setup", "contract_clean_repo_setup"),
+        ("scan", "contract_clean_scan_execution"),
+        ("assertions", "contract_clean_assertions"),
+    ],
+)
+def test_clean_contract_reports_only_isolated_phase_id(
+    phase: str,
+    expected_stage: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import gitleaks_report as module
+
+    canary = "ghp_" + hashlib.sha256(b"omniagent-stage-test-canary").hexdigest()[:36]
+    injected = f"{tmp_path / 'private-path'}:{canary}"
+
+    def make_repo_for_phase(*_: object) -> Path:
+        if phase == "setup":
+            raise ScanError(injected)
+        return tmp_path
+
+    def scan_for_phase(*_: object) -> tuple[int, list[tuple[str, str, str, int]], bytes, bytes]:
+        if phase == "scan":
+            raise ScanError(injected)
+        return 2, [], b"", b""
+
+    monkeypatch.setattr(module, "make_repo", make_repo_for_phase)
+    monkeypatch.setattr(module, "scan", scan_for_phase)
+    with pytest.raises(StageError) as caught:
+        contract_clean_scan(tmp_path, tmp_path / "template")
+
+    expect_equal(caught.value.stage, expected_stage)
+    report_error(caught.value)
+    captured = capsys.readouterr()
+    expect_equal(captured.out, "")
+    expect_equal(captured.err, f"security scan failed stage={expected_stage}\n")
+    expect_equal(canary in captured.err, False)
+    expect_equal(str(tmp_path / "private-path") in captured.err, False)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="RLIMIT_FSIZE fixture requires POSIX")

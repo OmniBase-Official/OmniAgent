@@ -41,14 +41,18 @@ CLI_SCAN_ARGC = 4
 CLI_CONTRACT_ARGC = 4
 CLI_VALIDATE_ARGC = 3
 StageId = Literal[
-    "contract_clean_scan",
+    "contract_clean_repo_setup",
+    "contract_clean_scan_execution",
+    "contract_clean_assertions",
     "contract_canary_scan",
     "contract_mutant_scan",
     "contract_cli_validation",
 ]
 ALLOWED_STAGE_IDS = frozenset(
     {
-        "contract_clean_scan",
+        "contract_clean_repo_setup",
+        "contract_clean_scan_execution",
+        "contract_clean_assertions",
         "contract_canary_scan",
         "contract_mutant_scan",
         "contract_cli_validation",
@@ -354,24 +358,46 @@ def make_repo(root: Path, name: str, content: bytes) -> Path:
     return repo
 
 
+def assert_clean_scan(
+    clean: Path,
+    status: int,
+    rows: list[FindingRow],
+    output: bytes,
+    raw: bytes,
+) -> None:
+    if (
+        status != CLEAN_STATUS
+        or rows
+        or parse_report(raw)
+        or summary_count(output) != count_commits(clean)
+        or b"finding" in output.lower()
+        or b"secret" in output.lower()
+    ):
+        fail()
+
+
+def contract_clean_scan(root: Path, template: Path) -> None:
+    try:
+        clean = make_repo(root, "clean", b"ordinary fixture text\n")
+    except Exception:  # noqa: BLE001 - map every phase failure to a fixed, non-sensitive stage ID.
+        fail_stage("contract_clean_repo_setup")
+
+    try:
+        status, rows, output, raw = scan(clean, template)
+    except Exception:  # noqa: BLE001 - map every phase failure to a fixed, non-sensitive stage ID.
+        fail_stage("contract_clean_scan_execution")
+
+    try:
+        assert_clean_scan(clean, status, rows, output, raw)
+    except Exception:  # noqa: BLE001 - map every phase failure to a fixed, non-sensitive stage ID.
+        fail_stage("contract_clean_assertions")
+
+
 def contract(template: Path, mutant_template: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="omni-contract-") as td:
         root = Path(td)
         root.chmod(0o700)
-        try:
-            clean = make_repo(root, "clean", b"ordinary fixture text\n")
-            status, rows, output, raw = scan(clean, template)
-            if (
-                status != CLEAN_STATUS
-                or rows
-                or parse_report(raw)
-                or summary_count(output) != count_commits(clean)
-                or b"finding" in output.lower()
-                or b"secret" in output.lower()
-            ):
-                fail()
-        except ScanError:
-            fail_stage("contract_clean_scan")
+        contract_clean_scan(root, template)
 
         canary = ("ghp_" + hashlib.sha256(b"omniagent-gitleaks-contract").hexdigest()[:36]).encode(
             "ascii"
