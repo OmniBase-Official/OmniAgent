@@ -163,3 +163,7 @@ The message `docs/pm/codex-stop-and-snapshot-prompt.md` has still not been paste
     small change, the `export_dataset.read_records` limits. Brief: `docs/pm/brief-28-se-hand-apply-two-fixes-on-the-canonical-line.md`.
     Still open from brief 27: deleting the three brief 16 refs, deleting `ba3598f` after the fix lands, and the
     sec-search chair.
+
+17. **Delete the three brief 16 snapshot refs** (brief 27, decision 2): `scratch_brief16-proposed-tree-20261109` (`1978f52`),
+    its `-index` twin (`3350a5b`, same tree) and `_24_...brief16-operational-telemetry` (`8e72843`). Done by the PM; none was on a
+    remote; objects survive until `git gc`, SHAs are in the local manifest. 14 snapshot refs remain.
