@@ -205,3 +205,9 @@ The message `docs/pm/codex-stop-and-snapshot-prompt.md` has still not been paste
     - **Not decided here:** whether to salvage the Windows ACL / private-root work (not the boundary module) from those branches. That was
       memo option B's second half; it is still open and is not blocked by the park.
     - **Unreviewed, not condemned:** nobody has said the code is wrong. The code review (1,319 lines of `ctypes`) is the SE's, only if the question reopens.
+
+23. **Port brief 12's run-record layer onto the canonical line** (owner, 2026-11-23: "Port record layer"; AIE memo option A,
+    `aiml/holdout-instrument-memo-20261122` at `dc7967f`). Scope as the memo states it: `question_record`, `_tree_clean`,
+    `_append_question_record`, `RUNS_PATH` and `report()` plus `tests/test_holdout_record.py`, onto the canonical line; the clean-tree test
+    mutation-checked; the canonical bank declared a **new baseline with its own stated denominator**. No fixture, no new public data files, the
+    old bank is not restored, no figure from before 2026-11-22 is called comparable. Carried by the AI/ML chair; the PM verifies before anything merges.
