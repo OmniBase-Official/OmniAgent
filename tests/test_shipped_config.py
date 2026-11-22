@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from agent import DEFAULT_MODEL
 from config import DEFAULT_CONFIG_NAME, Settings, resolve
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -91,3 +92,15 @@ def test_the_demo_runs_the_step_budget_the_evaluations_measure() -> None:
     settings, _ = _resolve("demo")
 
     assert settings.max_steps == measured
+
+
+def test_shipped_default_model_matches_the_code_default() -> None:
+    with CONFIG_PATH.open("rb") as handle:
+        data: dict[str, object] = tomllib.load(handle)
+    defaults = data.get("defaults", {})
+    assert isinstance(defaults, dict)
+    assert defaults.get("model") == DEFAULT_MODEL
+
+    settings, sources = _resolve(None)
+    assert settings.model == DEFAULT_MODEL
+    assert sources["model"] == "file:defaults"

@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 
+import main
+from agent import DEFAULT_MODEL, AgentConfig, build_openai_client
 from config import (
     DEFAULT_CONFIG_NAME,
     ConfigError,
@@ -402,3 +404,87 @@ def test_the_rendered_table_names_each_source(project: Path) -> None:
     assert "profile:demo" in rendered
     assert "file:defaults" in rendered
     assert "built-in" in rendered
+
+
+# --------------------------------------------------------------------------- #
+# the three defaults (brief 21, ported from brief 16)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_default_model_is_the_code_default_and_says_it_is_built_in(tmp_path: Path) -> None:
+    settings, sources = settings_at(tmp_path)
+
+    assert settings.model == DEFAULT_MODEL
+    assert sources["model"] == "built-in"
+
+
+def test_a_named_model_reports_the_layer_that_named_it(project: Path) -> None:
+    """A recorder must be able to ask "named, or defaulted?" and get a true answer."""
+    _, from_cli = settings_at(project, cli={"model": "x:1b"})
+    _, from_env = settings_at(project, env={"OMNIAGENT_MODEL": "y:1b"})
+    _, from_file = settings_at(project)
+
+    assert from_cli["model"] == "command line"
+    assert from_env["model"] == "environment"
+    assert from_file["model"] == "file:defaults"
+
+
+def test_model_help_describes_the_code_default(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main.parse_args(["--help"])
+
+    assert caught.value.code == 0
+    assert f"(default: {DEFAULT_MODEL})" in capsys.readouterr().out
+
+
+def test_retry_layers_are_visible_and_independent(project: Path) -> None:
+    settings, sources = settings_at(project, cli={"max_retries": 7})
+    agent_config = settings.agent_config()
+
+    assert settings.max_retries == 7
+    assert sources["max_retries"] == "command line"
+    assert settings.client_max_retries == 0
+    assert sources["client_max_retries"] == "built-in"
+    assert agent_config.max_retries == 7
+    assert agent_config.client_max_retries == 0
+
+
+def test_the_http_retry_layer_is_fixed_at_zero(project: Path) -> None:
+    with pytest.raises(ConfigError, match="client_max_retries"):
+        settings_at(project, cli={"client_max_retries": 1})
+
+
+def test_the_sdk_client_is_built_with_the_http_retry_layer_off() -> None:
+    client = build_openai_client(AgentConfig(max_retries=5))
+
+    assert client.max_retries == AgentConfig().client_max_retries == 0
+
+
+def test_agent_config_is_quiet_by_default_on_its_own() -> None:
+    """Read straight off ``AgentConfig``, not through ``Settings.agent_config()``,
+    which copies ``Settings.verbose`` over it and so hides this default."""
+    assert AgentConfig().verbose is False
+
+
+def test_settings_are_quiet_by_default(tmp_path: Path) -> None:
+    settings, sources = settings_at(tmp_path)
+
+    assert settings.verbose is False
+    assert sources["verbose"] == "built-in"
+    assert settings.agent_config().verbose is False
+
+
+def test_verbose_cli_flags_override_the_default() -> None:
+    assert main.cli_settings(main.parse_args([])).get("verbose") is None
+    assert main.cli_settings(main.parse_args(["--verbose"]))["verbose"] is True
+    assert main.cli_settings(main.parse_args(["--quiet"]))["verbose"] is False
+
+
+def test_verbose_and_quiet_cannot_be_used_together(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main.parse_args(["--verbose", "--quiet"])
+
+    assert caught.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err

@@ -325,6 +325,7 @@ python main.py --model qwen2.5-coder:7b --quiet
 | `--max-steps` | `8` | Maximum ReAct iterations per question. |
 | `--temperature` | `0.1` | Sampling temperature. Low values keep the format stable. |
 | `--quiet` | off | Hide the Thought/Action/Observation trace. |
+| `--verbose` | off | Show the Thought/Action/Observation trace; cannot be combined with `--quiet`. |
 | `--ask` | — | Answer one question and exit. |
 | `--tool` | — | Run one allow-listed deterministic tool without an LLM request. |
 | `--tool-input` | empty | Raw input for `--tool`; JSON object input is accepted for multi-field tools. |
@@ -712,7 +713,7 @@ workflow was rehearsed locally in a throwaway virtualenv holding only
 
 | Symptom | Fix |
 |---|---|
-| `Cannot reach a local model server at http://127.0.0.1:11434/v1` | Ollama is not running. Start it with `ollama serve`. |
+| `Cannot reach the local model server (endpoint: loopback)` | Ollama is not running. Start it with `ollama serve`. |
 | `Model '...' is not installed on this Ollama server` | `ollama pull <model>`, or pass `--model` with one from `ollama list`. |
 | The agent answers maths without calling `calculate` | Lower `--temperature`, or use a larger instruction-tuned model. |
 | Replies keep breaking the format | The model is too small or is a reasoning model. Try `qwen2.5:7b` or `llama3.1:8b`. |
