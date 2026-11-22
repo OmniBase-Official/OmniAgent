@@ -140,3 +140,20 @@ UNIQUE-WORK trees' contents onto named pushed branches first. **Do not run (a),
 **Removing or moving a worktree whose commits are on no remote.** The cost of that
 mistake is unrecoverable; the cost of leaving a SAFE tree for a day is nothing.
 Count unpushed commits before you say SAFE, and when unsure say UNKNOWN.
+
+## PM verification, 2026-11-22 (MEASURED, re-run by the PM)
+
+`origin/integration/canonical-20261122` at `388fa53`, checked out detached under
+`.scratch` (removed afterwards; the commit is on `origin`).
+
+| Claim (SAE, REPORTED) | PM result |
+| --- | --- |
+| Branches from G `5005039`, five commits | **Confirmed.** `git log organization/main..` lists 8 commits: the 3 SE originals plus the SAE's 5 |
+| Non-doc changes are only briefs 20, 21, 22 | **Confirmed.** 11 non-`docs/` files: README, agent, config, main, omniagent.toml and 6 tests |
+| Gates: 1,018 passed, 2 skipped | **Confirmed**, prediction written first. ruff clean, mypy 51 files clean, pytest **1,018 passed, 2 skipped** (40.8 s), `agent.__file__` inside the tree |
+| Unit 4 is a file carry, not a merge of O-line refs | Not re-run; consistent with the diff (55 files, all docs plus the 11 above) |
+| [MEDIUM] wheel test skips on a machine that can build wheels | **Reproduced, with a corrected cause.** Under pytest `find_spec("wheel")` is `None` (no top-level `wheel` package in the venv; `pip list` shows only setuptools 78.1.0). Plain `python` finds `setuptools/_vendor/wheel` only after `setuptools` has been imported, so the SAE's `import wheel` check succeeds for a different reason. With the guard deleted the test **passes in 22.8 s** on setuptools alone. So the guard is stricter than the build needs. **Narrower than reported:** `.github/workflows/ci.yml:39,68` install `wheel` explicitly, so CI most likely runs the test; whether it does is UNVERIFIED (needs one CI run with `-rs`). Local-only skip: rate **Low-Medium**, not Medium |
+
+Not re-run: the 57-ref branch table, the 48-tree inventory, phase 3 (written, not run).
+Observation: the integration branch lives on `origin` (`mntoyg/OmniAgent`, "O"), a G-line
+branch on the O remote, because the owner has not named the canonical remote.
