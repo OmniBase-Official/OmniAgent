@@ -34,3 +34,15 @@ Both remotes are public: push only your own document or fix branch to `origin`, 
 (`docs/` except your own result document, `models/`, `questions/`, `data/`, `NEXT_CHAT.md`, evaluation scripts) and no secret in a push or
 a delegation. Work only under `D:\code-project\OmniAgent\.scratch\<role>-<topic>`. Delete no ref, no worktree. Verification is yours: a test
 counts only after you saw it go red with the guard removed. End every report with `QA:` and `Budget:` lines.
+
+## Log
+
+- **29b (`.gitignore`), done by the earlier SE chat before the owner's switch to SE 01 reached it:** `origin/se/brief-29b-gitignore` = `8071f93`,
+  one commit on `b164aaa`, 5 lines in `.gitignore` only. **PM-verified (MEASURED):** in a throwaway tree with three dummy files, the
+  canonical `.gitignore` lists all three as untracked, the branch's `.gitignore` lists none. Full gates not re-run by the PM (a `.gitignore`
+  change cannot move the suite; the SE reports 1,065 passed, 2 skipped). Not merged. The SE also found that on this machine the three
+  paths were already hidden by the local, unshared `.git/info/exclude` (the PM added them there on ruling 11), which is why `git add -A`
+  here never showed the gap.
+- **29a (`scan_report_copy`):** the helper is **not on canonical**; it is only on the PR #10 branch `organization/codex/security-ci-release-hardening-20261121`
+  (`e7eed11`, based on G). Base decided by the PM: cut from `e7eed11`, fix in a separate commit, capture on stdout; merging that `.github/` tree
+  into canonical is a later step for the owner. Owner: `OmniAgent SE 01`.
