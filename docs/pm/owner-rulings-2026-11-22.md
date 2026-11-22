@@ -157,3 +157,9 @@ The message `docs/pm/codex-stop-and-snapshot-prompt.md` has still not been paste
 15. **Discard the `AGENTS.md` of the weekly-usage-budget snapshot** (brief 26, decision 4, option B): the snapshot ref
     (`e17b9c9`, one untracked 17-line `AGENTS.md`) was deleted. The rules live in `~/.claude/CLAUDE.md` and
     `~/.codex/AGENTS.md` (both present, MEASURED). 17 refs remain.
+
+16. **Issue brief 28 to the SE** (brief 27 result, decision 1): hand-apply on the canonical line the preflight fix
+    (status code only), the `38ea900` provenance half (with `dataset_limits` in `py-modules`) and, as a separate
+    small change, the `export_dataset.read_records` limits. Brief: `docs/pm/brief-28-se-hand-apply-two-fixes-on-the-canonical-line.md`.
+    Still open from brief 27: deleting the three brief 16 refs, deleting `ba3598f` after the fix lands, and the
+    sec-search chair.
