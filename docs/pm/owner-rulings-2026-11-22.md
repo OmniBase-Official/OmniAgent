@@ -149,3 +149,7 @@ The message `docs/pm/codex-stop-and-snapshot-prompt.md` has still not been paste
 13. **Keep local:** `securefs.py` (+227/-3 over the public branch), `scripts/validate_windows_publish_acl.ps1` and
     `tests/test_windows_publish_acl.py`, found on no remote ref, stay only in the local snapshot ref `13c7bfb`.
     **That ref must not be deleted** until the owner rules on securefs (open decision 3) or the three are salvaged.
+
+14. **Delete the three DISPOSABLE snapshot refs** (brief 26, decision 1): `main-checkout`, `main-checkout-index` and
+    the plain `windows-private-root-fix` snapshot, each re-verified by an empty diff just before. Done; 18
+    refs remain. The `windows-private-root-fix` **`-index`** twin (two staged files) is kept.
