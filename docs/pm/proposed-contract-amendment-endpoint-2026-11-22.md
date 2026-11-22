@@ -1,8 +1,8 @@
 # Proposed contract amendment — the endpoint is loopback IP literals only
 
-**Status: PROPOSED, 2026-11-22, by the PM. NOT APPROVED. The owner decides.**
-Until the owner approves, `agentic-mvp-contract-2026-11-03.md` governs and says
-the opposite of what G's code does.
+**Status: APPROVED by the owner on 2026-11-22 (option A) and APPLIED to
+`agentic-mvp-contract-2026-11-03.md` §2 the same day, with an amendment record
+there. The text below is the proposal as it was put to the owner.**
 
 ## The conflict, measured
 
