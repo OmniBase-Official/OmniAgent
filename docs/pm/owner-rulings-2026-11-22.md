@@ -171,3 +171,10 @@ The message `docs/pm/codex-stop-and-snapshot-prompt.md` has still not been paste
 18. **Merge brief 28's A, B and C into `integration/canonical-20261122`** (owner: "Merge A/B/C"). Given to the SE; PM re-verifies the
     merged tip. Branches: A `a6e7c38`, C `ccefadc` (contains B `a10a41b`), integration tip before the merge `388fa53`. Not decided: the
     endpoint line in the preflight banner (`main.py:200`); deleting `ba3598f` and `38ea900` (waits for the merge to be verified).
+
+    **Ruling 18 done, PM-verified 2026-11-22 (MEASURED):** `origin/integration/canonical-20261122` = `b164aaa`, a fast-forward from
+    `388fa53` (two `--no-ff` merges: A `a6e7c38`, then B+C `ccefadc`). `a6e7c38`, `a10a41b`, `ccefadc` are ancestors; the tip differs from C by
+    exactly A's two files (`agent.py`, `tests/test_preflight_error_text.py`). `origin/main` still `3c76fd2` and `organization/main` still `5005039`.
+    In a throwaway tree at `b164aaa` (module paths inside it): ruff clean, mypy 55 files, **1,065 passed, 2 skipped**; restoring `agent.py` of
+    `388fa53` (`8a61a2063a5d`) turns the preflight test red (2 failed), the merged file (`6961cc0922ff`) before and after gives 3 passed.
+    Not done: the main checkout on this branch is still at `388fa53` (not fast-forwarded: owner's word needed); wheel build still UNVERIFIED.
