@@ -212,6 +212,18 @@ def preflight(agent: ReActAgent) -> bool:
     return True
 
 
+def _empty_answer_category(agent: ReActAgent) -> str:
+    """Name the category of an empty turn, and nothing the model wrote.
+
+    The tool name the model chose is untrusted output, so it is used only to
+    decide *which* fixed sentence to print and is never part of one.
+    """
+    last = agent.last_trace[-1] if agent.last_trace else None
+    if last is not None and last.action not in agent.allowed_tools:
+        return "the model asked for a tool that is not allowed for this task."
+    return "the agent ended its turn without producing one."
+
+
 def answer(agent: ReActAgent, question: str) -> int:
     try:
         result = agent.run(question)
@@ -232,7 +244,7 @@ def answer(agent: ReActAgent, question: str) -> int:
         # carries no model text: the model asked for something it was refused,
         # and its words are not ours to repeat.
         obs.event("cli.empty_answer", level=logging.WARNING)
-        print(Style.red("\n[!] No answer: the agent ended its turn without producing one."))
+        print(Style.red(f"\n[!] No answer: {_empty_answer_category(agent)}"))
         return 1
     print(Style.green("\nOmniAgent: ") + result + "\n")
     return 0
