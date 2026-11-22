@@ -1,0 +1,65 @@
+# Brief 26 (SAE): read the uncommitted content of the 18 dirty worktrees, from snapshots
+
+Issued 2026-11-22 by the PM on the owner's ruling "3A: the SAE reads the 18, then they are removed".
+
+## Why this is read-only and why it reads snapshots, not trees
+
+The PM already froze every dirty tree as a local commit: 21 refs `refs/snapshots/20261122/*`
+(manifest: `D:\code-project\OmniAgent\.scratch\snapshots-manifest-2026-11-22.md`, with restore
+steps). They live in the shared object store, so any worktree can read them. **Read the refs, not
+the live trees**: the trees are Codex's, one may still be written, and opening them proves nothing
+the snapshot does not. Refs ending `-index` hold the staged state of the same tree.
+`.scratch\se-ci` has **no** snapshot (SE 02 was writing); if that tree still exists, list it and stop.
+
+## Both remotes are public
+
+`gh repo view` (MEASURED 2026-11-22): `mntoyg/OmniAgent` and `OmniBase-Official/OmniAgent` are both
+PUBLIC. Anything pushed is public and may be cached. So **you push nothing**; the PM pushes a
+salvage branch only after screening it.
+
+## What to produce, per snapshot ref (21 refs, 17 trees)
+
+Use `git diff --name-status <parent> <ref>` and `--stat` (the parent is in the manifest), then read
+only what you need to classify. Report one row per tree with:
+
+1. **Verdict**, one of:
+   - `DISPOSABLE`: the content is already on a remote branch or is generated (prove it: the
+     `git diff` between the snapshot and that remote branch is empty or only build output);
+   - `REAL WORK`: unique content a person would miss (say what it is, how many lines, which
+     branch of work it belongs to, and whether a pushed branch already covers it);
+   - `SEALED OR SECRET`: any path under `docs/`, `models/`, `questions/`, `data/`, `NEXT_CHAT.md`,
+     the evaluation scripts, or any `.env`, key or credential (the `ANSWER_KEY` list in the
+     project). **Report the path only; never print or quote the content.**
+2. **Evidence**: the command and its output (MEASURED), not a guess from a folder name.
+3. **For `REAL WORK`**: the branch name you propose (`salvage/<name>-20261122`) and whether it is
+   safe to publish.
+
+Also say, for the **-index** twins, whether the staged state adds anything the worktree state lacks.
+
+## Deliverable
+
+A table in a document on a branch of yours (from `origin/integration/canonical-20261122`), pushed to
+`origin` with the remote named, and **one message to the PM** with the owner's open decisions as
+lettered options, each ending by naming the chair that would carry it out. Nothing is created,
+pushed to a `salvage/*` ref, or removed by you.
+
+## Out of scope (do not do)
+
+Removing or moving any worktree (the PM does, after the owner's word); touching the 27 Codex-app
+trees' locations; a push to either `main`; a force-push; reading `.env`.
+
+## Budget
+
+Rule 2 applies. The owner raised today's ceiling to 40% in their own session; if you need that
+confirmed in yours, say so and stop rather than rely on this message.
+
+## The one thing that would make this wrong
+
+**Calling a tree `DISPOSABLE` because its name looks like scratch, or its file count is small.**
+Two trees have already surprised this project (a 1,069-line `secure_search.py` was parked in one).
+`DISPOSABLE` needs a diff that proves it, and an unproven tree is `REAL WORK` until shown otherwise.
+
+## Done when
+
+All 17 trees classified with evidence; the 4 `-index` twins compared; `se-ci` accounted for; the
+branch pushed and named; the message sent.
