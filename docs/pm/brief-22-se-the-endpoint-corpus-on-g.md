@@ -109,3 +109,44 @@ from brief 20 or 21, so the three merge independently.
 
 **Reporting 31 green rejection tests as proof.** They prove the validator only if
 removing the validator turns them red. Run the removal, and name every survivor.
+
+## Result
+
+**Delivered 2026-11-22 by SE 02** on branch `claude/se-brief22-endpoint-corpus`
+(`3ac11d7`, one commit on `5005039`; **only `tests/test_endpoint_policy.py`
+changed**; no production change). The SE reports 983 passed / 2 skipped (860
+baseline + 123 new), ruff and mypy clean, and agreement with the PM's measurement:
+**G's validator answers all 31 forms as amended with no code change.** Nothing
+merged. Beyond the corpus the SE added 4 forms (192.168.1.10, 8.8.8.8,
+`[2001:db8::1]`, port 0) because the frozen corpus never reaches two validator
+branches (port 0; "not a loopback address").
+
+Each rejection is asserted by the **exact message of the branch that fired**, not
+just "refused" (several corpus forms are refused by two branches). Reported
+validator-branch mutations, full suite each: V2 scheme **20 red (0 before: the
+scheme branch was untested on G)**; V6 no host **4 red (0 before)**; V7b/V7c
+unspecified and IPv4-mapped addresses were also untested on G; V5 port zero and
+V7d not-loopback are untested by the corpus itself and pinned only by the SE's
+extras.
+
+**Not covered by this table:** `LoopbackOnlyTransport`, a second guard that sends
+no request in these tests and is tested only by G's pre-existing transport
+tests; uppercase schemes and any form outside the 31 plus the 4 extras.
+
+## PM verification (2026-11-22)
+
+Re-run by the PM in a scratch worktree of `3ac11d7` (the `agent` import resolved
+inside it): baseline **983 passed, 2 skipped**; `agent.py` hash `fe1ab9de…` before
+and after every run, restored from a saved copy. Reproduced exactly:
+
+| Mutation | Red |
+| --- | --- |
+| V2 scheme check `if False:` | 20 |
+| V6 "names no host" check `if False:` | 4 |
+| **whole validator removed** (returns its argument) | **127**, all in the endpoint file |
+| **`localhost` accepted again** | **24** = the five `localhost` forms × 4 paths (20) + 4 other tests; nothing else red |
+
+The PM did **not** independently list the 28 rejected forms to prove "no
+survivors"; that rests on the arithmetic (127 = 112 + 4 extras + 8 + 3, as the SE
+decomposes it) and not on a form-by-form check. V1, V1b, V3, V4, V5, V7a–d were
+not re-run by the PM.
