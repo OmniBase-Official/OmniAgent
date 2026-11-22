@@ -101,3 +101,21 @@ End with `Budget:`.
 truth (the report format really is wrong, or the history scan really finds
 something). Fix the cause; never relax the check, widen an allow-list or skip the
 step to turn the PR green.
+
+## PM verification, 2026-11-22 (MEASURED, re-run by the PM)
+
+Branch `origin/claude/se-ci-fix-pr10` at `3fa2f8b`, checked out detached in a throwaway
+tree under `.scratch` (removed afterwards; the commit is on `origin`).
+
+| Claim | Result |
+| --- | --- |
+| Diff against the PR head `e7eed11` touches only the helper and its test | **Confirmed.** `git diff --stat`: `gitleaks_report.py` +4, `test_gitleaks_report.py` +42, nothing else |
+| The fix adds `--no-color` and does not loosen the SUMMARY pattern | **Confirmed** by reading the diff (one argument and a comment) |
+| Helper tests: 41 passed, 3 skipped | **Confirmed**, 41 passed / 3 skipped, module imported from the verification tree |
+| Removing `--no-color` turns exactly the new argument test red | **Confirmed.** 1 failed (`test_scanner_is_started_with_colour_disabled`), 40 passed, 3 skipped. Helper hash before `24d8b321e97a9ec3`, restored `24d8b321e97a9ec3` (from a scratchpad copy). My mutated hash differs from the SE's (`c052a5a3...` vs `2273d463...`) because I removed only the argument line and kept the comment; the SE removed both. Same behaviour, not a discrepancy |
+| Ruleset "Protect main" requires only "ruff / mypy / pytest" | **Confirmed** read-only via `gh api` (rules: deletion, non_fast_forward, pull_request with 0 approvals, required_status_checks = `ruff / mypy / pytest` only). `mntoyg/OmniAgent` has no ruleset (`[]`) |
+| `scan_report_copy` defect: report on `--tmpfs=/out`, `docker cp` after the container stops | **Reproduced in a reduced form** on Docker 29.9.3 (Docker Desktop, not a runner): a `--read-only --tmpfs=/out` container wrote `/out/report.tsv`, then `docker cp` after it exited returned "Could not find the file /out/report.tsv in container". The helper uses exactly these two (`gitleaks_report.py:279` tmpfs, `:153` cp). Probe used the cached `zricethezav/gitleaks:latest` image, not the pinned digest, and not the helper itself. **The runner behaviour stays UNVERIFIED** |
+
+Not verified by the PM: the SE's audit findings other than the ruleset (movable action
+tags, `pip install -e`, waka `contents: write`, no `dependabot.yml`), and whether the
+job reaches green on a GitHub runner.
