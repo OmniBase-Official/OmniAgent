@@ -31,8 +31,23 @@ The three snapshot refs that do hold those paths are
 `codex_worktrees_windows-sid-validation_OmniAgent`.
 
 **Why this matters to your decision:** there is no hidden local variant to
-weigh. **Everything is already public on four branches.** The decision is only
-whether it comes onto the canonical line.
+weigh. **The newest `securefs.py` is already public on four branches.** The
+decision is only whether it comes onto the canonical line.
+
+**Correction, 2026-11-23, by the PM's re-check, then re-measured by me:**
+unpublished revisions do exist in the local snapshot refs, and the two points
+above overstate. The ref `13c7bfb` holds all three files under the nested tree
+`.scratch/publisher-acl-fix-20261115/` (my check looked only at top-level
+paths); its nested `securefs.py` (1,178 lines) is **+227/−3 against the
+954-line `scale-security-hardening` blob and +125/−266 against the newest
+1,319-line public blob**, so the earlier "+227/−3" figure was real, just
+measured against the oldest carrier. The nested `securefs.py`, the nested
+`.ps1` and test, `security-validation-r37`'s `.ps1` and test,
+`windows-private-root-fix-index`'s test and its `prepare_windows_private_test_root.ps1`
+are on **no remote ref at the same path** (MEASURED 2026-11-23, blob ids
+compared against every remote ref). They are **probably superseded earlier
+revisions, which is UNVERIFIED**; reading them against the public versions would
+settle it. The recommendation below does not depend on it.
 
 ## What the four branches carry
 
