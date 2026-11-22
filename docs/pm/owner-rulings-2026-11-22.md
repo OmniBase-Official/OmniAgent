@@ -119,3 +119,24 @@ no secret or personal-data pattern in the added lines; the only sealed-path entr
 public** (`mntoyg/OmniAgent` and `OmniBase-Official/OmniAgent`, MEASURED with `gh repo view`), so the snapshot is
 public; the hook's advisory warnings (`shell=True`, TLS off) are in a semgrep test fixture. Not verified:
 that Codex did not change the checkout after 15:12 (it is paused; the PM did not look).
+
+## Ruling 11 (owner): switch the main checkout to the canonical line (option 2A)
+
+Done by the PM on 2026-11-22, in this order, each step checked:
+1. A fresh out-of-band tree of the main checkout (temporary index) equalled the pushed snapshot's tree
+   (`0fd7dc9`) and the real index equalled the `-index` snapshot's tree (`5493da8`): nothing had changed since 15:12.
+2. No ignored file on disk (`.env`, `data/`, `models/`, the local `docs/pm/*-prompt.md` files) collides with a
+   tracked path of the integration tree; they stay in place and are not in the snapshot by design.
+3. A local branch `snapshot/codex-local-ai-delegate-20261122` at `3035da7`, HEAD moved to it with a mixed
+   reset (working tree untouched): status empty, so everything Codex had is a commit on that branch and on `origin`.
+4. The SAE's tree `.scratch/sae-assembly` (clean) was detached, because git allows a branch in one tree only.
+5. `git switch integration/canonical-20261122`: the main checkout is at `388fa53`, tree equal to
+   `origin/integration/canonical-20261122`, status empty. Gates there: ruff clean, mypy 51 files, **1,018 passed,
+   2 skipped**, `agent.__file__` is `D:\code-project\OmniAgent\agent.py`.
+6. `.ai/`, `.scratch/`, `omniagent-core/` were ignored by the old `.gitignore` but not by the canonical one;
+   they are now in `.git/info/exclude` (local, untracked) so a `git add -A` cannot sweep `.scratch` in.
+   **Tell the owner:** the canonical `.gitignore` itself still lacks them (a repo change, not made).
+
+**For Codex when it returns:** its branch `chore/local-ai-delegate` is untouched at `af99092`; its uncommitted work is
+on `snapshot/codex-local-ai-delegate-20261122` (and `-index` for the staged state), local and on `origin`.
+The message `docs/pm/codex-stop-and-snapshot-prompt.md` has still not been pasted to Codex.
