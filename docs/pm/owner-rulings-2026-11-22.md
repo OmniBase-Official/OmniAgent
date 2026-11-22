@@ -167,3 +167,7 @@ The message `docs/pm/codex-stop-and-snapshot-prompt.md` has still not been paste
 17. **Delete the three brief 16 snapshot refs** (brief 27, decision 2): `scratch_brief16-proposed-tree-20261109` (`1978f52`),
     its `-index` twin (`3350a5b`, same tree) and `_24_...brief16-operational-telemetry` (`8e72843`). Done by the PM; none was on a
     remote; objects survive until `git gc`, SHAs are in the local manifest. 14 snapshot refs remain.
+
+18. **Merge brief 28's A, B and C into `integration/canonical-20261122`** (owner: "Merge A/B/C"). Given to the SE; PM re-verifies the
+    merged tip. Branches: A `a6e7c38`, C `ccefadc` (contains B `a10a41b`), integration tip before the merge `388fa53`. Not decided: the
+    endpoint line in the preflight banner (`main.py:200`); deleting `ba3598f` and `38ea900` (waits for the merge to be verified).
