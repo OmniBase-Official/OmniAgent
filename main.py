@@ -225,6 +225,15 @@ def answer(agent: ReActAgent, question: str) -> int:
         obs.event("cli.aborted", level=logging.ERROR, reason=str(exc), exc_info=True)
         print(Style.red(f"\n[!] {exc}"))
         return 1
+    if not result.strip():
+        # The agent ends a turn with "" when the model asks for a tool outside
+        # this task's allowlist (agent.run, guard G2e). Printing that as an
+        # answer and exiting 0 reads as success to a script. The line below
+        # carries no model text: the model asked for something it was refused,
+        # and its words are not ours to repeat.
+        obs.event("cli.empty_answer", level=logging.WARNING)
+        print(Style.red("\n[!] No answer: the agent ended its turn without producing one."))
+        return 1
     print(Style.green("\nOmniAgent: ") + result + "\n")
     return 0
 
