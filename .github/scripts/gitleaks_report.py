@@ -3,20 +3,24 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-import os
 import re
-try:
-    import resource
-except ImportError:  # pragma: no cover - CI and publisher runner are POSIX.
-    resource = None
 import subprocess
 import sys
 import tempfile
 import unicodedata
 import uuid
 from pathlib import Path
+from typing import NoReturn
 
-IMAGE = "ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:b109bc5f8f76a38196a3e413704fc5b9e3c32360bce4e4b603bd6f45b3721dbb"
+try:
+    import resource
+except ImportError:  # pragma: no cover - CI and publisher runner are POSIX.
+    resource = None
+
+IMAGE = (
+    "ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:"
+    "b109bc5f8f76a38196a3e413704fc5b9e3c32360bce4e4b603bd6f45b3721dbb"
+)
 MAX_CAPTURE = 256 * 1024
 MAX_REPORT = 8 * 1024 * 1024
 MAX_ROWS = 20_000
@@ -28,14 +32,24 @@ FIELDS = ("RuleID", "File", "Commit", "StartLine")
 SUMMARY = re.compile(rb"(?m)^\S+\s+INF\s+([0-9]{1,10})\s+commits scanned\b")
 HASH = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 GENERIC = "security scan failed"
+CLEAN_STATUS = 0
+FINDINGS_STATUS = 2
+CLI_EXIT_FAILURE = 1
+REPORT_FIELD_COUNT = 4
+MAX_LINE_NUMBER = 2**31 - 1
+CLI_SCAN_ARGC = 4
+CLI_CONTRACT_ARGC = 4
+CLI_VALIDATE_ARGC = 3
+FindingRow = tuple[str, str, str, int]
+ScanResult = tuple[int, list[FindingRow], bytes, bytes]
 
 
-class Failure(Exception):
+class ScanError(Exception):
     pass
 
 
-def fail() -> None:
-    raise Failure(GENERIC)
+def fail() -> NoReturn:
+    raise ScanError(GENERIC)
 
 
 def set_fsize(limit: int) -> None:
@@ -48,13 +62,17 @@ def capture(args: list[str], timeout: int = TIMEOUT) -> tuple[int, bytes, bytes]
     """Capture diagnostics to private files and reject output above 256 KiB."""
     with tempfile.TemporaryDirectory(prefix="omni-capture-") as td:
         root = Path(td)
-        os.chmod(root, 0o700)
+        root.chmod(0o700)
         out_path, err_path = root / "out", root / "err"
         try:
             with out_path.open("wb") as out, err_path.open("wb") as err:
-                result = subprocess.run(
-                    args, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-                    timeout=timeout, check=False,
+                result = subprocess.run(  # noqa: S603 - controlled argv; shell=False.
+                    args,
+                    stdin=subprocess.DEVNULL,
+                    stdout=out,
+                    stderr=err,
+                    timeout=timeout,
+                    check=False,
                     preexec_fn=lambda: set_fsize(MAX_CAPTURE + 1),
                 )
             if out_path.stat().st_size > MAX_CAPTURE or err_path.stat().st_size > MAX_CAPTURE:
@@ -69,10 +87,13 @@ def docker_cp(container: str, source: str, destination: Path, docker_bin: str = 
     if resource is None:
         fail()
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: S603 - controlled argv; shell=False.
             [docker_bin, "cp", f"{container}:{source}", str(destination)],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=TIMEOUT, check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=TIMEOUT,
+            check=False,
             preexec_fn=lambda: set_fsize(MAX_REPORT),
         )
         if result.returncode != 0 or not destination.is_file():
@@ -100,13 +121,38 @@ def safe_path(value: str) -> bool:
 def render(rows: list[tuple[str, str, str, int]]) -> bytes:
     output = bytearray()
     for rule, path, commit, line in rows:
-        output.extend(f"{rule}\t{json.dumps(path, ensure_ascii=True)}\t{commit}\t{line}\n".encode("ascii"))
+        output.extend(
+            f"{rule}\t{json.dumps(path, ensure_ascii=True)}\t{commit}\t{line}\n".encode("ascii")
+        )
         if len(output) > MAX_CANONICAL:
             fail()
     return bytes(output)
 
 
-def parse_report(raw: bytes) -> list[tuple[str, str, str, int]]:
+def parse_row(line: str) -> FindingRow:
+    if not line or len(line.encode("utf-8")) > MAX_ROW:
+        fail()
+    fields = line.split("\t")
+    if len(fields) != REPORT_FIELD_COUNT:
+        fail()
+    rule, quoted, commit, number = fields
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", rule) or not HASH.fullmatch(commit):
+        fail()
+    try:
+        path = ast.literal_eval(quoted)
+    except (SyntaxError, ValueError):
+        fail()
+    if not isinstance(path, str) or not safe_path(path):
+        fail()
+    if not number.isascii() or not number.isdecimal():
+        fail()
+    line_no = int(number)
+    if not 1 <= line_no <= MAX_LINE_NUMBER:
+        fail()
+    return rule, path, commit, line_no
+
+
+def parse_report(raw: bytes) -> list[FindingRow]:
     if len(raw) > MAX_REPORT:
         fail()
     try:
@@ -122,34 +168,15 @@ def parse_report(raw: bytes) -> list[tuple[str, str, str, int]]:
         lines.pop()
     if len(lines) > MAX_ROWS:
         fail()
-    rows = []
-    for line in lines:
-        if not line or len(line.encode("utf-8")) > MAX_ROW or line.count("\t") != 3:
-            fail()
-        rule, quoted, commit, number = line.split("\t")
-        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", rule) or not HASH.fullmatch(commit):
-            fail()
-        try:
-            path = ast.literal_eval(quoted)
-        except (SyntaxError, ValueError):
-            fail()
-        if not isinstance(path, str) or not safe_path(path):
-            fail()
-        if not number.isascii() or not number.isdecimal():
-            fail()
-        line_no = int(number)
-        if not 1 <= line_no <= 2**31 - 1:
-            fail()
-        rows.append((rule, path, commit, line_no))
-    canonical = render(rows)
-    if len(canonical) > MAX_CANONICAL:
+    rows = [parse_row(line) for line in lines]
+    if len(render(rows)) > MAX_CANONICAL:
         fail()
     return rows
 
 
 def count_commits(repo: Path) -> int:
     status, out, _ = capture(["git", "-C", str(repo), "rev-list", "--all", "--count"])
-    if status != 0 or not out.endswith(b"\n"):
+    if status != CLEAN_STATUS or not out.endswith(b"\n"):
         fail()
     try:
         count = int(out.decode("ascii").strip())
@@ -171,43 +198,72 @@ def summary_count(output: bytes) -> int:
 
 
 def scanner_status_consistent(status: int, rows: list[tuple[str, str, str, int]]) -> bool:
-    return (status == 0 and not rows) or (status == 2 and bool(rows))
+    return (status == CLEAN_STATUS and not rows) or (status == FINDINGS_STATUS and bool(rows))
 
 
-def scan(repo: Path, template: Path, *, docker_bin: str = "docker", allow_invalid: bool = False) -> tuple[int, list[tuple[str, str, str, int]], bytes, bytes]:
+def scan(
+    repo: Path, template: Path, *, docker_bin: str = "docker", allow_invalid: bool = False
+) -> tuple[int, list[tuple[str, str, str, int]], bytes, bytes]:
     expected = count_commits(repo)
     name = "omni-gitleaks-" + uuid.uuid4().hex
     with tempfile.TemporaryDirectory(prefix="omni-report-") as td:
         root = Path(td)
-        os.chmod(root, 0o700)
+        root.chmod(0o700)
         report = root / "report.tsv"
         create_args = [
-            docker_bin, "create", "--name", name, "--network=none", "--read-only",
-            "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=512m",
-            "--cpus=1", "--pids-limit=64", "--tmpfs=/out:rw,noexec,nosuid,size=8388608",
-            "--volume", f"{repo.resolve()}:/repo:ro",
-            "--volume", f"{template.resolve()}:/template.tmpl:ro",
-            IMAGE, "git", "--redact=100", "--no-banner", "--exit-code=2",
-            "--report-format=template", "--report-template=/template.tmpl",
-            "--report-path=/out/report.tsv", "--log-opts=--all", "/repo",
+            docker_bin,
+            "create",
+            "--name",
+            name,
+            "--network=none",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--memory=512m",
+            "--cpus=1",
+            "--pids-limit=64",
+            "--tmpfs=/out:rw,noexec,nosuid,size=8388608",
+            "--volume",
+            f"{repo.resolve()}:/repo:ro",
+            "--volume",
+            f"{template.resolve()}:/template.tmpl:ro",
+            IMAGE,
+            "git",
+            "--redact=100",
+            "--no-banner",
+            "--exit-code=2",
+            "--report-format=template",
+            "--report-template=/template.tmpl",
+            "--report-path=/out/report.tsv",
+            "--log-opts=--all",
+            "/repo",
         ]
         status, _, _ = capture(create_args)
-        if status != 0:
+        if status != CLEAN_STATUS:
             fail()
         try:
             start_status, stdout, stderr = capture([docker_bin, "start", "--attach", name])
             # Read the container process exit status explicitly; `docker start --attach`
             # itself can return a transport/client error distinct from the scan status.
-            inspect_status, inspected, _ = capture([
-                docker_bin, "inspect", "--format", "{{.State.ExitCode}}", name,
-            ])
-            if inspect_status != 0 or not inspected.endswith(b"\n"):
+            inspect_status, inspected, _ = capture(
+                [
+                    docker_bin,
+                    "inspect",
+                    "--format",
+                    "{{.State.ExitCode}}",
+                    name,
+                ]
+            )
+            if inspect_status != CLEAN_STATUS or not inspected.endswith(b"\n"):
                 fail()
             try:
                 scan_status = int(inspected.decode("ascii").strip())
             except (UnicodeError, ValueError):
                 fail()
-            if start_status not in (0, 2) or scan_status not in (0, 2):
+            if start_status not in (CLEAN_STATUS, FINDINGS_STATUS) or scan_status not in (
+                CLEAN_STATUS,
+                FINDINGS_STATUS,
+            ):
                 fail()
             if start_status != scan_status:
                 fail()
@@ -219,7 +275,7 @@ def scan(repo: Path, template: Path, *, docker_bin: str = "docker", allow_invali
             raw = report.read_bytes()
             try:
                 rows = parse_report(raw)
-            except Failure:
+            except ScanError:
                 if allow_invalid:
                     return scan_status, [], stdout + stderr, raw
                 raise
@@ -228,7 +284,7 @@ def scan(repo: Path, template: Path, *, docker_bin: str = "docker", allow_invali
             return scan_status, rows, stdout + stderr, raw
         finally:
             rm_status, _, _ = capture([docker_bin, "rm", "-f", name])
-            if rm_status != 0:
+            if rm_status != CLEAN_STATUS:
                 fail()
 
 
@@ -251,13 +307,15 @@ def make_repo(root: Path, name: str, content: bytes) -> Path:
     ]
     for command in commands:
         status, _, _ = capture(command)
-        if status != 0:
+        if status != CLEAN_STATUS:
             fail()
     (repo / "fixture.txt").write_bytes(content)
-    for command in (["git", "-C", str(repo), "add", "fixture.txt"],
-                    ["git", "-C", str(repo), "commit", "-qm", "synthetic fixture"]):
+    for command in (
+        ["git", "-C", str(repo), "add", "fixture.txt"],
+        ["git", "-C", str(repo), "commit", "-qm", "synthetic fixture"],
+    ):
         status, _, _ = capture(command)
-        if status != 0:
+        if status != CLEAN_STATUS:
             fail()
     return repo
 
@@ -265,26 +323,39 @@ def make_repo(root: Path, name: str, content: bytes) -> Path:
 def contract(template: Path, mutant_template: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="omni-contract-") as td:
         root = Path(td)
-        os.chmod(root, 0o700)
+        root.chmod(0o700)
         clean = make_repo(root, "clean", b"ordinary fixture text\n")
         status, rows, output, raw = scan(clean, template)
         # Clean scans retain only the private summary; the report parses to zero findings.
-        if status != 0 or rows or parse_report(raw) or summary_count(output) != count_commits(clean):
+        if (
+            status != CLEAN_STATUS
+            or rows
+            or parse_report(raw)
+            or summary_count(output) != count_commits(clean)
+        ):
             fail()
         if b"finding" in output.lower() or b"secret" in output.lower():
             fail()
 
         # Dummy token exists only in the disposable synthetic repository. Never print it.
-        canary = ("ghp_" + hashlib.sha256(b"omniagent-gitleaks-contract").hexdigest()[:36]).encode("ascii")
+        canary = ("ghp_" + hashlib.sha256(b"omniagent-gitleaks-contract").hexdigest()[:36]).encode(
+            "ascii"
+        )
         positive = make_repo(root, "positive", b"token=" + canary + b"\n")
         status, rows, output, raw = scan(positive, template)
-        if status != 2 or len(rows) != 1 or canary in output or canary in raw or canary in render(rows):
+        if (
+            status != FINDINGS_STATUS
+            or len(rows) != 1
+            or canary in output
+            or canary in raw
+            or canary in render(rows)
+        ):
             fail()
         if rows[0][1] != "fixture.txt" or rows[0][3] != 1:
             fail()
         if FIELDS != ("RuleID", "File", "Commit", "StartLine"):
             fail()
-        if render(rows).splitlines()[0].decode("ascii").count(chr(9)) != 3:
+        if render(rows).splitlines()[0].decode("ascii").count(chr(9)) != REPORT_FIELD_COUNT - 1:
             fail()
 
         # Mutant template puts the synthetic canary in a private report. The parser
@@ -293,30 +364,38 @@ def contract(template: Path, mutant_template: Path) -> None:
         mutant_status, _, mutant_output, mutant_raw = scan(
             mutant_repo, mutant_template, allow_invalid=True
         )
-        if mutant_status != 2 or canary not in mutant_raw or canary in mutant_output:
+        if mutant_status != FINDINGS_STATUS or canary not in mutant_raw or canary in mutant_output:
             fail()
         bad = root / "mutant-report.tsv"
         bad.write_bytes(mutant_raw)
         code = [sys.executable, str(Path(__file__).resolve()), "validate", str(bad)]
         proc_status, proc_out, proc_err = capture(code)
-        if proc_status == 0 or proc_out or canary in proc_err or proc_err != (GENERIC + "\n").encode():
+        if (
+            proc_status == CLEAN_STATUS
+            or proc_out
+            or canary in proc_err
+            or proc_err != (GENERIC + "\n").encode()
+        ):
             fail()
 
 
 def main() -> int:
-    if len(sys.argv) == 4 and sys.argv[1] == "scan":
+    if len(sys.argv) == CLI_SCAN_ARGC and sys.argv[1] == "scan":
         status, rows, _, _ = scan(Path(sys.argv[2]), Path(sys.argv[3]))
-        if status not in (0, 2) or not scanner_status_consistent(status, rows):
+        if status not in (CLEAN_STATUS, FINDINGS_STATUS) or not scanner_status_consistent(
+            status, rows
+        ):
             fail()
         write_stdout(render(rows))
-        return 1 if status == 2 else 0
-    if len(sys.argv) == 4 and sys.argv[1] == "contract":
+        return CLI_EXIT_FAILURE if status == FINDINGS_STATUS else CLEAN_STATUS
+    if len(sys.argv) == CLI_CONTRACT_ARGC and sys.argv[1] == "contract":
         contract(Path(sys.argv[2]), Path(sys.argv[3]))
-        return 0
-    if len(sys.argv) == 3 and sys.argv[1] == "validate":
+        return CLEAN_STATUS
+    if len(sys.argv) == CLI_VALIDATE_ARGC and sys.argv[1] == "validate":
         write_stdout(validate_report(Path(sys.argv[2])))
-        return 0
+        return CLEAN_STATUS
     fail()
+
 
 def write_stdout(data: bytes) -> None:
     if len(data) > MAX_CANONICAL:
@@ -325,17 +404,16 @@ def write_stdout(data: bytes) -> None:
     sys.stdout.buffer.flush()
 
 
-
 if __name__ == "__main__":
     try:
         exit_code = main()
-    except Failure:
+    except ScanError:
         sys.stdout.buffer.write(b"")
         sys.stderr.write(GENERIC + "\n")
-        exit_code = 1
-    except Exception:
+        exit_code = CLI_EXIT_FAILURE
+    except Exception:  # noqa: BLE001 - CLI boundary emits only generic errors.
         sys.stdout.buffer.write(b"")
         sys.stderr.write(GENERIC + "\n")
-        exit_code = 1
+        exit_code = CLI_EXIT_FAILURE
     raise SystemExit(exit_code)
 
