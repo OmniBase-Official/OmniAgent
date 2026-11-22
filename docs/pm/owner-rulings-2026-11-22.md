@@ -107,3 +107,15 @@ The remote that hosts the canonical line; the securefs ruling; the holdout and
 question-bank decision; the four graph-runtime decisions in ADR-0005 (as amended by
 ruling 6); how Codex learns of all this (`docs/pm/codex-stop-and-snapshot-prompt.md`
 is a local file the owner must paste).
+
+## Ruling 10 (owner, later on 2026-11-22): snapshot Codex's uncommitted work (option 1A)
+
+The owner chose to snapshot the main checkout's 54 uncommitted changes and push. Done by the PM from the
+existing out-of-band snapshot (taken 15:12 Thai; the main checkout was not read, written or switched):
+`origin/snapshot/codex-local-ai-delegate-20261122` = `3035da7` (on-disk state, parent `af99092`, 33 files)
+and `origin/snapshot/codex-local-ai-delegate-20261122-index` = `665b1fc` (staged state). Checked before the push:
+no secret or personal-data pattern in the added lines; the only sealed-path entries are two **deletions**
+(`NEXT_CHAT.md`, `questions/bank-2026-10-10.txt`) of files already in O's public history. **Both remotes are
+public** (`mntoyg/OmniAgent` and `OmniBase-Official/OmniAgent`, MEASURED with `gh repo view`), so the snapshot is
+public; the hook's advisory warnings (`shell=True`, TLS off) are in a semgrep test fixture. Not verified:
+that Codex did not change the checkout after 15:12 (it is paused; the PM did not look).
