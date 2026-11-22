@@ -140,3 +140,12 @@ Done by the PM on 2026-11-22, in this order, each step checked:
 **For Codex when it returns:** its branch `chore/local-ai-delegate` is untouched at `af99092`; its uncommitted work is
 on `snapshot/codex-local-ai-delegate-20261122` (and `-index` for the staged state), local and on `origin`.
 The message `docs/pm/codex-stop-and-snapshot-prompt.md` has still not been pasted to Codex.
+
+## Rulings 12-13 (owner): the credential-shaped snapshot and the three unpublished files
+
+12. **Salvage by path** (brief 26, decision 2, option B): five real files of snapshot `13c7bfb` are on
+    `origin/wip/salvage-search-text-race-safety-20261122` (`7aa7af9`, unreviewed, ungated). The snapshot ref
+    itself is never pushed.
+13. **Keep local:** `securefs.py` (+227/-3 over the public branch), `scripts/validate_windows_publish_acl.ps1` and
+    `tests/test_windows_publish_acl.py`, found on no remote ref, stay only in the local snapshot ref `13c7bfb`.
+    **That ref must not be deleted** until the owner rules on securefs (open decision 3) or the three are salvaged.
