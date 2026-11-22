@@ -175,3 +175,76 @@ expectations include bare line counts. No model run needed.
 `QA: 1 finding (0 Critical / 1 High / 0 Medium / 0 Low) - 1 reproduced - not tested: tool calls and step counts not captured, q4 run once only, no ten-run repeat, sealed bank not touched, eval_scoring.judge() not inspected, no run record persisted`
 
 `Budget: week 51% used (owner confirmed 46-56% in the AI/ML session; PM stop line 53%), 5-hour 59%`
+
+---
+
+## Addendum, 2026-11-23, second session — I1 done, I2 half done, the model pass NOT run
+
+### I1 — done (`fe48786`)
+
+`scripts/first_measurement.py` and `tests/test_first_measurement.py` are committed. The runner measures a tree
+other than its own (`--project`), so the agent cannot read it and the measured commit is exactly that tree; one
+process per question, one file per run, a finished run is never repeated, and it aborts before any request if a
+question appears in a bank. Gates: ruff clean, mypy 56 files, **1072 passed, 2 skipped** (1065 + 7).
+
+Raw outputs of the first pass are **not committed**: they hold model replies and live under `data/`
+(gitignored). The PM can read them at
+`D:\code-project\OmniAgent\.scratch\aie-first-measurement\data\first-measurement\pass1\` (6 files).
+
+**Mutation check, hashes recorded** (runner pristine `9c38154ca9871292`, restored to it after each):
+
+| Mutation | Red |
+| --- | --- |
+| grade the whole output again (`33895ed…` is M2; M1 `09d8e55700fe8257`) | 3 tests, including the new banner-token test |
+| bare substring instead of a whole token (`33895ed10f0f681c`) | 1 test: expectation inside a longer number |
+
+**Two of my own mistakes, kept because they change how far the test can be trusted:**
+1. The first version of the q4 regression test did **not** isolate the fix. With the answer-region guard removed
+   it stayed green, because the whole-token rule independently rejects `12` inside `127`. Two guards agreed, so
+   the test proved neither. A second test now puts the expectation in the banner as a whole token (the port), so
+   only the answer-region guard can reject it.
+2. My first attempt at that mutation never applied (an assertion failed, hash unchanged) and a second produced a
+   `SyntaxError` from a `\1` in a replacement string. Neither counts as a red test. The reported results are
+   from a mutant that parses and has a different hash.
+
+### I2 part 1 — where `count_lines` comes from: nowhere in the repository, the training data, or the model's own template
+
+All counts, no content. The registry has 7 tools and `count_lines` is not one of them.
+
+| Place searched | Result |
+| --- | --- |
+| tracked files, `b164aaa` | **0** files |
+| tracked files, legacy tag `3c76fd2` | **0** files |
+| `TOOLS[...]` registrations, both refs | **0** |
+| training and run files on disk (`data/*.jsonl`, **18 files, ~7,500 examples**) | **0** examples mention it |
+| action names outside the registry in those files | only in `demo.jsonl` (3,074 examples): 13 occurrences across `none`, `activate`, `finalize`, `get_weather`, `sum`, `final_answer`, `Final`; plus 1 `Final` in each of three collect/dataset files |
+| `omniagent-v2:latest` baked-in Modelfile/template (read-only `/api/show`) | **0** mentions; no system prompt; no tool names baked in |
+| git history, `-S count_lines` over all refs | 3 commits, **all on new branches** (this one, the SE empty-answer branch, the PM task doc); none in the product |
+
+**What this supports:** nothing in this repository or in the model's own prompt teaches `count_lines`; the model
+invented a plausible name for "count" when its question was about counting. **What it does not establish:**
+that the fine-tuning corpus is the on-disk `data/` set (the weights' corpus is not recorded where I looked, and
+`models/` is sealed), nor that the base model is the source. By elimination it is the model's prior, not proven.
+`demo.jsonl` is the only file that *does* contain invented action names (e.g. `get_weather`), so unregistered
+names are not unknown to the training data; they are just not this one.
+
+### I2 part 2 — the `--verbose` second pass was NOT run, and why
+
+Before starting I checked the shared model server. `qwen2.5-coder:7b` was resident on the GPU and its
+`expires_at` advanced from `06:29:28` to `06:32:35` Thai time over a 330 s watch, i.e. **someone else was using it
+and renewing it**. It is not my model (I only use `omniagent-v2:latest`). The project rule is one model run at a
+time on a 4 GB card, and the addendum forbids starting a run while another chair's local-AI delegation is in
+flight. I cannot tell from here whose it is, so I did not start. No partial measurement exists; the worktree
+`.scratch/aie-measure-b164aaa` (HEAD `b164aaa`, clean) is ready. The run is one command:
+
+```
+python scripts/first_measurement.py --project D:\code-project\OmniAgent\.scratch\aie-measure-b164aaa --out <dir under data/> --passes 10
+```
+
+That is 6 questions x 10 passes = 60 runs, each a fresh process, so the counting question runs ten times inside
+the set and the PM's wording runs ten times beside it.
+
+### Meter anomaly
+
+My last read showed **weekly 0 %, 5-hour 4 %**, against **52 %** minutes earlier, with the 5-hour `resetsAt` also
+moved (03:50Z to 04:20Z). I do not trust it and did not treat it as new headroom. Nothing in this session relied on it.
