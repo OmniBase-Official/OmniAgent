@@ -189,3 +189,19 @@ The message `docs/pm/codex-stop-and-snapshot-prompt.md` has still not been paste
     (their content is in snapshots `9da92ab`, `3675a88`, `13c7bfb`). **Owner word still needed** for the clean Codex-app trees.
 21. **Weekly ceiling raised again (owner, 2026-11-23, in the PM session):** "today the weekly usage is use from 46% to 56%". Relayed to SAE 01, SE 01 and
     AIE 01; **SAE 01 holds until the owner says it in its own session** (its Rule 2 reading: an override binds only in the session where the owner gives it).
+
+22. **Park `securefs.py` (and its companion `publisher_root.py`)** (owner, 2026-11-23: "Park securefs"; SAE memo option C,
+    `docs/architecture/securefs-decision-memo-2026-11-22.md` on `origin/sae/snapshot-classification-20261122` at `6412cd1`). This is the same
+    ruling the owner made for `secure_search.py` on 2026-11-02 and 2026-11-04, applied to its successor and **named for `securefs`**:
+    - **Condition to reopen:** the owner's five criteria (`docs/pm/threat-model-2026-11-02-the-search-boundary.md`, lines 105-128) answered
+      **in writing with evidence**: (1) name the attacker and show it exists on a single-user machine without a cheaper route; (2) show the
+      actor that can act; (3) one MEASURED result per supported platform (Windows AMD64, the pinned `ubuntu-24.04` runner, WSL) showing it does not
+      fail closed where we run; (4) byte-identical `search_text` output on the real tree; (5) fit the "hand-rolled and small" premise or amend
+      it (the module is 1,319 lines plus a 469-line companion, past the 1,200 the criterion names). The SAE's score today: one half-answer of five.
+    - **Nothing is merged.** The four branches (`scale-security-hardening-20261113`, `security-scans-validation-20261120`,
+      `security-runner-fixtures-20261120`, `windows-private-root-validation-20261121`) stay as they are, on both remotes.
+    - **Nothing is deleted:** the four snapshot refs `13c7bfb`, `900d8b6`, `033b308`, `f44cbf3` stay until someone reads the unpublished nested revisions
+      against the public ones (UNVERIFIED that they are superseded). Ruling 13 ("keep local") therefore stands in practice, with the weaker reason.
+    - **Not decided here:** whether to salvage the Windows ACL / private-root work (not the boundary module) from those branches. That was
+      memo option B's second half; it is still open and is not blocked by the park.
+    - **Unreviewed, not condemned:** nobody has said the code is wrong. The code review (1,319 lines of `ctypes`) is the SE's, only if the question reopens.
