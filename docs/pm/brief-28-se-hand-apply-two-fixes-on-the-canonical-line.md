@@ -77,3 +77,37 @@ and your `QA:` and `Budget:` lines.
 **Copying the variant's files in and calling it done.** The variant's `pyproject.toml` hunk and its duplicate
 `validate_dataset.py` numbers are exactly what do not belong; a wheel that cannot import `dataset_limits` passes
 every local test here because the wheel test is skipped. Prove the module list, and prove each new test can fail.
+
+## PM verification of the SE result, 2026-11-22 (MEASURED, re-run by the PM)
+
+Result: three branches on `origin` (`mntoyg/OmniAgent`): A `a6e7c38`, B `a10a41b`, C `ccefadc` (C contains B). Checked in two
+throwaway trees under `.scratch/` (removed afterwards), `agent.__file__` and `dataset_limits.__file__` inside them.
+
+| Claim | PM result |
+| --- | --- |
+| Gates: A 1,021 passed / 2 skipped; C (so B too) 1,062 passed / 2 skipped | **Confirmed.** ruff clean, mypy clean (A 52 files, C 54), pytest 1,021 and 1,062, same two skips (POSIX filenames; wheel build tools) |
+| A: test goes red when the old line is back | **Confirmed.** Canonical `agent.py` (`8a61a2063a5d`) restored: 2 failed, 1 passed; restored fix (`6961cc0922ff`, equals the SE's hash before and after): 3 passed |
+| A: `exc_info=True` event does not carry the body | **Confirmed by reading code**: `observability.event` does `_ = message, exc_info` and logs with `exc_info=None` (`observability.py:338,352`). The SE is right that the brief 27 probe's "log has canary: False" was weak evidence |
+| B: provenance tests red on the canonical `dataset_provenance.py` | **Confirmed.** canonical file back: **20 failed, 14 passed**; fix restored: 34 passed |
+| B: module lists | **Confirmed.** `dataset_limits` is in `py-modules` and the mypy `files`; removing it from `py-modules` turns `tests/test_module_lists.py` red (1 failed, 2 passed), restored 3 passed; `pyproject.toml` hash `bb59b4401838` equals the SE's before and after |
+| C: `read_records` bounded | **Confirmed.** canonical `export_dataset.py` back: **5 failed, 36 passed**; fix restored: 41 passed. Probes run from the C tree: 40 MiB line gives `DatasetError ... exceeds maximum line size of 4194304 bytes` (peak ~8 MiB), deep line gives `DatasetError ... nested deeper than the limit` |
+| Hostile provenance lines | **Confirmed.** list line, string line, deep array, bad `messages`, list/deep/30 MiB sidecars all give `ProvenanceError` (were `AttributeError`, `TypeError`, `RecursionError`, or accepted) |
+| One home for the limits | **Confirmed**: `validate_dataset.py` imports the five from `dataset_limits.py`; no duplicate constants |
+
+Hash note: the SE's `dataset_limits.py` and `dataset_provenance.py` hashes equal the **committed blobs** (`32e286446610`, `677c49d31e62`);
+files on this machine hash differently because `core.autocrlf=true` (CRLF on disk). The SE's `export_dataset.py` hash
+(`2457ce9ec67a`) does not equal the committed blob (`765fcd4bf4d6`); likely a state before a last formatting edit. Not
+treated as a defect (behaviour was re-measured above), recorded because it is unexplained.
+
+**Not verified:** a built wheel (no `setuptools`/`wheel` here; the SE's empty-directory import test and my pass of
+`test_module_lists.py` stand in, the wheel itself is UNVERIFIED); the wheel test still skips locally; Windows symlink or
+junction log paths in `read_records`; `collect_turns` budgets (not asked for); every individual `dataset_limits` guard
+mutation (I re-ran the file-level mutations, not the SE's per-guard list).
+
+**Two things for the owner to know:**
+1. **Behaviour change in C:** an undecodable (non-UTF-8) line in a run log used to crash the whole export with an uncaught
+   `UnicodeDecodeError`; it is now skipped like any other torn line. Reasonable, but it is a change of behaviour.
+2. **SE observation, not a finding:** `main.py:200` prints the endpoint URL on a healthy preflight (stdout, loopback IP literals
+   only). Whether that breaks the contract's "do not log the full endpoint URL" is the owner's reading; nothing changed.
+
+None of the three branches is merged into the canonical line; nothing on `origin` besides the SE's three branches and this document.
