@@ -50,3 +50,26 @@ ending by naming the chair that carries it out, plus your QA and Budget lines.
 
 **Picking the variant with the most files, or the latest date.** The brief 16 trio is the trap: the fix may
 already be on the canonical line, in which case the right answer is "none" and the variants are history.
+
+## PM verification of the SE result, 2026-11-22 (MEASURED, re-run by the PM)
+
+Result: `origin/se/brief-27-variant-picks` at `adf9025` (`docs/pm/brief-27-result-se-picks.md` plus four probes).
+Checked in a throwaway tree at `adf9025` (removed afterwards), `agent.__file__` inside it.
+
+| Claim | PM result |
+| --- | --- |
+| merge-tree conflicts on `388fa53`: 18 / 13 / 5 / 3 / 2 / 2 | **Confirmed**, same six numbers (`1978f52`, `8e72843`, `ba3598f`, `38ea900`, `381520d`, `3675a88`) |
+| Preflight prints the raw server error text (Low) | **Reproduced**: `probe_preflight_error_text.py` prints `[!] Model server returned HTTP 500: SERVER_ERROR_CANARY` on stdout; log lines carry no canary; `agent.py:795` shows `{exc.message}` |
+| Log lines carry no content | **Confirmed**: `probe_log_canaries.py`: log canaries `[]` (the answer canary appears only on stdout, as expected) |
+| Provenance and export readers crash on hostile input (Medium) | **Reproduced**: list line and string line give `AttributeError`, deep array `RecursionError`, `{"messages": 5}` `TypeError`; sidecar list returned as `list`, deep sidecar `RecursionError`, 30 MiB sidecar accepted (peak ~90 MiB); export read one 40 MiB line (peak ~120 MiB) |
+| `38ea900`'s validate limits duplicate the canonical ones | **Confirmed**: the five shared constants are equal (256 MiB, 4 MiB line, 100,000, 1,000,000, nesting 128); `38ea900` adds only a 64 KiB sidecar cap |
+| The pick's mutation | **Confirmed**: with the variant's `dataset_limits.py` and `dataset_provenance.py` overlaid its provenance tests give 15 passed; restoring the canonical `dataset_provenance.py` (hash `3054cefb93ea` before and after) gives 5 red, the same five tests the SE names |
+
+Not re-run: the 27 canonical test failures of taking `ba3598f` whole, the per-variant test-failure counts of the
+brief 16 trio and the sec-search pair, the installed-wheel import of `dataset_limits` (the wheel test skips here,
+ADR note in brief 26), and sec-search TOCTOU (not tested by anyone).
+
+**Owner decisions this leaves (PM's reading):** (1) delete the three brief 16 refs, which add nothing but one Low
+fix that can be hand-applied; (2) one small SE brief to hand-apply the preflight fix and the `38ea900`
+provenance half (with `dataset_limits` added to `py-modules`); the export-reader limits as a second small change;
+(3) the sec-search chair, or delete both variants as history.
