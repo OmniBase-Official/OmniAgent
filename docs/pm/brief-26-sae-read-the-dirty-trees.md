@@ -63,3 +63,22 @@ Two trees have already surprised this project (a 1,069-line `secure_search.py` w
 
 All 17 trees classified with evidence; the 4 `-index` twins compared; `se-ci` accounted for; the
 branch pushed and named; the message sent.
+
+## PM verification, 2026-11-22 (MEASURED, re-run by the PM from the snapshot refs)
+
+SAE report: `origin/sae/snapshot-classification-20261122`. Re-run, nothing pushed or removed.
+
+| Claim | Result |
+| --- | --- |
+| 3 DISPOSABLE by empty diff | **Confirmed.** `main-checkout` vs `origin/snapshot/codex-local-ai-delegate-20261122`: 0 files; `-index` vs the `-index` branch: 0; `windows-private-root-fix` worktree snapshot vs its parent `870e8fb`: 0 |
+| The `-index` twin of `windows-private-root-fix` holds two files the worktree snapshot lacks | **Confirmed.** `M scripts/prepare_windows_private_test_root.ps1`, `M tests/test_windows_publish_acl.py` (2 files differ from the worktree snapshot). Worth keeping: the staged state was the only copy |
+| Three brief 16 variants are not copies | **Confirmed.** 37 / 23 / 33 files differ from the pushed Codex snapshots |
+| `AGENTS.md` is the only content of the weekly-usage-budget snapshot | **Confirmed** |
+| `.scratch\se-ci` no longer exists | **Confirmed** (not on disk). What it held is unknowable from here |
+| `search-text-race-safety` snapshot (`13c7bfb`): 428 paths, 5 outside `.scratch/` | **Confirmed**: 428 / 5 |
+| "423 are pytest basetemps, hundreds end in workspace/credentials" | **Corrected.** 346 paths are `.pytest-output-base`; **77 are a nested worktree's real files** (`.scratch/publisher-acl-fix-20261115/`: tests 34, scripts 13, docs 5, workflows, source). Only **46** paths contain "credential" (case-insensitive), not hundreds. So "only five are real" is wrong: 5 + 77 are real work, and the nested tree may or may not be covered by a pushed branch (not checked) |
+| The credential-shaped content is synthetic | **Partly confirmed, still UNVERIFIED for 3 tokens.** Content patterns (AWS, GitHub, OpenAI-style, Slack keys, PEM header) match in only 3 test files (`test_publish_dataset.py`, `test_sandbox.py`, `test_validate_dataset.py`), all inside a secret-scanner's own tests (labels such as "OpenAI-style key", "AWS access key"). Of the 5 distinct tokens: the AWS one contains `EXAMPLE`; the GitHub one's body is a plain a-z0-9 run; the two `sk-` and the Slack token are not provably dummy from their form. Six matching lines are **not** already in G's or O's public history (3 in `test_publish_dataset.py`, 3 in `test_validate_dataset.py`) |
+
+**Rule for the salvage:** that ref is **never pushed wholesale**. It stays a local ref (nothing pushes it);
+salvage by path only. Deleting it unread would lose the 77 real files of the nested tree.
+Not verified: whether any salvage branch merges onto the canonical line (several parents are O-line or older).
