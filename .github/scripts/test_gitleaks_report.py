@@ -3,7 +3,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import TypeVar
 
 import pytest
 from gitleaks_report import (
@@ -12,6 +11,7 @@ from gitleaks_report import (
     ScanError,
     capture,
     docker_cp,
+    fail_stage,
     parse_report,
     render,
     safe_path,
@@ -23,10 +23,9 @@ HASH = "0123456789abcdef0123456789abcdef01234567"
 ROW = f'R\t"fixture.txt"\t{HASH}\t1\n'.encode("ascii")
 EXPECTED_COMMIT_COUNT = 270
 EXPECTED_COLUMN_COUNT = 4
-T = TypeVar("T")
 
 
-def expect_equal(actual: T, expected: T) -> None:
+def expect_equal(actual: object, expected: object) -> None:
     if actual != expected:
         raise AssertionError(f"expected {expected!r}, got {actual!r}")
 
@@ -169,6 +168,55 @@ def test_actual_entrypoint_clean_and_invalid_reports(tmp_path: Path) -> None:
     expect_equal(rejected.returncode, 1)
     expect_equal(rejected.stdout, b"")
     expect_equal(rejected.stderr.replace(b"\r\n", b"\n"), b"security scan failed\n")
+
+
+def test_stage_diagnostics_emit_only_allowlisted_ids(tmp_path: Path) -> None:
+    script_dir = Path(__file__).resolve().parent
+    canary = "ghp_" + hashlib.sha256(b"omniagent-gitleaks-contract").hexdigest()[:36]
+    private_path = str(tmp_path / "private-report-path")
+    stage_ids = (
+        "contract_clean_scan",
+        "contract_canary_scan",
+        "contract_mutant_scan",
+        "contract_cli_validation",
+    )
+    for stage_id in stage_ids:
+        code = (
+            "import sys; import gitleaks_report as g; "
+            "g.report_error(g.StageError(sys.argv[1])); raise SystemExit(1)"
+        )
+        result = subprocess.run(  # noqa: S603 - fixed Python argv and stage allowlist; shell=False.
+            [sys.executable, "-c", code, stage_id, private_path, canary],
+            cwd=script_dir,
+            capture_output=True,
+            check=False,
+        )
+        expect_equal(result.returncode, 1)
+        expect_equal(result.stdout, b"")
+        diagnostic = result.stderr.replace(b"\r\n", b"\n")
+        expect_equal(diagnostic, f"security scan failed stage={stage_id}\n".encode())
+        expect_equal(private_path.encode() in diagnostic, False)
+        expect_equal(canary.encode() in diagnostic, False)
+
+    invalid_id = f"{private_path}:{canary}"
+    with pytest.raises(ScanError) as rejected_stage:
+        fail_stage(invalid_id)  # type: ignore[arg-type]
+    expect_equal(type(rejected_stage.value), ScanError)
+    code = (
+        "import sys; import gitleaks_report as g; "
+        "g.report_error(g.StageError(sys.argv[1])); raise SystemExit(1)"
+    )
+    rejected = subprocess.run(  # noqa: S603 - fixed Python argv, validates ID allowlist, shell=False.
+        [sys.executable, "-c", code, invalid_id],
+        cwd=script_dir,
+        capture_output=True,
+        check=False,
+    )
+    diagnostic = rejected.stderr.replace(b"\r\n", b"\n")
+    if diagnostic != b"security scan failed\n":
+        raise AssertionError("unallowlisted stage diagnostic was not generic")
+    if invalid_id.encode() in diagnostic:
+        raise AssertionError("unallowlisted stage identifier leaked")
 
 
 @pytest.mark.skipif(os.name != "posix", reason="RLIMIT_FSIZE fixture requires POSIX")

@@ -10,7 +10,7 @@ import tempfile
 import unicodedata
 import uuid
 from pathlib import Path
-from typing import NoReturn
+from typing import Literal, NoReturn
 
 try:
     import resource
@@ -40,6 +40,20 @@ MAX_LINE_NUMBER = 2**31 - 1
 CLI_SCAN_ARGC = 4
 CLI_CONTRACT_ARGC = 4
 CLI_VALIDATE_ARGC = 3
+StageId = Literal[
+    "contract_clean_scan",
+    "contract_canary_scan",
+    "contract_mutant_scan",
+    "contract_cli_validation",
+]
+ALLOWED_STAGE_IDS = frozenset(
+    {
+        "contract_clean_scan",
+        "contract_canary_scan",
+        "contract_mutant_scan",
+        "contract_cli_validation",
+    }
+)
 FindingRow = tuple[str, str, str, int]
 ScanResult = tuple[int, list[FindingRow], bytes, bytes]
 
@@ -50,6 +64,26 @@ class ScanError(Exception):
 
 def fail() -> NoReturn:
     raise ScanError(GENERIC)
+
+
+class StageError(ScanError):
+    def __init__(self, stage: StageId) -> None:
+        super().__init__(GENERIC)
+        self.stage = stage
+
+
+def fail_stage(stage: StageId) -> NoReturn:
+    if stage not in ALLOWED_STAGE_IDS:
+        fail()
+    raise StageError(stage)
+
+
+def report_error(error: ScanError) -> None:
+    sys.stdout.buffer.write(b"")
+    if isinstance(error, StageError) and error.stage in ALLOWED_STAGE_IDS:
+        sys.stderr.write(f"{GENERIC} stage={error.stage}\n")
+        return
+    sys.stderr.write(GENERIC + "\n")
 
 
 def set_fsize(limit: int) -> None:
@@ -324,59 +358,72 @@ def contract(template: Path, mutant_template: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="omni-contract-") as td:
         root = Path(td)
         root.chmod(0o700)
-        clean = make_repo(root, "clean", b"ordinary fixture text\n")
-        status, rows, output, raw = scan(clean, template)
-        # Clean scans retain only the private summary; the report parses to zero findings.
-        if (
-            status != CLEAN_STATUS
-            or rows
-            or parse_report(raw)
-            or summary_count(output) != count_commits(clean)
-        ):
-            fail()
-        if b"finding" in output.lower() or b"secret" in output.lower():
-            fail()
+        try:
+            clean = make_repo(root, "clean", b"ordinary fixture text\n")
+            status, rows, output, raw = scan(clean, template)
+            if (
+                status != CLEAN_STATUS
+                or rows
+                or parse_report(raw)
+                or summary_count(output) != count_commits(clean)
+                or b"finding" in output.lower()
+                or b"secret" in output.lower()
+            ):
+                fail()
+        except ScanError:
+            fail_stage("contract_clean_scan")
 
-        # Dummy token exists only in the disposable synthetic repository. Never print it.
         canary = ("ghp_" + hashlib.sha256(b"omniagent-gitleaks-contract").hexdigest()[:36]).encode(
             "ascii"
         )
-        positive = make_repo(root, "positive", b"token=" + canary + b"\n")
-        status, rows, output, raw = scan(positive, template)
-        if (
-            status != FINDINGS_STATUS
-            or len(rows) != 1
-            or canary in output
-            or canary in raw
-            or canary in render(rows)
-        ):
-            fail()
-        if rows[0][1] != "fixture.txt" or rows[0][3] != 1:
-            fail()
-        if FIELDS != ("RuleID", "File", "Commit", "StartLine"):
-            fail()
-        if render(rows).splitlines()[0].decode("ascii").count(chr(9)) != REPORT_FIELD_COUNT - 1:
-            fail()
+        try:
+            positive = make_repo(root, "positive", b"token=" + canary + b"\n")
+            status, rows, output, raw = scan(positive, template)
+            if (
+                status != FINDINGS_STATUS
+                or len(rows) != 1
+                or canary in output
+                or canary in raw
+                or canary in render(rows)
+            ):
+                fail()
+            if rows[0][1] != "fixture.txt" or rows[0][3] != 1:
+                fail()
+            if FIELDS != ("RuleID", "File", "Commit", "StartLine"):
+                fail()
+            if render(rows).splitlines()[0].decode("ascii").count(chr(9)) != REPORT_FIELD_COUNT - 1:
+                fail()
+        except ScanError:
+            fail_stage("contract_canary_scan")
 
-        # Mutant template puts the synthetic canary in a private report. The parser
-        # must reject the extra Secret/Match columns without emitting report bytes.
-        mutant_repo = make_repo(root, "mutant", b"token=" + canary + b"\n")
-        mutant_status, _, mutant_output, mutant_raw = scan(
-            mutant_repo, mutant_template, allow_invalid=True
-        )
-        if mutant_status != FINDINGS_STATUS or canary not in mutant_raw or canary in mutant_output:
-            fail()
+        try:
+            mutant_repo = make_repo(root, "mutant", b"token=" + canary + b"\n")
+            mutant_status, _, mutant_output, mutant_raw = scan(
+                mutant_repo, mutant_template, allow_invalid=True
+            )
+            if (
+                mutant_status != FINDINGS_STATUS
+                or canary not in mutant_raw
+                or canary in mutant_output
+            ):
+                fail()
+        except ScanError:
+            fail_stage("contract_mutant_scan")
+
         bad = root / "mutant-report.tsv"
         bad.write_bytes(mutant_raw)
         code = [sys.executable, str(Path(__file__).resolve()), "validate", str(bad)]
-        proc_status, proc_out, proc_err = capture(code)
-        if (
-            proc_status == CLEAN_STATUS
-            or proc_out
-            or canary in proc_err
-            or proc_err != (GENERIC + "\n").encode()
-        ):
-            fail()
+        try:
+            proc_status, proc_out, proc_err = capture(code)
+            if (
+                proc_status == CLEAN_STATUS
+                or proc_out
+                or canary in proc_err
+                or proc_err != (GENERIC + "\n").encode()
+            ):
+                fail()
+        except ScanError:
+            fail_stage("contract_cli_validation")
 
 
 def main() -> int:
@@ -407,13 +454,14 @@ def write_stdout(data: bytes) -> None:
 if __name__ == "__main__":
     try:
         exit_code = main()
-    except ScanError:
-        sys.stdout.buffer.write(b"")
-        sys.stderr.write(GENERIC + "\n")
+    except StageError as error:
+        report_error(error)
+        exit_code = CLI_EXIT_FAILURE
+    except ScanError as error:
+        report_error(error)
         exit_code = CLI_EXIT_FAILURE
     except Exception:  # noqa: BLE001 - CLI boundary emits only generic errors.
         sys.stdout.buffer.write(b"")
         sys.stderr.write(GENERIC + "\n")
         exit_code = CLI_EXIT_FAILURE
     raise SystemExit(exit_code)
-
