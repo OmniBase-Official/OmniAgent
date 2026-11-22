@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+import dataset_limits
 import validate_dataset
 from trajectory_utils import actions_in
 from validate_dataset import check_shape, find_secrets, main, validate_file
@@ -189,7 +190,7 @@ def test_deeply_nested_json_is_reported_as_a_validation_error(tmp_path: Path) ->
 def test_json_nesting_is_rejected_before_generic_missing_messages_error(
     tmp_path: Path,
 ) -> None:
-    depth = validate_dataset.MAX_JSON_NESTING + 1
+    depth = dataset_limits.MAX_JSON_NESTING + 1
     path = tmp_path / "nested-root.jsonl"
     path.write_text("[" * depth + "0" + "]" * depth + "\n", encoding="utf-8")
 
@@ -202,10 +203,10 @@ def test_json_nesting_is_rejected_before_generic_missing_messages_error(
 def test_json_nesting_check_ignores_brackets_inside_strings(tmp_path: Path) -> None:
     record = clean()
     record["metadata"] = {
-        "plain": "[" * (validate_dataset.MAX_JSON_NESTING * 2)
-        + "]" * (validate_dataset.MAX_JSON_NESTING * 2),
+        "plain": "[" * (dataset_limits.MAX_JSON_NESTING * 2)
+        + "]" * (dataset_limits.MAX_JSON_NESTING * 2),
         "escaped_quote": 'before " ['
-        + "{" * (validate_dataset.MAX_JSON_NESTING * 2)
+        + "{" * (dataset_limits.MAX_JSON_NESTING * 2)
         + "} after",
     }
     path = write(tmp_path / "brackets-in-strings.jsonl", [record])

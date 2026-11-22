@@ -15,11 +15,18 @@ disagree.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 from agent import SYSTEM_PROMPT_TEMPLATE
+from dataset_limits import (
+    MAX_SIDECAR_BYTES,
+    DatasetInputLimitError,
+    has_excessive_json_nesting,
+    iter_dataset_lines,
+)
 from tools import describe_tools, tool_names
 
 #: Appended to the dataset's own name, so the two travel together and a copy
@@ -41,6 +48,72 @@ def prompt_fingerprint() -> str:
 
 
 
+def _system_prompt_hashes(raw_line: bytes, dataset: Path, number: int) -> Iterator[str]:
+    try:
+        line = raw_line.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ProvenanceError(f"{dataset.name} line {number} is not valid UTF-8") from exc
+    if has_excessive_json_nesting(line):
+        raise ProvenanceError(f"{dataset.name} line {number} has JSON nesting that is too deep")
+    try:
+        example = json.loads(line)
+    except json.JSONDecodeError as exc:
+        message = f"{dataset.name} line {number} is not valid JSON ({exc.msg})"
+        raise ProvenanceError(message) from exc
+    except RecursionError as exc:
+        message = f"{dataset.name} line {number} has JSON nesting that is too deep"
+        raise ProvenanceError(message) from exc
+    if not isinstance(example, dict):
+        raise ProvenanceError(f"{dataset.name} line {number} is not an object")
+    messages = example.get("messages")
+    if not isinstance(messages, list):
+        raise ProvenanceError(
+            f"{dataset.name} line {number} has no system turn, so it cannot say "
+            "which prompt it was collected under"
+        )
+
+    found = False
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "system":
+            continue
+        prompt = message.get("content")
+        if not isinstance(prompt, str):
+            raise ProvenanceError(f"{dataset.name} line {number} has an invalid system turn")
+        found = True
+        yield sha256(prompt.encode("utf-8")).hexdigest()
+    if not found:
+        raise ProvenanceError(
+            f"{dataset.name} line {number} has no system turn, so it cannot say "
+            "which prompt it was collected under"
+        )
+
+
+def _dataset_fingerprint_and_count(dataset: Path) -> tuple[str, int]:
+    """Read a bounded dataset once, keeping only the set of distinct prompt digests."""
+    seen: set[str] = set()
+    examples = 0
+    try:
+        for number, raw_line in iter_dataset_lines(dataset):
+            if not raw_line.strip():
+                continue
+            examples += 1
+            seen.update(_system_prompt_hashes(raw_line, dataset, number))
+    except DatasetInputLimitError as exc:
+        raise ProvenanceError(str(exc)) from exc
+    except OSError as exc:
+        raise ProvenanceError(f"could not read {dataset.name}: {exc.strerror or exc}") from exc
+
+    if not seen:
+        raise ProvenanceError(f"{dataset.name} is empty, so it has no prompt to fingerprint")
+    if len(seen) > 1:
+        raise ProvenanceError(
+            f"{dataset.name} mixes {len(seen)} distinct system prompts "
+            f"({', '.join(sorted(h[:12] for h in seen))}), so it is training data for "
+            "none of them"
+        )
+    return seen.pop(), examples
+
+
 def dataset_fingerprint(dataset: Path) -> str:
     """The digest of the system prompt the dataset itself carries.
 
@@ -59,28 +132,7 @@ def dataset_fingerprint(dataset: Path) -> str:
     A dataset mixing two prompts is refused rather than reduced to one of
     them: a pooled collection is training data for neither.
     """
-    seen: set[str] = set()
-    for number, line in enumerate(dataset.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
-        messages = json.loads(line).get("messages", [])
-        prompts = [m["content"] for m in messages if m.get("role") == "system"]
-        if not prompts:
-            raise ProvenanceError(
-                f"{dataset.name} line {number} has no system turn, so it cannot say "
-                "which prompt it was collected under"
-            )
-        seen.update(sha256(prompt.encode("utf-8")).hexdigest() for prompt in prompts)
-
-    if not seen:
-        raise ProvenanceError(f"{dataset.name} is empty, so it has no prompt to fingerprint")
-    if len(seen) > 1:
-        raise ProvenanceError(
-            f"{dataset.name} mixes {len(seen)} distinct system prompts "
-            f"({', '.join(sorted(h[:12] for h in seen))}), so it is training data for "
-            "none of them"
-        )
-    return seen.pop()
+    return _dataset_fingerprint_and_count(dataset)[0]
 
 
 def sidecar_path(dataset: Path) -> Path:
@@ -97,15 +149,14 @@ def write_sidecar(dataset: Path) -> Path:
     function could not, because it recorded the live prompt as though it were
     the data's own.
     """
-    lines = [line for line in dataset.read_text(encoding="utf-8").splitlines() if line.strip()]
-    recorded = dataset_fingerprint(dataset)
+    recorded, examples = _dataset_fingerprint_and_count(dataset)
     live = prompt_fingerprint()
     path = sidecar_path(dataset)
     path.write_text(
         json.dumps(
             {
                 "dataset": dataset.name,
-                "examples": len(lines),
+                "examples": examples,
                 "system_prompt_sha256": recorded,
                 "live_prompt_sha256": live,
                 "matches_live_prompt": recorded == live,
@@ -131,5 +182,19 @@ def read_sidecar(dataset: Path) -> dict[str, Any]:
             f"no provenance recorded for {dataset.name}: {path.name} is missing, so there is "
             "nothing to compare against the prompt in force now"
         )
-    loaded: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(MAX_SIDECAR_BYTES + 1)
+        if len(raw) > MAX_SIDECAR_BYTES:
+            raise ProvenanceError(
+                f"provenance sidecar exceeds maximum size of {MAX_SIDECAR_BYTES} bytes"
+            )
+        text = raw.decode("utf-8")
+        if has_excessive_json_nesting(text):
+            raise ProvenanceError("provenance sidecar JSON nesting is too deep")
+        loaded = json.loads(text)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise ProvenanceError(f"invalid provenance sidecar {path.name}") from exc
+    if not isinstance(loaded, dict):
+        raise ProvenanceError("provenance sidecar must contain a JSON object")
     return loaded

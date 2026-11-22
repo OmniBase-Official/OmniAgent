@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import dataset_limits
 from agent import AgentConfig, ReActAgent
 from dataset_provenance import (
     ProvenanceError,
@@ -109,6 +110,58 @@ def test_the_fingerprint_is_read_out_of_the_dataset(tmp_path: Path) -> None:
     assert dataset_fingerprint(dataset) == sha256(b"PROMPT A").hexdigest()
 
 
+def test_provenance_refuses_an_over_limit_dataset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dataset_limits, "MAX_DATASET_BYTES", 32)
+    dataset = tmp_path / "too-large.jsonl"
+    dataset.write_bytes(b" " * 33)
+
+    with pytest.raises(ProvenanceError, match="maximum file size"):
+        dataset_fingerprint(dataset)
+
+
+def test_provenance_refuses_an_overlong_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dataset_limits, "MAX_DATASET_LINE_BYTES", 16)
+    dataset = tmp_path / "long-record.jsonl"
+    dataset.write_bytes(b" " * 17 + b"\n")
+
+    with pytest.raises(ProvenanceError, match="maximum line size"):
+        dataset_fingerprint(dataset)
+
+
+def test_provenance_refuses_too_many_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dataset_limits, "MAX_DATASET_EXAMPLES", 1)
+    dataset = tmp_path / "too-many.jsonl"
+    dataset.write_text(_example("PROMPT A") + "\n" + _example("PROMPT A") + "\n", "utf-8")
+
+    with pytest.raises(ProvenanceError, match="maximum record count"):
+        dataset_fingerprint(dataset)
+
+
+def test_provenance_refuses_too_many_physical_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dataset_limits, "MAX_DATASET_LINES", 2)
+    dataset = tmp_path / "too-many-lines.jsonl"
+    dataset.write_bytes(b"\n\n\n")
+
+    with pytest.raises(ProvenanceError, match="maximum physical line count"):
+        dataset_fingerprint(dataset)
+
+
+def test_provenance_refuses_deeply_nested_json(tmp_path: Path) -> None:
+    dataset = tmp_path / "deep.jsonl"
+    dataset.write_text("[" * 5_000 + "]" * 5_000 + "\n", encoding="utf-8")
+
+    with pytest.raises(ProvenanceError, match=r"JSON nesting.*too deep"):
+        dataset_fingerprint(dataset)
+
+
 def test_a_dataset_mixing_two_prompts_is_refused(tmp_path: Path) -> None:
     """Pooling two collections produces data true of neither prompt."""
     dataset = tmp_path / "d.jsonl"
@@ -158,3 +211,106 @@ def test_a_current_dataset_is_recorded_as_matching(tmp_path: Path) -> None:
 
     assert recorded["matches_live_prompt"] is True
     assert recorded["system_prompt_sha256"] == prompt_fingerprint()
+
+
+# --------------------------------------------------------------------------- #
+# hostile shapes: every one is a ProvenanceError, never a traceback
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (b"[1, 2]\n", "is not an object"),
+        (b'"text"\n', "is not an object"),
+        (b"{not json}\n", "is not valid JSON"),
+        (b"\xff\xfe\n", "is not valid UTF-8"),
+        (b'{"messages": 5}\n', "has no system turn"),
+        (b'{"messages": [1, "x"]}\n', "has no system turn"),
+        (b'{"messages": [{"role": "user", "content": "hi"}]}\n', "has no system turn"),
+        (b'{"messages": [{"role": "system", "content": 7}]}\n', "invalid system turn"),
+        (b"[" * 5000 + b"]" * 5000 + b"\n", "nesting that is too deep"),
+    ],
+    ids=[
+        "array-line",
+        "string-line",
+        "bad-json",
+        "bad-utf8",
+        "messages-not-a-list",
+        "messages-not-objects",
+        "no-system-turn",
+        "system-content-not-a-string",
+        "deep-nesting",
+    ],
+)
+def test_a_malformed_dataset_line_is_a_provenance_error(
+    tmp_path: Path, raw: bytes, expected: str
+) -> None:
+    dataset = tmp_path / "hostile.jsonl"
+    dataset.write_bytes(raw)
+
+    with pytest.raises(ProvenanceError, match=expected):
+        dataset_fingerprint(dataset)
+
+
+def test_the_brackets_inside_a_string_are_not_nesting(tmp_path: Path) -> None:
+    dataset = tmp_path / "strings.jsonl"
+    prompt = "[" * 500 + '\\" ' + "{" * 500
+    dataset.write_text(_example(prompt) + "\n", "utf-8")
+
+    assert dataset_fingerprint(dataset) == sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def test_a_missing_dataset_is_a_provenance_error(tmp_path: Path) -> None:
+    with pytest.raises(ProvenanceError, match="could not read"):
+        dataset_fingerprint(tmp_path / "absent.jsonl")
+
+
+def _sidecar_for(tmp_path: Path, raw: bytes) -> Path:
+    dataset = tmp_path / "d.jsonl"
+    dataset.write_text(_example("P") + "\n", "utf-8")
+    (tmp_path / "d.jsonl.provenance.json").write_bytes(raw)
+    return dataset
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (b"[1]", "must contain a JSON object"),
+        (b'"text"', "must contain a JSON object"),
+        (b"{broken", "invalid provenance sidecar"),
+        (b"\xff", "invalid provenance sidecar"),
+        (b"[" * 5000 + b"]" * 5000, "nesting is too deep"),
+        (b"x" * (dataset_limits.MAX_SIDECAR_BYTES + 1), "exceeds maximum size"),
+    ],
+    ids=["array", "string", "broken", "bad-utf8", "deep", "oversized"],
+)
+def test_a_malformed_sidecar_is_a_provenance_error(
+    tmp_path: Path, raw: bytes, expected: str
+) -> None:
+    with pytest.raises(ProvenanceError, match=expected):
+        read_sidecar(_sidecar_for(tmp_path, raw))
+
+
+def test_a_sidecar_at_the_size_limit_is_read(tmp_path: Path) -> None:
+    body = b'{"pad": "'
+    tail = b'"}'
+    padding = b"x" * (dataset_limits.MAX_SIDECAR_BYTES - len(body) - len(tail))
+    raw = body + padding + tail
+    assert len(raw) == dataset_limits.MAX_SIDECAR_BYTES
+
+    assert read_sidecar(_sidecar_for(tmp_path, raw))["pad"] == padding.decode()
+
+
+def test_two_prompts_in_one_line_are_still_a_mixed_dataset(tmp_path: Path) -> None:
+    messages = [
+        {"role": "system", "content": "ONE"},
+        {"role": "system", "content": "TWO"},
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "a"},
+    ]
+    dataset = tmp_path / "mixed.jsonl"
+    dataset.write_text(json.dumps({"messages": messages}) + "\n", "utf-8")
+
+    with pytest.raises(ProvenanceError, match="mixes 2 distinct"):
+        dataset_fingerprint(dataset)
