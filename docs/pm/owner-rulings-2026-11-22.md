@@ -183,3 +183,9 @@ The message `docs/pm/codex-stop-and-snapshot-prompt.md` has still not been paste
     (`ba3598f`) and `codex_worktrees_dataset-input-bounds-20261116_OmniAgent` (`38ea900`). Done by the PM after the brief 28 merge (`b164aaa`)
     was verified; neither was on a remote; objects survive until `git gc`. 12 snapshot refs remain. Deliberately not carried over: `ba3598f`'s
     `collect_turns`/`build_examples` budgets (not asked for) and its smaller limits (they broke 27 canonical tests).
+
+20. **Ruling 3A done (2026-11-23, PM):** 14 dirty worktrees removed after each was shown byte-identical to a snapshot commit; branches untouched; the
+    28 other registered worktrees were not touched. The seven nested `search-text-race-safety/.../.scratch/*` trees were found already missing from disk
+    (their content is in snapshots `9da92ab`, `3675a88`, `13c7bfb`). **Owner word still needed** for the clean Codex-app trees.
+21. **Weekly ceiling raised again (owner, 2026-11-23, in the PM session):** "today the weekly usage is use from 46% to 56%". Relayed to SAE 01, SE 01 and
+    AIE 01; **SAE 01 holds until the owner says it in its own session** (its Rule 2 reading: an override binds only in the session where the owner gives it).
