@@ -93,11 +93,14 @@ def test_empty_report_is_clean_but_absent_report_fails(tmp_path: Path) -> None:
         docker_cp("c", "/out/report.tsv", tmp_path / "absent", docker_bin=str(fake))
 
 
-def test_summary_parser_accepts_observed_log_prefix_and_rejects_missing_duplicate() -> None:
+def test_summary_parser_accepts_timestamped_or_bare_and_rejects_malformed() -> None:
     nl = bytes((10,))
     expect_equal(summary_count(b"12:51AM INF 270 commits scanned" + nl), EXPECTED_COMMIT_COUNT)
+    expect_equal(summary_count(b"INF 1 commits scanned." + nl), 1)
     invalid = [
         (b"no summary" + nl,),
+        (b"junk INF 1 commits scanned." + nl,),
+        (b"INF 1 commits scanned. trailing" + nl,),
         (b"12:51AM INF 270 commits scanned" + nl + b"12:52AM INF 270 commits scanned" + nl,),
         (b"12:51AM INF 12345678901 commits scanned" + nl,),
     ]

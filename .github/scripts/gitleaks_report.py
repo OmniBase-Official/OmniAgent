@@ -29,7 +29,9 @@ MAX_PATH = 4096
 MAX_CANONICAL = 1024 * 1024
 TIMEOUT = 120
 FIELDS = ("RuleID", "File", "Commit", "StartLine")
-SUMMARY = re.compile(rb"(?m)^\S+\s+INF\s+([0-9]{1,10})\s+commits scanned\b")
+SUMMARY = re.compile(
+    rb"(?m)^(?:[0-9]{1,2}:[0-9]{2}(?:AM|PM)\s+)?INF\s+([0-9]{1,10})\s+commits scanned\.?\s*$"
+)
 HASH = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 GENERIC = "security scan failed"
 CLEAN_STATUS = 0
