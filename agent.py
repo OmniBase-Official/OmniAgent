@@ -22,7 +22,7 @@ import time
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable
 from importlib import import_module
-from typing import Any, cast
+from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
 import httpcore
@@ -155,7 +155,7 @@ def build_openai_client(config: AgentConfig) -> OpenAI:
         base_url=config.base_url,
         api_key=config.api_key,
         timeout=config.timeout,
-        max_retries=0,
+        max_retries=config.client_max_retries,
         http_client=build_local_http_client(config.timeout),
     )
 
@@ -468,7 +468,15 @@ def _assistant(content: str) -> ChatCompletionMessageParam:
 
 
 class AgentConfig(BaseModel):
-    """Runtime configuration for a single agent instance."""
+    """Runtime configuration for a single agent instance.
+
+    There are two retry layers and they are different knobs.
+    ``client_max_retries`` is the OpenAI SDK's own HTTP retry layer and is
+    fixed at zero, so one application attempt is exactly one request.
+    ``max_retries`` is this agent's loop of extra attempts after a retryable
+    model-server failure (default 2; an evaluation sets it to 0 explicitly).
+    Setting one never changes the other.
+    """
 
     model: str = Field(default=DEFAULT_MODEL, description="Ollama model tag.")
     base_url: str = Field(default=DEFAULT_BASE_URL, description="Local OpenAI-compatible endpoint.")
@@ -476,12 +484,15 @@ class AgentConfig(BaseModel):
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     max_steps: int = Field(default=8, ge=1, le=50, description="Max ReAct iterations per question.")
     timeout: float = Field(default=180.0, gt=0, description="Per-request timeout in seconds.")
-    verbose: bool = Field(default=True, description="Stream the reasoning trace to the console.")
+    verbose: bool = Field(default=False, description="Stream the reasoning trace to the console.")
+    client_max_retries: Literal[0] = Field(
+        default=0, description="OpenAI SDK HTTP retries; fixed at zero."
+    )
     max_retries: int = Field(
         default=2,
         ge=0,
         le=10,
-        description="Extra attempts after a transient model-server failure.",
+        description="Application-level extra attempts after a retryable model-server failure.",
     )
     retry_backoff: float = Field(
         default=1.0,
@@ -705,6 +716,9 @@ class ReActAgent:
         else:
             self.client = build_openai_client(self.config)
         self._completion_create, self._models_list = _validated_client_methods(self.client)
+        # What a message or log may say about the endpoint: its classification,
+        # never the configured URL.
+        self._endpoint_class = validate_openai_client_endpoint(self.client)
         self.system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             tools=describe_tools(), tool_names=tool_names()
         )
@@ -763,11 +777,10 @@ class ReActAgent:
                 "agent.connection.unreachable",
                 logger=_log,
                 level=logging.ERROR,
-                base_url=self.config.base_url,
                 exc_info=True,
             )
             raise AgentError(
-                f"Cannot reach a local model server at {self.config.base_url}. "
+                f"Cannot reach the local model server (endpoint: {self._endpoint_class}). "
                 "Is Ollama running? Start it with 'ollama serve'."
             ) from exc
         except APIStatusError as exc:
@@ -775,7 +788,6 @@ class ReActAgent:
                 "agent.connection.error",
                 logger=_log,
                 level=logging.ERROR,
-                base_url=self.config.base_url,
                 status_code=exc.status_code,
                 exc_info=True,
             )
@@ -786,7 +798,6 @@ class ReActAgent:
         obs.event(
             "agent.connection.ok",
             logger=_log,
-            base_url=self.config.base_url,
             model=self.config.model,
             model_installed=model_is_installed(self.config.model, available),
             available=available,
@@ -1212,12 +1223,12 @@ class ReActAgent:
                 "agent.llm.unreachable",
                 logger=_log,
                 level=logging.ERROR,
-                base_url=self.config.base_url,
                 attempts=attempt,
                 exc_info=True,
             )
             raise AgentError(
-                f"Lost the connection to {self.config.base_url} after {attempt} "
+                f"Lost the connection to the local model server "
+                f"(endpoint: {self._endpoint_class}) after {attempt} "
                 f"attempt{'s' if attempt > 1 else ''}. Is Ollama still running?"
             ) from exc
 

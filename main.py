@@ -120,7 +120,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--temperature", type=float, help="Sampling temperature (default: 0.1)."
     )
     settings.add_argument(
-        "--max-retries", type=int, help="Retries after a transient failure (default: 2)."
+        "--max-retries",
+        type=int,
+        help="Application retries after a transient failure (default: 2); "
+        "the SDK's own HTTP retries are fixed at 0.",
     )
     settings.add_argument(
         "--timeout", type=float, help="Per-request timeout in seconds (default: 180)."
@@ -142,11 +145,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Also stream the JSON logs to stderr (stdout keeps the readable trace).",
     )
-    settings.add_argument(
+    trace_flags = settings.add_mutually_exclusive_group()
+    trace_flags.add_argument(
         "--quiet",
         action="store_true",
         default=None,
-        help="Hide the Thought/Action/Observation trace.",
+        help="Hide the Thought/Action/Observation trace (the default).",
+    )
+    trace_flags.add_argument(
+        "--verbose",
+        action="store_true",
+        default=None,
+        help="Show the Thought/Action/Observation trace.",
     )
     args = parser.parse_args(argv)
     if args.tool_input and args.tool is None:
@@ -172,7 +182,9 @@ def cli_settings(args: argparse.Namespace) -> dict[str, object]:
         )
         if getattr(args, name) is not None
     }
-    if args.quiet is not None:
+    if args.verbose is not None:
+        supplied["verbose"] = args.verbose
+    elif args.quiet is not None:
         supplied["verbose"] = not args.quiet
     return supplied
 
