@@ -42,6 +42,10 @@ by construction.
 
 from __future__ import annotations
 
+import io
+import os
+import stat
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -81,6 +85,37 @@ class FileFacts:
 
 class SandboxError(ValueError):
     """Raised when a path is outside the workspace or otherwise refused."""
+
+
+def _read_bounded_file(
+    path: Path,
+    display_path: str,
+    *,
+    max_bytes: int,
+    timeout_seconds: float,
+) -> bytes:
+    deadline = time.monotonic() + timeout_seconds
+    data = bytearray()
+    with path.open("rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise SandboxError(f"unsupported non-regular file: {display_path}")
+        if time.monotonic() >= deadline:
+            raise SandboxError(
+                f"reading {display_path} exceeded the {timeout_seconds:g}-second scan limit"
+            )
+        while True:
+            chunk = handle.read(min(64 * 1024, max_bytes - len(data) + 1))
+            if time.monotonic() >= deadline:
+                raise SandboxError(
+                    f"reading {display_path} exceeded the {timeout_seconds:g}-second scan limit"
+                )
+            if not chunk:
+                return bytes(data)
+            data.extend(chunk)
+            if len(data) > max_bytes:
+                raise SandboxError(
+                    f"{display_path} exceeds the {max_bytes:,}-byte scan limit"
+                )
 
 
 @dataclass(frozen=True)
@@ -248,6 +283,62 @@ class Workspace:
         return FileFacts(
             path=self.display(path),
             size_bytes=size,
+            lines=None if binary else lines,
+            first_line=first,
+            last_line=last,
+            binary=binary,
+        )
+
+    def describe_bounded(
+        self,
+        candidate: str,
+        *,
+        max_bytes: int,
+        timeout_seconds: float,
+    ) -> FileFacts:
+        """Measure a regular file with a byte cap and cooperative deadline.
+
+        The deadline is checked between bounded reads. A synchronous filesystem
+        call already in progress cannot be interrupted by this timeout.
+        """
+        if max_bytes < 1:
+            raise ValueError("max_bytes must be positive")
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+
+        path = self.resolve(candidate)
+        if path.is_dir():
+            raise SandboxError(f"{self.display(path)} is a directory; use list_directory")
+        if not path.is_file():
+            raise SandboxError(f"no such file: {self.display(path)}")
+
+        size = path.stat().st_size
+        if size > max_bytes:
+            raise SandboxError(
+                f"{self.display(path)} is {size:,} bytes, over the {max_bytes:,}-byte limit"
+            )
+
+        shown = self.display(path)
+        blob = _read_bounded_file(
+            path,
+            shown,
+            max_bytes=max_bytes,
+            timeout_seconds=timeout_seconds,
+        )
+        binary = b"\0" in blob[:_BINARY_SNIFF_BYTES]
+        lines = 0
+        first = last = ""
+        if not binary:
+            for raw in io.BytesIO(blob):
+                text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                lines += 1
+                if lines == 1:
+                    first = text
+                last = text
+
+        return FileFacts(
+            path=self.display(path),
+            size_bytes=len(blob),
             lines=None if binary else lines,
             first_line=first,
             last_line=last,

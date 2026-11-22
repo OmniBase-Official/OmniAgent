@@ -196,11 +196,11 @@ def test_trimming_is_logged_with_the_numbers(tmp_path: Path) -> None:
 
 
 def test_the_budget_leaves_room_for_the_reply() -> None:
-    """Sized so only the reserve forces the trim.
+    """Sized so the request must be clipped while preserving the reply reserve.
 
-    The prompt is about 1,800 tokens: under a 2,048 window on its own, over the
-    1,536 that remains once 512 are held back for the reply. If the reserve were
-    ignored this would be sent untouched, so the clip is the evidence.
+    The 2,048-token window leaves 1,536 tokens after reserving 512 for the reply.
+    The system prompt and request exceed that budget, so the clipping marker and
+    final estimate verify that trimming accounts for the reserve.
     """
     fake = FakeOpenAI(replies=[FINAL])
     agent = build(fake, context_window=2048, reply_reserve=512)

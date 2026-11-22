@@ -88,6 +88,7 @@ _FUNCTIONS: dict[str, Callable[..., float]] = {
 _MAX_EXPONENT = 1_000
 _MAX_FACTORIAL = 1_000
 _MAX_EXPRESSION_LEN = 500
+_COMPARE_SCAN_TIMEOUT_SECONDS = 1.0
 
 
 class CalculationError(ValueError):
@@ -313,10 +314,12 @@ NO_ARG_INPUTS = frozenset(
 def _describe_fields(tool: Tool[Any]) -> str:
     lines = []
     for field_name, field in tool.args_model.model_fields.items():
+        if not field.description:
+            continue
         required = "required" if field.is_required() else "optional"
         lines.append(
             f"    {field_name} ({_type_name(field.annotation)}, {required}): "
-            f"{field.description or ''}".rstrip()
+            f"{field.description}"
         )
     return "\n".join(lines)
 
@@ -332,7 +335,7 @@ def describe_tools() -> str:
         fields = _describe_fields(tool)
         if fields:
             block += f"\n  Arguments:\n{fields}"
-        block += f"\n  Example -> Action: {tool.name}\n             Action Input: {tool.example}"
+        block += f"\n  Example Action Input: {tool.example}"
         blocks.append(block)
     return "\n".join(blocks)
 
@@ -696,6 +699,54 @@ def file_info(path: str) -> str:
     )
 
 
+def _line_count_label(count: int) -> str:
+    return f"{count:,} line{'s' if count != 1 else ''}"
+
+
+def compare_file_lines(first_path: str, second_path: str) -> str:
+    """Compare two workspace text files by line count without returning contents."""
+    workspace = get_workspace()
+    measured: list[tuple[str, int]] = []
+    for candidate in (first_path, second_path):
+        try:
+            facts = workspace.describe_bounded(
+                candidate,
+                max_bytes=workspace.max_file_bytes,
+                timeout_seconds=_COMPARE_SCAN_TIMEOUT_SECONDS,
+            )
+        except SandboxError as exc:
+            return f"Error: {exc}"
+        except OSError as exc:
+            return f"Error: could not read {candidate!r}: {exc.strerror or exc}"
+
+        if facts.binary:
+            return f"Error: unsupported file for line-count comparison: {facts.path} is binary"
+        if facts.lines is None:
+            return f"Error: could not determine a line count for {facts.path}"
+        measured.append((facts.path, facts.lines))
+
+    (first_shown, first_lines), (second_shown, second_lines) = measured
+    if first_lines == second_lines:
+        comparison = f"Comparison: both files have {_line_count_label(first_lines)}."
+    elif first_lines > second_lines:
+        difference = first_lines - second_lines
+        comparison = (
+            f"Comparison: {first_shown} has {difference:,} more "
+            f"line{'s' if difference != 1 else ''} than {second_shown}."
+        )
+    else:
+        difference = second_lines - first_lines
+        comparison = (
+            f"Comparison: {second_shown} has {difference:,} more "
+            f"line{'s' if difference != 1 else ''} than {first_shown}."
+        )
+    return (
+        f"{first_shown}: {_line_count_label(first_lines)}\n"
+        f"{second_shown}: {_line_count_label(second_lines)}\n"
+        f"{comparison}"
+    )
+
+
 class FileInfoArgs(ToolArgs):
     path: str = Field(
         min_length=1,
@@ -706,6 +757,34 @@ class FileInfoArgs(ToolArgs):
 
 def _run_file_info(args: FileInfoArgs) -> str:
     return file_info(args.path)
+
+
+class CompareFileLinesArgs(ToolArgs):
+    first_path: str = Field(
+        min_length=1,
+        max_length=1_000,
+    )
+    second_path: str = Field(
+        min_length=1,
+        max_length=1_000,
+    )
+
+
+def _run_compare_file_lines(args: CompareFileLinesArgs) -> str:
+    return compare_file_lines(args.first_path, args.second_path)
+
+
+TOOLS["compare_file_lines"] = Tool(
+    name="compare_file_lines",
+    description=(
+        "Compare workspace text-file line counts; return both paths/counts and the "
+        "comparison, never contents. Refuse missing, unreadable, binary, oversized, "
+        "or non-file inputs."
+    ),
+    args_model=CompareFileLinesArgs,
+    run=_run_compare_file_lines,
+    example='{"first_path":"a","second_path":"b"}',
+)
 
 
 TOOLS["file_info"] = Tool(

@@ -6,14 +6,24 @@ exception, and never as the contents of something out of bounds.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+import sandbox
+import tools
 from agent import AgentConfig, cap_observation
-from sandbox import Workspace, get_workspace, set_workspace
-from tools import list_directory, read_file, run_tool, search_text
+from sandbox import FileFacts, Workspace, get_workspace, set_workspace
+from tools import (
+    compare_file_lines,
+    describe_tools,
+    list_directory,
+    read_file,
+    run_tool,
+    search_text,
+)
 
 
 @pytest.fixture
@@ -116,6 +126,155 @@ def test_read_file_refuses_a_directory(workspace: Workspace) -> None:
 
 def test_read_file_reports_a_missing_file(workspace: Workspace) -> None:
     assert read_file("nope.txt").startswith("Error:")
+
+
+# --------------------------------------------------------------------------- #
+# compare_file_lines
+# --------------------------------------------------------------------------- #
+
+
+def test_compare_file_lines_reports_paths_counts_and_difference(
+    workspace: Workspace,
+) -> None:
+    result = compare_file_lines("README.md", "src/app.py")
+
+    assert "README.md: 2 lines" in result
+    assert "src/app.py: 5 lines" in result
+    assert "src/app.py has 3 more lines than README.md" in result
+    assert "A local agent." not in result
+
+
+def test_compare_file_lines_reports_equal_and_empty_files(workspace: Workspace) -> None:
+    (workspace.root / "empty.txt").write_text("", encoding="utf-8")
+    (workspace.root / "also-empty.txt").write_text("", encoding="utf-8")
+
+    result = compare_file_lines("empty.txt", "also-empty.txt")
+
+    assert "empty.txt: 0 lines" in result
+    assert "also-empty.txt: 0 lines" in result
+    assert "both files have 0 lines" in result
+
+
+def test_compare_file_lines_counts_an_unterminated_final_line(
+    workspace: Workspace,
+) -> None:
+    (workspace.root / "unterminated.txt").write_text("first\nlast", encoding="utf-8")
+    (workspace.root / "one-line.txt").write_text("only one\n", encoding="utf-8")
+
+    result = compare_file_lines("unterminated.txt", "one-line.txt")
+
+    assert "unterminated.txt: 2 lines" in result
+    assert "one-line.txt: 1 line" in result
+
+
+def test_compare_file_lines_refuses_binary_and_non_file_inputs(
+    workspace: Workspace,
+) -> None:
+    (workspace.root / "blob.dat").write_bytes(b"\x00secret binary payload")
+
+    binary = compare_file_lines("README.md", "blob.dat")
+    directory = compare_file_lines("README.md", "src")
+    missing = compare_file_lines("README.md", "missing.txt")
+
+    assert binary.startswith("Error:")
+    assert "blob.dat" in binary
+    assert "binary" in binary
+    assert "secret binary payload" not in binary
+    assert directory.startswith("Error:")
+    assert "directory" in directory
+    assert missing.startswith("Error:")
+    assert "missing.txt" in missing
+
+
+def test_compare_file_lines_refuses_files_over_workspace_limit(
+    workspace: Workspace,
+) -> None:
+    (workspace.root / "too-large.txt").write_text("123456789", encoding="utf-8")
+    set_workspace(Workspace.at(workspace.root, max_file_bytes=8))
+
+    result = compare_file_lines("too-large.txt", "README.md")
+
+    assert result.startswith("Error:")
+    assert "over the 8-byte limit" in result
+
+
+def test_compare_file_lines_enforces_its_scan_deadline(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    times = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr(sandbox.time, "monotonic", lambda: next(times, 2.0))
+    monkeypatch.setattr(tools, "_COMPARE_SCAN_TIMEOUT_SECONDS", 1.0)
+
+    result = compare_file_lines("README.md", "src/app.py")
+
+    assert result.startswith("Error:")
+    assert "exceeded the 1-second scan limit" in result
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFO files are unavailable")
+def test_compare_file_lines_refuses_a_fifo(workspace: Workspace) -> None:
+    os.mkfifo(workspace.root / "pipe")
+
+    result = compare_file_lines("README.md", "pipe")
+
+    assert result.startswith("Error:")
+    assert "pipe" in result
+
+
+def test_compare_file_lines_reports_unreadable_files_and_obeys_workspace(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_describe = Workspace.describe_bounded
+
+    def unreadable(
+        self: Workspace,
+        candidate: str,
+        *,
+        max_bytes: int,
+        timeout_seconds: float,
+    ) -> FileFacts:
+        if candidate == "src/app.py":
+            raise PermissionError("simulated read denial")
+        return original_describe(
+            self,
+            candidate,
+            max_bytes=max_bytes,
+            timeout_seconds=timeout_seconds,
+        )
+
+    monkeypatch.setattr(Workspace, "describe_bounded", unreadable)
+    unreadable_result = compare_file_lines("README.md", "src/app.py")
+
+    assert unreadable_result.startswith("Error: could not read 'src/app.py':")
+    assert "simulated read denial" in unreadable_result
+
+    monkeypatch.setattr(Workspace, "describe_bounded", original_describe)
+    outside_result = compare_file_lines("../outside/secret.txt", "README.md")
+    hidden_result = compare_file_lines(".env", "README.md")
+
+    assert outside_result.startswith("Error:")
+    assert "TOP SECRET" not in outside_result
+    assert hidden_result.startswith("Error:")
+    assert "sk-never" not in hidden_result
+
+
+def test_compare_file_lines_is_available_through_tool_dispatch(
+    workspace: Workspace,
+) -> None:
+    result = run_tool(
+        "compare_file_lines",
+        '{"first_path": "README.md", "second_path": "src/util.py"}',
+    )
+
+    assert "README.md: 2 lines" in result
+    assert "src/util.py: 1 line" in result
+
+
+def test_compare_file_lines_prompt_keeps_the_compact_json_example() -> None:
+    prompt = describe_tools()
+
+    assert "compare_file_lines(first_path: str, second_path: str)" in prompt
+    assert 'Example Action Input: {"first_path":"a","second_path":"b"}' in prompt
 
 
 # --------------------------------------------------------------------------- #

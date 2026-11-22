@@ -93,7 +93,9 @@ the context window stays clean across a long session.
 |---|---|
 | `calculate(expression: str)` | Evaluates arithmetic: `+ - * / // % **`, parentheses, `pi`/`e`/`tau`, and `sqrt`, `log`, `log10`, `exp`, `sin`, `cos`, `tan`, `floor`, `ceil`, `round`, `abs`, `min`, `max`, `factorial`. |
 | `get_current_time()` | Current local date/time plus the UTC equivalent and the day of the week. |
+| `file_info(path: str)` | Reports a workspace file's size, line count, first line, and last line without returning the full file. |
 | `read_file(path: str)` | Returns a workspace file's text, numbered by line. |
+| `compare_file_lines(first_path: str, second_path: str)` | Compares two workspace text files within the byte limit and cooperative one-second deadline; reports both paths/counts and the comparison, without file contents. |
 | `list_directory(path: str)` | Lists a workspace directory, folders first, with file sizes. |
 | `search_text(query: str, path: str)` | Finds a literal substring under a path and reports `file:line` matches. |
 
