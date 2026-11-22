@@ -153,3 +153,7 @@ The message `docs/pm/codex-stop-and-snapshot-prompt.md` has still not been paste
 14. **Delete the three DISPOSABLE snapshot refs** (brief 26, decision 1): `main-checkout`, `main-checkout-index` and
     the plain `windows-private-root-fix` snapshot, each re-verified by an empty diff just before. Done; 18
     refs remain. The `windows-private-root-fix` **`-index`** twin (two staged files) is kept.
+
+15. **Discard the `AGENTS.md` of the weekly-usage-budget snapshot** (brief 26, decision 4, option B): the snapshot ref
+    (`e17b9c9`, one untracked 17-line `AGENTS.md`) was deleted. The rules live in `~/.claude/CLAUDE.md` and
+    `~/.codex/AGENTS.md` (both present, MEASURED). 17 refs remain.
