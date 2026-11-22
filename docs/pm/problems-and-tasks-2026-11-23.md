@@ -71,3 +71,20 @@ requires it. Rank order is the order to work in; stop when the meter says stop.
 
 ### PM
 - Verify each report by re-running it; merge nothing without the owner; track the meter; keep the owner decisions list (problem 7, 9) and ask only what is theirs.
+
+## PM verification of the SE 01 and AIE 01 results, 2026-11-23 (MEASURED, re-run by the PM in throwaway trees; `__file__` inside each)
+
+Weekly meter was reset by the owner: today's allowance is 0% to 14% (day-1 rule); the PM read 2% weekly.
+
+| Task | Definition of done (from the breakdown) | Result |
+| --- | --- | --- |
+| **SE 01 S1** `se/brief-30a-empty-answer` `682caba` | branch pushed; `main.answer` prints `[!] No answer:` and exits non-zero; no model text, no tool name echoed; `agent.run()` and G2e unchanged; test through `main.answer`; mutation red with hashes; three gates | **Met.** ruff clean, mypy 56 files, **1,072 passed, 2 skipped** (1,065 + 7). Canonical `main.py` restored (`69007bd3d19e`; the SE's file `486daf4c0ff2`, equal before and after): **6 red, 1 passed**; G2e **14 passed**. Message is a fixed sentence by category. The REPL calls `answer()`, so it is covered. **Real model (6 runs, `omniagent-v2:latest`):** 3 runs exit **1** with `[!] No answer: the model asked for a tool that is not allowed for this task.`; the other 3 exit 0 |
+| **SE 01 S2** (29a) | | **Not done.** No commit; `.scratch/se-brief29a` clean at `e7eed11` |
+| **AIE I1** `aiml/first-measurement-20261123` `6dece93` | runner and raw outputs committed; grader reads the answer line only; mutation-checked | **Partly met.** Runner and 7 tests committed; gates **1,072 passed, 2 skipped**. Raw outputs are not committed (they hold model replies under gitignored `data/`; kept locally). **Gap (Medium, reproduced):** replacing `answer = answer_region(blob)` with `answer = blob` in `main()` leaves **7 passed**, so the wiring that fixes the High finding is not pinned by any test: the tests exercise `grade()` and `answer_region()` directly. Hashes: runner `9c38154ca987` before and after |
+| **AIE I2 part 1** where `count_lines` comes from | counts only, no sealed content | **Met, partly re-run.** 0 tracked files mention it at `b164aaa` and on the legacy tag; the registry has 7 entries (PM). The on-disk training-data and model-template counts were **not** re-run by the PM (REPORTED). Conclusion "the model's prior, by elimination" is the AIE's and is **not proven** |
+| **AIE I2 part 2** `--verbose` pass | ten runs, tools, steps | **Not run.** The AIE saw another chair's `qwen2.5-coder:7b` on the GPU and stopped, as the one-run rule requires. No partial result |
+| **AIE I3** `aiml/record-layer-20261123` `5aba0c2` | record layer ported; clean-tree test mutation-checked; new baseline stated; no fixture or data files; `RUNS_PATH` separated | **Met.** ruling-23 scope; three gates **1,078 passed, 2 skipped** (1,065 + 13); `RUNS_PATH` is `data/holdout-runs.jsonl`, `session_eval.py` keeps `data/session-runs.jsonl`. Mutations on `holdout_eval.py` (`1a843b4196ff`, equal before and after): `_tree_clean` always true **1 red**; report keeps every record (filter 1) **1 red**; filter 2 **3 red**. The result document states the baseline and its denominator |
+
+**Product finding from the PM's six real-model runs on the SE's branch (same counting question, tree truth 12):** answers 10, 10, 9, 10 (wrong, exit 0) and three refusals. **No run gave 12.**
+With the AIE's earlier 50, the agent has not yet counted the files correctly in any measured run (PM 11 runs: 0 correct). The silent-blank defect is fixed; the confident wrong number is not.
+Not merged anywhere; nothing deleted. Leftover empty directories `pm-verify-fm`, `pm-verify-rl`, `pm-verify-s1` under `.scratch/` (their worktrees are unregistered; the automatic safety check blocked the PM's `rmdir`).
