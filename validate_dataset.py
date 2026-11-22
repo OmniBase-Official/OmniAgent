@@ -28,20 +28,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from dataset_limits import (
+    MAX_DATASET_BYTES,
+    MAX_DATASET_EXAMPLES,
+    MAX_DATASET_LINE_BYTES,
+    MAX_DATASET_LINES,
+    MAX_JSON_NESTING,
+)
 from trajectory_utils import actions_in as _actions_in
 
 #: Below this, a fine-tune is not worth starting. A warning, not an error.
 DEFAULT_MIN_EXAMPLES = 10
-
-#: Conservative streaming bounds for an explicit training dataset. The largest
-#: example documented in this repository has 47 examples and 237,199 content
-#: characters; the historical training note records 109 examples. These caps
-#: leave substantial headroom while bounding parser and duplicate-check work.
-MAX_DATASET_BYTES = 256 * 1024 * 1024
-MAX_DATASET_LINE_BYTES = 4 * 1024 * 1024
-MAX_DATASET_EXAMPLES = 100_000
-MAX_DATASET_LINES = 1_000_000
-MAX_JSON_NESTING = 128
 
 VALID_ROLES = frozenset({"system", "user", "assistant"})
 
@@ -305,9 +302,7 @@ def validate_file(  # noqa: PLR0912, PLR0915 - one branch per validation failure
     if report.examples > 1 and len(digests) == 1:
         report.warnings.append("every example is identical")
     if report.examples and not report.actions:
-        report.warnings.append(
-            "no Action lines found; this dataset will not teach tool use"
-        )
+        report.warnings.append("no Action lines found; this dataset will not teach tool use")
     return report
 
 

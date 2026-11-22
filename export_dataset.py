@@ -29,6 +29,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from dataset_limits import (
+    MAX_DATASET_BYTES,
+    MAX_DATASET_EXAMPLES,
+    DatasetInputLimitError,
+    has_excessive_json_nesting,
+    iter_dataset_lines,
+)
 from dataset_provenance import write_sidecar
 from observability import TRUNCATION_MARKER
 from trajectory_utils import actions_in as _actions_in
@@ -102,20 +109,43 @@ def read_records(paths: Iterable[Path]) -> Iterator[dict[str, Any]]:
     """Yield every well-formed JSON object across the given log files.
 
     A half-written final line is normal for a log that is still open, so a
-    malformed line is skipped rather than fatal.
+    line that is not JSON (or not UTF-8) is skipped rather than fatal.
+
+    A log is still a file somebody else may have written, so the read is bounded
+    by the limits in ``dataset_limits``: a line, file, line count, record count or
+    nesting depth over a limit raises ``DatasetError`` rather than being skipped as
+    though it were a torn tail. The byte and record limits apply to all the files
+    together.
     """
-    for path in paths:
-        with path.open(encoding="utf-8") as handle:
-            for line in handle:
-                stripped = line.strip()
+    files = list(paths)
+    if sum(path.stat().st_size for path in files) > MAX_DATASET_BYTES:
+        raise DatasetError(f"the log files together exceed {MAX_DATASET_BYTES} bytes")
+    yielded = 0
+    for path in files:
+        try:
+            for _number, raw in iter_dataset_lines(path):
+                stripped = raw.strip()
                 if not stripped:
                     continue
                 try:
-                    record = json.loads(stripped)
+                    text = stripped.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                if has_excessive_json_nesting(text):
+                    raise DatasetError(f"{path.name} has JSON nested deeper than the limit")
+                try:
+                    record = json.loads(text)
                 except json.JSONDecodeError:
                     continue
                 if isinstance(record, dict) and "event" in record:
+                    yielded += 1
+                    if yielded > MAX_DATASET_EXAMPLES:
+                        raise DatasetError(
+                            f"the log files hold over {MAX_DATASET_EXAMPLES} records"
+                        )
                     yield record
+        except DatasetInputLimitError as exc:
+            raise DatasetError(f"{path.name}: {exc}") from exc
 
 
 # --------------------------------------------------------------------------- #

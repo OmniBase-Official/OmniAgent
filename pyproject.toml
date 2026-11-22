@@ -52,6 +52,7 @@ py-modules = [
     "observability",
     "export_dataset",
     "dataset_provenance",
+    "dataset_limits",
     "sandbox",
     "validate_dataset",
     "config",
@@ -76,6 +77,7 @@ files = [
     "validate_dataset.py",
     "config.py",
     "dataset_provenance.py",
+    "dataset_limits.py",
     "scripts/collect_dataset.py",
     # The evaluation scripts produce the numbers this project quotes, so they
     # are checked like the agent is. They were outside this list until the

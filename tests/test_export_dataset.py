@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 
+import dataset_limits
+import export_dataset
 from export_dataset import (
     DatasetError,
     build_examples,
@@ -437,3 +439,63 @@ def test_stats_name_the_tools_that_were_used(tmp_path: Path) -> None:
 
     assert "exported   : 1" in rendered
     assert "calculate: 1" in rendered
+
+
+# --------------------------------------------------------------------------- #
+# read_records is bounded: a log is a file someone else may have written
+# --------------------------------------------------------------------------- #
+
+RECORD = b'{"event": "agent.turn.start", "turn": 1}\n'
+
+
+def test_a_torn_tail_and_non_objects_are_still_skipped(tmp_path: Path) -> None:
+    log = tmp_path / "run.jsonl"
+    log.write_bytes(RECORD + b"[1, 2]\n" + b'"text"\n' + b"\xff\xfe\n" + b'{"event": "agent.tu')
+
+    assert len(list(read_records([log]))) == 1
+
+
+def test_an_overlong_line_is_refused_not_skipped_as_a_torn_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dataset_limits, "MAX_DATASET_LINE_BYTES", 64)
+    log = tmp_path / "run.jsonl"
+    log.write_bytes(RECORD + b"x" * 100 + b"\n")
+
+    with pytest.raises(DatasetError, match=r"run\.jsonl: line 2 exceeds"):
+        list(read_records([log]))
+
+
+def test_deeply_nested_json_is_refused_not_a_recursion_error(tmp_path: Path) -> None:
+    log = tmp_path / "run.jsonl"
+    depth = dataset_limits.MAX_JSON_NESTING + 1
+    log.write_bytes(b'{"event": "x", "a": ' + b"[" * depth + b"]" * depth + b"}\n")
+
+    with pytest.raises(DatasetError, match="nested deeper"):
+        list(read_records([log]))
+
+
+def test_the_byte_limit_counts_every_log_file_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    first.write_bytes(RECORD)
+    second.write_bytes(RECORD)
+    monkeypatch.setattr(export_dataset, "MAX_DATASET_BYTES", len(RECORD) * 2 - 1)
+
+    assert len(list(read_records([first]))) == 1
+    with pytest.raises(DatasetError, match="together exceed"):
+        list(read_records([first, second]))
+
+
+def test_the_record_limit_counts_every_log_file_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    first.write_bytes(RECORD * 2)
+    second.write_bytes(RECORD * 2)
+    monkeypatch.setattr(export_dataset, "MAX_DATASET_EXAMPLES", 3)
+
+    assert len(list(read_records([first]))) == 2
+    with pytest.raises(DatasetError, match="over 3 records"):
+        list(read_records([first, second]))
