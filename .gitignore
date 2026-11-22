@@ -37,3 +37,8 @@ omniagent.local.toml
 # Trained models, adapters, GGUF and the llama.cpp checkout
 models/
 .superpowers/
+
+# Local tooling, scratch trees and the local core copy: never committed
+.ai/
+.scratch/
+omniagent-core/
