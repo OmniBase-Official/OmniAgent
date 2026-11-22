@@ -161,3 +161,37 @@ the PM merges later; do not push to either `main`.
 G2d's refusal string changed, you have not pinned G2b. The only proof is the
 single-guard mutation, so run all of them, one at a time, and read which tests
 went red.
+
+## Result
+
+**Delivered 2026-11-22 by SE 02** on branch `claude/se-gate2-guard-tests-09c889`
+(`01a0938`, based on `5005039`, one file added:
+`tests/test_tool_allowlist_guards.py`, +14 tests, no production change). Nothing
+merged. The SE reported 874 passed / 2 skipped, ruff clean, mypy clean.
+
+| guard | red before | red with the new file (single-guard mutation) |
+| --- | --- | --- |
+| G2a `agent.py:694` | 0 | 2, both new |
+| G2b `agent.py:992` | 0 | 2 (one is G2a's behavioural test, inherent: G2a's effect is visible only through G2b) |
+| G2c `tools.py:442` | 2 | 4 (2 old + 2 new) |
+| G2d `tools.py:458` | 0 | 2, both new |
+| G2e `agent.py:872` | 2 | 3 (2 old + 1 new) |
+| G2f `agent.py:701` | 0 | 1, new |
+| G2b + G2d together | 1 | 6 |
+
+**G2f is a design question, not dead code:** `allowed_capabilities` is only
+ever tested for membership of the one real capability, so a stray name changes
+nothing but the attribute; the new test pins the attribute. Whether to keep a
+guard with no behavioural effect is the SAE's call (defence in depth).
+
+## PM verification (2026-11-22)
+
+Re-run by the PM in a scratch worktree of `5005039` with the SE's file added,
+none of the SE's numbers taken on trust: baseline **874 passed, 2 skipped**;
+every row above reproduced exactly (including the two the SE did not run as a
+pair, G2b + G2d: **6 red**, up from 1); `agent.py` hash `fe1ab9de…` and
+`tools.py` hash `b66c503c…` identical before and after every mutation, restored
+from a saved copy. The PM read lines 1–120 of the test file (spies go through
+`monkeypatch`, no socket, no state leaking between tests) and did **not** read
+the remaining 214. Not covered: the G2g rows (the SE's own table, not re-run),
+a Linux run.
