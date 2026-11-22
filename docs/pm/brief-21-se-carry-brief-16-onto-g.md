@@ -145,3 +145,51 @@ either `main`. The PM merges both briefs independently.
 **Fixing the message strings and missing a log field.** The URL reached users
 through three paths on G, one of them a structured log event rather than a string.
 Search for the *value*, not the three line numbers.
+
+## Result
+
+**Delivered 2026-11-22 by SE 02** on branch `claude/se-brief21-defaults-and-url`
+(`6831ba7`, one commit on `5005039`; 8 files: `agent.py`, `config.py`, `main.py`,
+`omniagent.toml`, `README.md` (2 lines), `tests/test_config.py`,
+`tests/test_shipped_config.py`, new `tests/test_endpoint_not_in_messages.py`).
+Nothing merged. SE-reported gates: ruff clean, mypy clean, **881 passed, 2 skipped**.
+
+What changed: `[defaults].model` is `qwen2.5:7b` (matches `DEFAULT_MODEL`; demo
+profile untouched); a fixed `client_max_retries: Literal[0]` is documented beside
+`max_retries` and passed to the SDK client; `verbose` is False at `agent.py:479`
+and `config.py:75`; `--verbose` is mutually exclusive with `--quiet`; the two
+error messages say `(endpoint: loopback)` from
+`validate_openai_client_endpoint(self.client)`.
+
+**A correction to the brief itself.** The URL had **six** holders, not three: two
+error strings and **four** log calls passing `base_url=`. The four log events
+were never a leak: `observability.event` keeps a closed field schema
+(`_EVENT_FIELDS`) that does not contain `base_url` (PM confirmed: zero
+occurrences in `observability.py` on `5005039`), so they were a call-site
+hazard; the SE removed all four arguments anyway and test-watches the arguments.
+The PM's own finding on the log event at `agent.py:~766` is therefore
+**downgraded from "leak" to "hazard"**.
+
+**Open, not fixed (brief said leave):** `main.py:200` prints `endpoint :
+{base_url}` and `--print-config` prints the `base_url` row to the terminal; the
+validator's own error may echo a bad `--base-url`. Neither was examined.
+
+## PM verification (2026-11-22)
+
+Re-run by the PM in a scratch worktree of `6831ba7`: baseline **881 passed, 2
+skipped**; the `agent` import resolved inside the worktree; every mutation
+reproduced and the SE's file hashes matched before and after each:
+
+| Mutation | Red |
+| --- | --- |
+| Ma `DEFAULT_MODEL` drift | 1 (`test_shipped_default_model_matches_the_code_default`) |
+| Mb provenance forced to one layer | 16 |
+| Mc demo model to the base tag | 1 (`test_demo_profile_pins_the_fine_tune`) |
+| Md-cfg `config.py` verbose True | 1 (`test_settings_are_quiet_by_default`) |
+| **Md-agent** `agent.py` verbose True | **1, only the direct test** (`test_agent_config_is_quiet_by_default_on_its_own`) |
+| Me exclusion group removed | 1 |
+| Mr SDK client `max_retries=2` | 2 |
+| Mu1 / Mu5 URL back into a message | 1 each, its own test |
+
+Not re-run by the PM: Mu2, Mu3, Mu4, Mu6 (the SE reports each caught only by its
+argument-spy test), Meval, and any run of `main.py` beyond argument parsing.
