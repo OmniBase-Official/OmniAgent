@@ -10,6 +10,7 @@ and where this directory and the contract differ, the contract governs.
 | --- | --- | --- |
 | [ADR-0001](ADR-0001-the-architecture-record-and-the-codex-drafts.md) | What became of four uncommitted Codex drafts: two adopted, one half-adopted, one parked | Accepted by the architect, 2026-11-04 |
 | [ADR-0002](ADR-0002-the-wheel-this-project-builds-is-broken.md) | The built wheel cannot import its own dataset exporter, and what that does to the package move | **Proposed — awaiting the owner's choice of option** |
+| [ADR-0003](ADR-0003-the-two-mains.md) | What is on each of the two `main`s (`origin` 3c76fd2, `organization` 5005039), measured: redundant, complementary and contradictory by file; the cross-run test matrix; the carry-over inventory | **Accepted — option A (G canonical), owner ruling 2026-11-22.** Its endpoint, holdout and `securefs.py` questions are still the owner's |
 | [system-overview.md](system-overview.md) | Data flow, components, trust boundaries, the served model's identity | Current at `ae5cd95` |
 | [security-and-ethics.md](security-and-ethics.md) | Evidence ledger, licensing and provenance inventory, what is missing before a pilot | Current at `ae5cd95` |
 | [repository-map.md](repository-map.md) | What each path is for, and what is deliberately not on `main` | Current at `ae5cd95` |
