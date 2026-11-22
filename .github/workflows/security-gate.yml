@@ -15,26 +15,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  secret-scan:
-    name: Gitleaks / full history
+  gitleaks-report-contract:
+    name: Gitleaks / synthetic report contract
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Scan repository history
-        run: >-
-          docker run --rm
-          --read-only
-          --cap-drop=ALL
-          --security-opt=no-new-privileges
-          --network=none
-          --volume "$GITHUB_WORKSPACE:/repo:ro"
-          --workdir /repo
-          ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:b109bc5f8f76a38196a3e413704fc5b9e3c32360bce4e4b603bd6f45b3721dbb
-          git --redact --no-banner --log-opts=--all
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Validate helper and parser boundaries
+        run: |
+          python -m py_compile .github/scripts/gitleaks_report.py .github/scripts/test_gitleaks_report.py
+          python -m unittest discover -s .github/scripts -p 'test_gitleaks_report.py'
+      - name: Validate pinned image with clean and synthetic canary repositories
+        run: python .github/scripts/gitleaks_report.py contract .github/scripts/gitleaks-report.tmpl .github/scripts/gitleaks-report-mutant.tmpl
+
+  secret-scan:
+    name: Gitleaks / full history sanitized report
+    needs: gitleaks-report-contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Scan full history after synthetic contract passes
+        run: python .github/scripts/gitleaks_report.py scan "$GITHUB_WORKSPACE" .github/scripts/gitleaks-report.tmpl
 
   dependency-audit:
     name: pip-audit / installed dependencies
