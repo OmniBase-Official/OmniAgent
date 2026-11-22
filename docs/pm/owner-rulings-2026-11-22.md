@@ -178,3 +178,8 @@ The message `docs/pm/codex-stop-and-snapshot-prompt.md` has still not been paste
     In a throwaway tree at `b164aaa` (module paths inside it): ruff clean, mypy 55 files, **1,065 passed, 2 skipped**; restoring `agent.py` of
     `388fa53` (`8a61a2063a5d`) turns the preflight test red (2 failed), the merged file (`6961cc0922ff`) before and after gives 3 passed.
     Not done: the main checkout on this branch is still at `388fa53` (not fast-forwarded: owner's word needed); wheel build still UNVERIFIED.
+
+19. **Delete the two dataset-bounds snapshot refs** (brief 27, decision; owner: "Delete 2 refs"): `scratch_pre-user-dataset-bounds-20261119`
+    (`ba3598f`) and `codex_worktrees_dataset-input-bounds-20261116_OmniAgent` (`38ea900`). Done by the PM after the brief 28 merge (`b164aaa`)
+    was verified; neither was on a remote; objects survive until `git gc`. 12 snapshot refs remain. Deliberately not carried over: `ba3598f`'s
+    `collect_turns`/`build_examples` budgets (not asked for) and its smaller limits (they broke 27 canonical tests).
