@@ -170,7 +170,8 @@ def main(argv: list[str] | None = None) -> int:
     for number in range(1, args.passes + 1):
         for qid, text, expected, wants in questions:
             path = out / f"p{number:02d}-{qid}.txt"
-            if path.exists() and DONE_MARKER in path.read_text(encoding="utf-8"):
+            cached = path.exists() and DONE_MARKER in path.read_text(encoding="utf-8")
+            if cached:
                 blob = path.read_text(encoding="utf-8")
                 seconds = float("nan")
             else:
@@ -207,6 +208,14 @@ def main(argv: list[str] | None = None) -> int:
                     "used_wanted_tool": (wants in trace.tools) if wants else None,
                 }
             )
+            if not cached:
+                # One row per executed run, written as it happens so a dead session loses
+                # nothing, with the commit and tree state read *at this run* rather than once.
+                commit, clean = _revision(project)
+                rows[-1]["commit"] = commit
+                rows[-1]["tree_clean"] = clean
+                with (out / "runs.jsonl").open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(rows[-1]) + chr(10))
             print(json.dumps(rows[-1]), flush=True)
 
     after = _revision(project)
