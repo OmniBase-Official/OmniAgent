@@ -114,3 +114,21 @@ Method: every file's blob hash at its path, compared with every remote ref (60 r
 - The three belong to the `securefs` / publisher-ACL line, which the owner has **not ruled on**. They are
   preserved only in the local snapshot ref `13c7bfb`, **not pushed**. That ref therefore must not be
   deleted until the owner rules, or until these three are salvaged by path.
+
+## PM re-check of the SAE's challenge to the securefs findings, 2026-11-23 (MEASURED, owner: "Verify now")
+
+The SAE (`b13d087`) said the three files are absent from `13c7bfb`, that `securefs.py` is byte-identical to a public branch, and that all
+three are public on both remotes. Re-run by the PM from the refs (68 remote refs, both remotes fetched):
+
+| Claim | Result |
+| --- | --- |
+| The three paths are absent from `13c7bfb` | **True at the top level** (`git cat-file -e` fails for all three). **But** `13c7bfb` holds them under the nested tree `.scratch/publisher-acl-fix-20261115/` (all three present), which is what brief 26 and ruling 13 meant. The SAE checked only the top-level paths |
+| They live in three other snapshots | **Confirmed**: `security-validation-r37` (`900d8b6`), `windows-private-root-fix-index` (`033b308`), `windows-sid-validation` (`f44cbf3`) |
+| `securefs.py` in those three is byte-identical to the public branch | **Confirmed**: blob `b28ed99b4e`, 1,319 lines, same as `codex/windows-private-root-validation-20261121`, `security-runner-fixtures-20261120`, `security-scans-validation-20261120` on **both** remotes |
+| The +227/-3 figure is wrong | **Not wrong, but against a different base.** The nested copy (blob `de39fe0668`, 1,178 lines) vs `codex/scale-security-hardening-20261113` (954 lines) is **+227/-3, reproduced exactly**. Against the newest public `securefs.py` (1,319 lines) it is +125/-266: an older or different revision |
+| Nothing is only local | **Not true.** The nested `securefs.py` blob is on **no** remote ref at that path (all 68 checked). Also on no remote at the same path: the nested `.ps1` (8,275 bytes) and test (3,443 bytes); the `.ps1` of `security-validation-r37` (`c9f4bf12`); the test of `security-validation-r37` (`4ba9d366`) and of `windows-private-root-fix-index` (`586f9662`). The public `.ps1` and test files are **larger** (54,527 and 22,250 bytes on `windows-private-root-validation`), so the unpublished ones may be superseded earlier revisions: **UNVERIFIED** (no history walk) |
+
+**Net:** the earlier PM finding stands for the nested copies (unpublished, not hidden-valuable); the SAE is right that the current 1,319-line
+`securefs.py` is already public on both remotes and that the memo's question is whether it comes onto the canonical line. The SAE's
+"everything is already public" overstates by a handful of older revisions. Consequence: none of those four snapshot refs (`13c7bfb`, `900d8b6`,
+`033b308`, `f44cbf3`) is deleted until the owner rules; the memo's recommendation (park) is unaffected.
