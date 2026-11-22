@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+import main as main_module
+import observability as obs
 from agent import DEFAULT_MODEL
 from config import DEFAULT_CONFIG_NAME, Settings, resolve
 
@@ -89,15 +91,74 @@ def test_demo_profile_is_deterministic() -> None:
     assert settings.temperature == 0.0
 
 
-def test_demo_profile_records_the_run() -> None:
-    settings, _ = _resolve("demo")
-    assert settings.log_file is not None
+def test_shipped_profiles_do_not_enable_persistent_operational_logs() -> None:
+    for profile in _profile_names():
+        settings, _ = _resolve(profile)
+        assert settings.log_file is None
+
+
+@pytest.mark.parametrize(
+    "source", ["cli", "environment", "dotenv", "toml-defaults", "toml-profile"]
+)
+def test_log_file_is_rejected_from_every_config_source_before_startup(
+    source: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "not-created" / "operational.jsonl"
+    config_path = tmp_path / "settings.toml"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OMNIAGENT_LOG_FILE", raising=False)
+    arguments = ["--ask", "synthetic prompt"]
+
+    if source == "cli":
+        arguments.extend(["--log-file", str(output_path)])
+    elif source == "environment":
+        monkeypatch.setenv("OMNIAGENT_LOG_FILE", str(output_path))
+    elif source == "dotenv":
+        (tmp_path / ".env").write_text(
+            f"OMNIAGENT_LOG_FILE={output_path}\n", encoding="utf-8"
+        )
+    elif source in {"toml-defaults", "toml-profile"}:
+        section = (
+            f'[defaults]\nlog_file = "{output_path.as_posix()}"\n'
+            if source == "toml-defaults"
+            else f'[profile.review]\nlog_file = "{output_path.as_posix()}"\n'
+        )
+        config_path.write_text(section, encoding="utf-8")
+        arguments.extend(["--config", str(config_path)])
+        if source == "toml-profile":
+            arguments.extend(["--profile", "review"])
+
+    monkeypatch.setattr(
+        main_module,
+        "ReActAgent",
+        lambda *_args, **_kwargs: pytest.fail("agent must not be constructed"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "preflight",
+        lambda *_args, **_kwargs: pytest.fail("model preflight must not run"),
+    )
+    monkeypatch.setattr(
+        obs,
+        "configure",
+        lambda *_args, **_kwargs: pytest.fail("logging must not be configured"),
+    )
+
+    result = main_module.main(arguments)
+
+    assert result == 2
+    assert "retention and deletion policy" in capsys.readouterr().out
+    assert not output_path.parent.exists()
+    assert not output_path.exists()
 
 
 def test_the_demo_runs_the_step_budget_the_evaluations_measure() -> None:
     """The demo should not be the one configuration nobody has measured.
 
-    Every figure in NEXT_CHAT.md comes from max_steps=8. The demo profile
+    Every figure in the frozen evaluation baseline comes from max_steps=8. The demo profile
     shipped 12, and rehearsing it there the question "What is inside the data
     directory?" spent all twelve steps and returned "I ran out of reasoning
     steps before reaching an answer" -- a question that is 10/10 at 3-9 steps

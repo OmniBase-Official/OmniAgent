@@ -1,9 +1,9 @@
-"""Turn OmniAgent's run logs into a supervised fine-tuning dataset.
+"""Convert synthetic conversation records to chat-format examples.
 
-Every run already records the exact conversation the model saw -- the system
-prompt, the question, each raw reply, and each Observation -- so no separate
-collection step is needed. This module replays those records back into the chat
-format that TRL and transformers consume:
+The command-line exporter is disabled until a dataset sink, provenance
+contract, and retention/deletion policy are approved. Pure conversion helpers
+remain available for synthetic unit tests; operational logs are never a
+dataset source.
 
     {"messages": [{"role": "system", ...}, {"role": "user", ...}, ...]}
 
@@ -11,9 +11,6 @@ What gets left out matters as much as what goes in. Training on a turn where
 the model broke format teaches it to break format, so by default only turns
 that went cleanly from question to Final Answer are exported.
 
-Usage::
-
-    python export_dataset.py data/*.jsonl -o dataset.jsonl --stats
 """
 
 from __future__ import annotations
@@ -29,7 +26,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from dataset_provenance import write_sidecar
 from observability import TRUNCATION_MARKER
 
 #: Events that mean the turn contains a message the log does not record
@@ -129,12 +125,28 @@ def _is_truncated(*values: object) -> bool:
 def collect_turns(  # noqa: PLR0912 - one branch per log event we replay
     records: Iterable[dict[str, Any]],
 ) -> tuple[list[Turn], dict[str, str]]:
-    """Group records into turns, and collect each session's system prompt."""
+    """Group records from a dedicated dataset sink into turns.
+
+    Operational logs are intentionally telemetry-only and are never a source
+    for trajectory export, including older logs that may still contain raw
+    conversation fields.
+    """
     turns: dict[tuple[str, int], Turn] = {}
     order: list[tuple[str, int]] = []
     prompts: dict[str, str] = {}
 
     for record in records:
+        if record.get("record_type") == "operational_telemetry":
+            raise DatasetError(
+                "operational logs cannot be exported; use a separately approved dataset sink"
+            )
+        logger_name = record.get("logger")
+        if isinstance(logger_name, str) and (
+            logger_name == "omniagent" or logger_name.startswith("omniagent.")
+        ):
+            raise DatasetError(
+                "operational logs cannot be exported; use a separately approved dataset sink"
+            )
         event = record.get("event")
         session_id = str(record.get("session_id", ""))
 
@@ -351,13 +363,9 @@ def _actions_in(reply: str) -> list[str]:
 
 
 def write_examples(examples: Iterable[dict[str, list[dict[str, str]]]], path: Path) -> int:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    written = 0
-    with path.open("w", encoding="utf-8") as handle:
-        for example in examples:
-            handle.write(json.dumps(example, ensure_ascii=False) + "\n")
-            written += 1
-    return written
+    """Reject persistent dataset writes until the approved policy exists."""
+    _ = examples, path
+    raise DatasetError("dataset writing is disabled pending approved retention and provenance")
 
 
 # --------------------------------------------------------------------------- #
@@ -368,7 +376,7 @@ def write_examples(examples: Iterable[dict[str, list[dict[str, str]]]], path: Pa
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="export_dataset",
-        description="Turn OmniAgent run logs into a chat-format SFT dataset.",
+        description="Disabled pending approved dataset sink, provenance, and retention policy.",
     )
     parser.add_argument("logs", nargs="+", help="JSON-lines log files (globs allowed).")
     parser.add_argument(
@@ -397,40 +405,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-
-    try:
-        paths = expand_paths(args.logs)
-    except DatasetError as exc:
-        print(f"[!] {exc}", file=sys.stderr)
-        return 1
-
-    turns, prompts = collect_turns(read_records(paths))
-    examples, stats = build_examples(
-        turns,
-        prompts,
-        include_tool_errors=args.include_tool_errors,
-        min_steps=args.min_steps,
+    parse_args(argv)
+    print(
+        "[!] dataset export is disabled until a dataset sink, provenance contract, "
+        "and retention/deletion policy are approved",
+        file=sys.stderr,
     )
-
-    if args.stats or args.dry_run:
-        print(stats.render())
-
-    if args.dry_run:
-        return 0
-
-    if not examples:
-        print("[!] nothing to export", file=sys.stderr)
-        return 1
-
-    written = write_examples(examples, args.output)
-    # After the dataset, so a failed export leaves no sidecar claiming to
-    # describe it. The prompt in force now is what these examples were
-    # collected under, and nothing else records that.
-    sidecar = write_sidecar(args.output)
-    print(f"wrote {written} example{'s' if written != 1 else ''} to {args.output}")
-    print(f"recorded the system prompt it was collected under in {sidecar}")
-    return 0
+    return 2
 
 
 if __name__ == "__main__":

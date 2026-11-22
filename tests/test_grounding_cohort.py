@@ -7,23 +7,24 @@ client; nothing in this module may reach a model server.
 
 from __future__ import annotations
 
-import inspect
 import json
 import shutil
+import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import replace
+from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-import grounding_cohort
+import grounding_cohort as cohort_module
 import pytest
-from eval_workspace import sealed_workspace
+from eval_workspace import fixture_only_workspace
 from grounding_cohort import (
     ARM,
     FIXTURE,
-    SEALED_FROM_TRIALS,
     TASKS,
     Observed,
     Preflight,
@@ -37,6 +38,7 @@ from grounding_cohort import (
 )
 
 import agent as agent_module
+import tools as tools_module
 from sandbox import SandboxError, get_workspace
 from tests.fakes import FakeOpenAI
 
@@ -64,22 +66,43 @@ def test_the_fixture_hash_changes_when_any_fixture_byte_changes(tmp_path: Path) 
 
 
 def test_the_fixture_hash_changes_when_a_file_is_added(tmp_path: Path) -> None:
-    """Content alone is not the fixture: its inventory is part of it."""
+    """An expanded inventory is drift, and is rejected before it is hashed."""
     copy = _copy_fixture(tmp_path)
-    before = fixture_sha256(copy)
-
     (copy / "ledger-gamma.txt").write_text("another ledger\n", encoding="utf-8")
 
-    assert fixture_sha256(copy) != before
+    with pytest.raises(ValueError, match="fixture inventory"):
+        fixture_sha256(copy)
 
 
 def test_the_fixture_hash_changes_when_a_file_is_renamed(tmp_path: Path) -> None:
     copy = _copy_fixture(tmp_path)
-    before = fixture_sha256(copy)
-
     (copy / "ledger-beta.txt").rename(copy / "ledger-delta.txt")
 
-    assert fixture_sha256(copy) != before
+    with pytest.raises(ValueError, match="fixture inventory"):
+        fixture_sha256(copy)
+
+
+def test_fixture_hash_rejects_links_before_opening_fixture_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    copy = _copy_fixture(tmp_path)
+    target = copy / "ledger-alpha.txt"
+    target.unlink()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("OUTSIDE_CANARY", encoding="utf-8")
+    try:
+        target.symlink_to(outside)
+    except OSError as exc:
+        if sys.platform == "win32":
+            pytest.skip(f"Windows symlink privilege or Developer Mode unavailable: {exc}")
+        raise
+
+    def fail_if_read(*_args: Any, **_kwargs: Any) -> str:
+        pytest.fail("fixture files must not be read before link validation")
+
+    monkeypatch.setattr(Path, "read_text", fail_if_read)
+    with pytest.raises(ValueError, match="links and reparse points"):
+        fixture_sha256(copy)
 
 
 def test_the_fixture_hash_ignores_the_line_ending_the_checkout_happens_to_use(
@@ -260,6 +283,7 @@ def test_the_trial_record_carries_every_field_the_contract_lists() -> None:
     )
 
     assert record == {
+        "record_type": "evaluation_trial",
         "cohort_id": "cohort-fixture",
         "trial_id": "cohort-fixture/grounding-v1/r1",
         "task_id": "grounding-v1",
@@ -288,6 +312,47 @@ def test_the_trial_record_carries_every_field_the_contract_lists() -> None:
         "answer_names_distractor": False,
         "tools_within_allowlist": True,
     }
+
+
+def test_trial_record_schema_rejects_untrusted_values_without_echoing_them() -> None:
+    record = trial_record(
+        cohort_id="cohort-fixture", trial_id="cohort-fixture/grounding-v1/r1",
+        task=TASKS[0], repeat=1, preflight=_preflight(), fixture_hash="f" * 64,
+        protocol_hash="e" * 64, observed=_observed(),
+    )
+    import grounding_cohort as cohort_module
+
+    mutations = [
+        ("extra", lambda r: r.update(extra="CANARY_SECRET\\npayload")),
+        ("cohort_id", lambda r: r.update(cohort_id="CANARY_SECRET\\npayload")),
+        ("trial_id", lambda r: r.update(trial_id="CANARY_SECRET\\npayload")),
+        ("commit", lambda r: r.update(commit="CANARY_SECRET\\npayload")),
+        ("model_tag", lambda r: r.update(model_tag="CANARY_SECRET\\npayload")),
+        ("model_digest", lambda r: r.update(model_digest="CANARY_SECRET\\npayload")),
+        ("runtime_version", lambda r: r.update(runtime_version="CANARY_SECRET\\npayload")),
+        ("enum", lambda r: r.update(execution_status="CANARY_SECRET\\npayload")),
+        ("collection", lambda r: r.update(allowlist=["CANARY_SECRET\\npayload"])),
+        ("number", lambda r: r.update(temperature=float("nan"))),
+    ]
+    for _label, mutate in mutations:
+        candidate = deepcopy(record)
+        mutate(candidate)
+        with pytest.raises(ValueError, match="invalid evaluation_trial record") as exc:
+            cohort_module.validate_trial_record(candidate)
+        assert "CANARY_SECRET" not in str(exc.value), _label
+
+
+def test_trial_record_is_json_serializable_with_closed_keys() -> None:
+    import grounding_cohort as cohort_module
+
+    record = trial_record(
+        cohort_id="cohort-fixture", trial_id="cohort-fixture/grounding-v1/r1",
+        task=TASKS[0], repeat=1, preflight=_preflight(), fixture_hash="f" * 64,
+        protocol_hash="e" * 64, observed=_observed(),
+    )
+    decoded = json.loads(json.dumps(record, allow_nan=False))
+    assert set(decoded) == cohort_module.TRIAL_RECORD_KEYS
+    assert cohort_module.validate_trial_record(decoded) == record
 
 
 def test_the_trial_record_carries_no_prompt_answer_content_or_url() -> None:
@@ -443,6 +508,7 @@ def test_six_trials_are_recorded_individually_never_averaged() -> None:
     )
 
     assert len(result.records) == 6
+    assert all(record["record_type"] == "evaluation_trial" for record in result.records)
     assert [(r["task_id"], r["repeat"]) for r in result.records] == [
         ("grounding-v1", 1),
         ("grounding-v1", 2),
@@ -515,19 +581,28 @@ def test_an_answer_naming_the_wrong_row_is_not_grounded() -> None:
     assert result.records[0]["answer_names_distractor"] is True
 
 
-def test_a_disallowed_tool_request_is_recorded_as_a_policy_violation() -> None:
-    """Recorded, not retried, and never pooled with a wrong answer.
-
-    This proves the evaluator notices. It does not prove the dispatcher
-    refuses: there is no per-task allowlist in the dispatcher, so the call did
-    run. That gate is the security engineer's, not this module's.
-    """
+def test_a_disallowed_tool_request_is_rejected_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject before Tool.run, stop the trial, and do not issue another request."""
     task = TASKS[0]
     fake = FakeOpenAI(
         replies=[
             "Thought: arithmetic instead\nAction: calculate\nAction Input: 2+2",
             _answer_step(f"The value is {accepted_answer(task)}."),
         ]
+    )
+    calculate = tools_module.TOOLS["calculate"]
+    dispatched: list[Any] = []
+
+    def count_dispatch(args: Any) -> str:
+        dispatched.append(args)
+        return calculate.run(args)
+
+    monkeypatch.setitem(
+        tools_module.TOOLS,
+        "calculate",
+        replace(calculate, run=count_dispatch),
     )
 
     result = run_cohort(
@@ -545,7 +620,8 @@ def test_a_disallowed_tool_request_is_recorded_as_a_policy_violation() -> None:
     assert record["tools"] == ["calculate"]
     assert result.failed == 1
     assert result.completed == 0
-    assert len(fake.calls) == 2, "a violated trial must not be run again"
+    assert len(fake.calls) == 1, "a policy violation must stop before another model request"
+    assert dispatched == [], "a task-disallowed tool must not execute"
 
 
 def test_the_cohort_never_constructs_a_real_client(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -644,32 +720,159 @@ def test_the_cohort_leaves_the_workspace_it_found() -> None:
     assert get_workspace() is before
 
 
-def test_the_category_seals_exactly_the_two_files_that_define_it() -> None:
-    """Derived from the modules, so an empty or wrong seal list cannot pass.
+def test_the_trial_workspace_exposes_only_the_synthetic_fixture(tmp_path: Path) -> None:
+    fixture = _copy_fixture(tmp_path)
+    (tmp_path / "agent.py").write_text("CODE_CANARY", encoding="utf-8")
+    (tmp_path / "outside-canary.txt").write_text("WORKSPACE_CANARY", encoding="utf-8")
+    with pytest.raises(ValueError, match="staging inventory"):
+        fixture_only_workspace(tmp_path, fixture)
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    shutil.copytree(fixture, stage / fixture.name)
+    workspace = fixture_only_workspace(stage, stage / fixture.name)
 
-    The first version of the test below only looped over
-    ``SEALED_FROM_TRIALS``, which made an empty tuple assert nothing at all. A
-    mutation emptying it stayed green, so the set is pinned here against the
-    files the interpreter actually loaded this category from.
-    """
-    assert set(SEALED_FROM_TRIALS) == {
-        Path(inspect.getfile(grounding_cohort)).resolve(),
-        Path(__file__).resolve(),
-    }
-
-
-def test_the_trial_workspace_opens_the_fixture_and_seals_this_category() -> None:
-    """The fixture is the subject, so it must open. The tasks must not.
-
-    ``sealed_workspace`` is imported, never edited: the paths this category has
-    to add are passed through its own ``also_deny`` hatch, so the answer-key
-    seal three briefs have routed around stays untouched.
-    """
-    workspace = sealed_workspace(FIXTURE.parent, also_deny=SEALED_FROM_TRIALS)
-
-    assert SEALED_FROM_TRIALS, "an empty seal list would make the loop below vacuous"
+    assert workspace.list_dir(".") == ["grounding-cohort/"]
     for task in TASKS:
         assert workspace.resolve(task.subject).is_file()
-    for sealed_path in SEALED_FROM_TRIALS:
-        with pytest.raises(SandboxError, match="not readable by the agent"):
-            workspace.resolve(workspace.display(sealed_path))
+    for sealed_path in (tmp_path / "agent.py", tmp_path / "outside-canary.txt"):
+        with pytest.raises(SandboxError):
+            workspace.resolve(str(sealed_path))
+
+
+@pytest.mark.parametrize("change", ["extra", "missing", "modified", "directory"])
+def test_invalid_fixture_stops_before_model_request(tmp_path: Path, change: str) -> None:
+    fixture = _copy_fixture(tmp_path)
+    target = fixture / "ledger-alpha.txt"
+    if change == "extra":
+        (fixture / "unexpected.txt").write_text("unexpected", encoding="utf-8")
+    elif change == "missing":
+        target.unlink()
+    elif change == "modified":
+        target.write_text("changed", encoding="utf-8")
+    else:
+        target.unlink()
+        target.mkdir()
+    fake = FakeOpenAI(replies=["Final Answer: should not run"])
+    result = run_cohort(preflight=_preflight(), client=fake.as_client(), cohort_id="c",
+                        root=tmp_path, observe_revision=_fixed_revision())
+    assert result.stopped_on == "fixture_drift"
+    assert not result.complete
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("internal", [False, True])
+def test_fixture_symlink_is_rejected_before_model_request(tmp_path: Path, internal: bool) -> None:
+    fixture = _copy_fixture(tmp_path)
+    target = fixture / "ledger-alpha.txt"
+    target.unlink()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("OUTSIDE_CANARY", encoding="utf-8")
+    try:
+        target.symlink_to(fixture / "ledger-beta.txt" if internal else outside)
+    except OSError as exc:
+        if sys.platform == "win32":
+            pytest.skip(f"Windows symlink privilege or Developer Mode unavailable: {exc}")
+        raise
+    fake = FakeOpenAI(replies=["Final Answer: should not run"])
+    result = run_cohort(preflight=_preflight(), client=fake.as_client(), cohort_id="c",
+                        root=tmp_path, observe_revision=_fixed_revision())
+    assert result.stopped_on == "fixture_drift"
+    assert not fake.calls
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows junctions require Windows")
+def test_fixture_junction_is_rejected_before_model_request(tmp_path: Path) -> None:
+    fixture = _copy_fixture(tmp_path)
+    outside = tmp_path / "outside"
+    fixture.rename(outside)
+    result = subprocess.run(  # noqa: S603 - fixed command and pytest-owned paths
+        ["cmd", "/c", "mklink", "/J", str(fixture), str(outside)],  # noqa: S607
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, f"junction creation failed: {result.stdout} {result.stderr}"
+    fake = FakeOpenAI(replies=["Final Answer: should not run"])
+    outcome = run_cohort(preflight=_preflight(), client=fake.as_client(), cohort_id="c",
+                         root=tmp_path, observe_revision=_fixed_revision())
+    assert outcome.stopped_on == "fixture_drift"
+    assert not fake.calls
+
+
+def test_fixture_drift_between_requests_stops_without_second_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeOpenAI(replies=[_read_step(TASKS[0]), _answer_step("answer")])
+    original = fake.completions.create
+
+    def mutate_after_request(**kwargs: Any) -> Any:
+        reply = original(**kwargs)
+        (get_workspace().root / TASKS[0].subject).write_text("changed", encoding="utf-8")
+        return reply
+
+    monkeypatch.setattr(fake.completions, "create", mutate_after_request)
+    result = run_cohort(preflight=_preflight(), client=fake.as_client(), cohort_id="c",
+                        tasks=(TASKS[0],), repeats=2, observe_revision=_fixed_revision())
+    assert result.stopped_on == "fixture_drift"
+    assert (result.started, result.completed, result.failed) == (1, 0, 1)
+    assert len(fake.calls) == 1
+
+
+def test_trial_record_drops_untrusted_tool_name() -> None:
+    fake = FakeOpenAI(replies=[
+        "Thought: THOUGHT_CANARY\nAction: RAW_TOOL_CANARY\nAction Input: ARGUMENT_CANARY"
+    ])
+    result = run_cohort(preflight=_preflight(), client=fake.as_client(), cohort_id="c",
+                        tasks=(TASKS[0],), repeats=1, observe_revision=_fixed_revision())
+    blob = json.dumps(result.records)
+    assert "RAW_TOOL_CANARY" not in blob
+    assert "THOUGHT_CANARY" not in blob
+    assert "ARGUMENT_CANARY" not in blob
+    assert result.records[0]["tools"] == ["unknown"]
+    assert result.records[0]["execution_status"] == "policy_violation"
+
+
+@pytest.mark.parametrize("change", ["modify", "remove"])
+def test_drift_after_final_response_stops_without_success_record(
+    monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    fake = FakeOpenAI(replies=[_read_step(TASKS[0]), _answer_step("answer")])
+    original = fake.completions.create
+
+    def mutate_after_final(**kwargs: Any) -> Any:
+        reply = original(**kwargs)
+        if len(fake.calls) == 2:
+            path = get_workspace().root / FIXTURE.name / "README.txt"
+            if change == "remove":
+                path.unlink()
+            else:
+                path.write_text("changed", encoding="utf-8")
+        return reply
+
+    monkeypatch.setattr(fake.completions, "create", mutate_after_final)
+    result = run_cohort(preflight=_preflight(), client=fake.as_client(), cohort_id="c",
+                        tasks=(TASKS[0],), repeats=2, observe_revision=_fixed_revision())
+    assert result.stopped_on == "fixture_drift"
+    assert not result.complete
+    assert result.records == ()
+    assert len(fake.calls) == 2
+
+
+def test_drift_between_trials_stops_before_next_trial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeOpenAI(replies=[_read_step(TASKS[0]), _answer_step("answer")])
+    original = cohort_module.trial_record
+
+    def record_then_mutate(**kwargs: Any) -> dict[str, object]:
+        record = original(**kwargs)
+        (get_workspace().root / FIXTURE.name / "README.txt").write_text(
+            "changed", encoding="utf-8"
+        )
+        return record
+
+    monkeypatch.setattr(cohort_module, "trial_record", record_then_mutate)
+    result = run_cohort(preflight=_preflight(), client=fake.as_client(), cohort_id="c",
+                        tasks=(TASKS[0],), repeats=2, observe_revision=_fixed_revision())
+    assert result.stopped_on == "fixture_drift"
+    assert not result.complete
+    assert len(result.records) == 1
+    assert len(fake.calls) == 2

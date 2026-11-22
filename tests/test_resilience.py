@@ -7,7 +7,6 @@ stuck resending an Action that cannot work. Both are handled here.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Iterator
 from pathlib import Path
@@ -16,9 +15,10 @@ from typing import Any
 import pytest
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
-import observability as obs
 from agent import AgentConfig, AgentError, ReActAgent
 from tests.fakes import FakeOpenAI
+from tests.log_capture import configure_memory_sink, reset_capture
+from tests.log_capture import read_lines as read_memory_lines
 
 FINAL = "Thought: done\nFinal Answer: {answer}"
 BAD_CALL = "Thought: maths\nAction: calculate\nAction Input: 1 / 0"
@@ -26,23 +26,20 @@ BAD_CALL = "Thought: maths\nAction: calculate\nAction Input: 1 / 0"
 
 @pytest.fixture(autouse=True)
 def _clean_logging() -> Iterator[None]:
-    obs.reset()
+    reset_capture()
     yield
-    obs.reset()
+    reset_capture()
 
 
 @pytest.fixture
 def log_file(tmp_path: Path) -> Path:
     path = tmp_path / "omniagent.jsonl"
-    obs.configure(level=logging.DEBUG, log_file=path, session_id="test-session")
+    configure_memory_sink(path, level=logging.DEBUG, session_id="test-session")
     return path
 
 
 def records(path: Path) -> list[dict[str, Any]]:
-    for handler in obs.get_logger().handlers:
-        handler.flush()
-    text = path.read_text(encoding="utf-8").strip()
-    return [json.loads(line) for line in text.splitlines()] if text else []
+    return read_memory_lines(path)
 
 
 def events_named(path: Path, name: str) -> list[dict[str, Any]]:
@@ -173,9 +170,10 @@ def test_the_backoff_doubles_and_is_logged(log_file: Path) -> None:
     assert agent.run("hi") == "4"
 
     retries = events_named(log_file, "agent.llm.retry")
-    assert [r["attempt"] for r in retries] == [1, 2]
-    assert [r["delay_seconds"] for r in retries] == [0.5, 1.0]
-    assert all(r["level"] == "WARNING" for r in retries)
+    assert len(retries) == 2
+    assert [r["duration_ms"] for r in retries] == [500.0, 1000.0]
+    assert all(r["status"] == "retrying" for r in retries)
+    assert all("attempt" not in r for r in retries)
 
 
 def test_a_successful_first_attempt_logs_no_retry(log_file: Path) -> None:
@@ -191,7 +189,9 @@ def test_the_failure_record_counts_the_attempts(log_file: Path) -> None:
     with pytest.raises(AgentError):
         agent.run("hi")
 
-    assert events_named(log_file, "agent.llm.unreachable")[0]["attempts"] == 3
+    unreachable = events_named(log_file, "agent.llm.unreachable")[0]
+    assert unreachable["status"] == "unreachable"
+    assert "attempts" not in unreachable
 
 
 # --------------------------------------------------------------------------- #
@@ -209,8 +209,8 @@ def test_a_repeated_failing_action_gets_an_intervention(log_file: Path) -> None:
 
     rut = events_named(log_file, "agent.loop.repeated_action")
     assert len(rut) == 1
-    assert rut[0]["tool"] == "calculate"
-    assert rut[0]["attempts"] == 2
+    assert rut[0]["tool_name"] == "calculate"
+    assert "attempts" not in rut[0]
 
     sent = [str(m["content"]) for m in fake.calls[2]["messages"]]
     assert any("Do not send it again" in message for message in sent)
@@ -255,8 +255,9 @@ def test_a_third_identical_succeeding_action_is_a_rut(log_file: Path) -> None:
 
     rut = events_named(log_file, "agent.loop.repeated_action")
     assert len(rut) == 1
-    assert rut[0]["failing"] is False
-    assert rut[0]["attempts"] == 3
+    assert rut[0]["tool_name"] == "calculate"
+    assert "failing" not in rut[0]
+    assert "attempts" not in rut[0]
 
     sent = [str(m["content"]) for m in fake.calls[3]["messages"]]
     assert any("succeeded every time" in message for message in sent)
@@ -269,8 +270,9 @@ def test_a_failing_action_still_intervenes_one_attempt_sooner(log_file: Path) ->
 
     rut = events_named(log_file, "agent.loop.repeated_action")
     assert len(rut) == 1
-    assert rut[0]["failing"] is True
-    assert rut[0]["attempts"] == 2
+    assert rut[0]["tool_name"] == "calculate"
+    assert "failing" not in rut[0]
+    assert "attempts" not in rut[0]
 
 
 def test_the_rut_counter_resets_between_turns(log_file: Path) -> None:

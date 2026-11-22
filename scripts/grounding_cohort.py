@@ -17,8 +17,12 @@ together instead of silently moving the figure.
 from __future__ import annotations
 
 import hashlib
+import json
+import math
+import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,10 +32,11 @@ PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 sys.path.insert(0, str(PROJECT / "scripts"))
 
-from eval_workspace import sealed_workspace
+from eval_workspace import FIXTURE_FILES, fixture_only_workspace, validate_fixture
 
 from agent import AgentConfig, AgentError, ReActAgent
 from sandbox import get_workspace, set_workspace
+from tools import FIXED_TOOL_ALLOWLIST
 
 if TYPE_CHECKING:
     from openai import OpenAI
@@ -41,30 +46,47 @@ if TYPE_CHECKING:
 #: the subject of a listing question there.
 FIXTURE = PROJECT / "grounding-cohort"
 
+# Frozen over UTF-8 paths and LF-normalised UTF-8 content, NUL delimited.
+FROZEN_FIXTURE_SHA256 = "f13f6e68db1393947652ebe5fad33ce800e46fdab38cc7ae570cffd4224cbb8a"
+
+
+class FixtureDriftError(RuntimeError):
+    """The staged fixture no longer matches the frozen inventory and bytes."""
+
+
+def staged_fixture_sha256(root: Path) -> str:
+    """Hash exact staged bytes and inventory; staging writes UTF-8 with LF endings."""
+    fixture = root / "grounding-cohort"
+    try:
+        fixture_only_workspace(root, fixture)
+        digest = hashlib.sha256()
+        for name in sorted(FIXTURE_FILES):
+            digest.update(name.encode("utf-8") + b"\0")
+            digest.update((fixture / name).read_bytes() + b"\0")
+        return digest.hexdigest()
+    except (OSError, ValueError) as exc:
+        raise FixtureDriftError("fixture unreadable or invalid") from exc
+
+
+def verify_staged_fixture(root: Path) -> None:
+    if staged_fixture_sha256(root) != FROZEN_FIXTURE_SHA256:
+        raise FixtureDriftError("fixture drift")
+
 
 def fixture_sha256(directory: Path = FIXTURE) -> str:
-    """Hash the fixture's inventory and text, over a defined ordering.
+    """Hash the validated flat inventory and normalized text contents.
 
-    The ordering: every file under ``directory``, recursively, sorted by its
-    POSIX path relative to ``directory``. Each contributes its relative path
-    and then its text, both NUL-terminated so a path ending where the next
-    begins cannot produce the same stream as a different inventory. The path
-    is in the digest so an added, removed or renamed file changes it.
-
-    The text is read with universal newlines and hashed as ``\n``, not as the
-    bytes on disk. This repository sets ``core.autocrlf=true`` and carries no
-    ``.gitattributes``, so the same commit is CRLF here and LF on a Linux
-    checkout; a byte hash would call that fixture drift. The cost is stated
-    rather than hidden: a change that only rewrites line endings does not move
-    this digest. Every other edit does, and the oracle reads the fixture
-    through the same normalised view.
+    Validation happens before opening any fixture file. The frozen inventory
+    is intentionally flat, which keeps the subject boundary auditable and
+    ensures added entries, links, and special files fail closed. Text uses
+    universal newlines so the same commit hashes equally on CRLF and LF
+    checkouts.
     """
+    validate_fixture(directory)
     digest = hashlib.sha256()
-    for path in sorted(
-        (p for p in directory.rglob("*") if p.is_file()),
-        key=lambda p: p.relative_to(directory).as_posix(),
-    ):
-        digest.update(path.relative_to(directory).as_posix().encode("utf-8"))
+    for name in sorted(FIXTURE_FILES):
+        path = directory / name
+        digest.update(name.encode("utf-8"))
         digest.update(b"\0")
         digest.update(path.read_text(encoding="utf-8").encode("utf-8"))
         digest.update(b"\0")
@@ -165,6 +187,7 @@ def _table(path: Path) -> list[dict[str, str]]:
 
 
 def _matching_row(task: Task, root: Path) -> dict[str, str]:
+    validate_fixture(root / FIXTURE.name)
     rows = _table(root / task.subject)
     for column in (task.key_column, task.answer_column):
         if rows and column not in rows[0]:
@@ -191,6 +214,7 @@ def distractors(task: Task, *, root: Path = PROJECT) -> tuple[str, ...]:
     graded a reversed comparison answer as correct for ten runs.
     """
     accepted = accepted_answer(task, root=root)
+    validate_fixture(root / FIXTURE.name)
     return tuple(
         row[task.answer_column]
         for row in _table(root / task.subject)
@@ -215,6 +239,80 @@ POLICY_VIOLATION = "policy_violation"
 STEP_EXHAUSTED = "step_exhausted"
 TOOL_ERROR = "tool_error"
 AGENT_ERROR = "agent_error"
+
+TRIAL_RECORD_KEYS = frozenset({
+    "record_type", "cohort_id", "trial_id", "task_id", "variant", "repeat",
+    "arm", "category", "commit", "tree_clean", "fixture_sha256",
+    "protocol_sha256", "model_tag", "model_digest", "runtime_version",
+    "endpoint", "temperature", "max_steps", "timeout_seconds", "max_retries",
+    "allowlist", "tools", "tool_status", "steps", "execution_status",
+    "answer_grounded", "answer_names_distractor", "tools_within_allowlist",
+})
+_SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+_SAFE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+:/-]{0,127}$")
+_SHA256_VALUE = re.compile(r"^(?:sha256:)?[a-fA-F0-9]{64}$")
+_TOOL_STATUSES = frozenset({"ok", "invalid_args", "policy_violation", "error"})
+_EXECUTION_STATUSES = frozenset({COMPLETED, POLICY_VIOLATION, STEP_EXHAUSTED, TOOL_ERROR, AGENT_ERROR})
+
+
+def validate_trial_record(record: object) -> dict[str, object]:
+    """Validate the closed trial schema without including untrusted values in errors."""
+    def reject() -> None:
+        raise ValueError("invalid evaluation_trial record")
+
+    if not isinstance(record, dict) or frozenset(record) != TRIAL_RECORD_KEYS:
+        reject()
+    assert isinstance(record, dict)
+    for key in ("cohort_id", "trial_id", "task_id", "variant"):
+        value = record[key]
+        if not isinstance(value, str) or not _SAFE_ID.fullmatch(value):
+            reject()
+    if (record["task_id"], record["variant"]) not in {
+        (task.task_id, task.variant) for task in TASKS
+    }:
+        reject()
+    for key in ("commit",):
+        value = record[key]
+        if not isinstance(value, str) or not re.fullmatch(r"[a-fA-F0-9]{7,64}", value):
+            reject()
+    for key in ("fixture_sha256", "protocol_sha256", "model_digest"):
+        value = record[key]
+        if not isinstance(value, str) or not _SHA256_VALUE.fullmatch(value):
+            reject()
+    for key in ("model_tag", "runtime_version"):
+        value = record[key]
+        if not isinstance(value, str) or not _SAFE_VERSION.fullmatch(value):
+            reject()
+    if record["record_type"] != "evaluation_trial" or record["arm"] != ARM or record["category"] != CATEGORY or record["endpoint"] != LOOPBACK:
+        reject()
+    if type(record["tree_clean"]) is not bool or type(record["answer_grounded"]) is not bool or type(record["answer_names_distractor"]) is not bool or type(record["tools_within_allowlist"]) is not bool:
+        reject()
+    if type(record["repeat"]) is not int or not 1 <= record["repeat"] <= 100:
+        reject()
+    if type(record["max_steps"]) is not int or not 1 <= record["max_steps"] <= 100:
+        reject()
+    if type(record["max_retries"]) is not int or record["max_retries"] != 0:
+        reject()
+    if type(record["steps"]) is not int or not 0 <= record["steps"] <= record["max_steps"]:
+        reject()
+    for key, minimum, maximum in (("temperature", 0.0, 0.0), ("timeout_seconds", 0.1, 3600.0)):
+        value = record[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not minimum <= value <= maximum:
+            reject()
+    if record["execution_status"] not in _EXECUTION_STATUSES:
+        reject()
+    allowlist, tools, statuses = record["allowlist"], record["tools"], record["tool_status"]
+    if not isinstance(allowlist, list) or not 1 <= len(allowlist) <= len(FIXED_TOOL_ALLOWLIST) or any(not isinstance(x, str) or x not in FIXED_TOOL_ALLOWLIST for x in allowlist) or len(set(allowlist)) != len(allowlist):
+        reject()
+    if not isinstance(tools, list) or len(tools) > record["max_steps"] or any(not isinstance(x, str) or x not in {*FIXED_TOOL_ALLOWLIST, "unknown"} for x in tools):
+        reject()
+    if not isinstance(statuses, list) or len(statuses) != len(tools) or any(not isinstance(x, str) or x not in _TOOL_STATUSES for x in statuses):
+        reject()
+    try:
+        json.dumps(record, allow_nan=False)
+    except (TypeError, ValueError):
+        reject()
+    return record
 
 
 @dataclass(frozen=True)
@@ -327,7 +425,8 @@ def trial_record(  # noqa: PLR0913 - one parameter per frozen record field, by d
     observation, a raw tool argument, a raw error or an endpoint URL -- and
     none of those is even a parameter, so none can arrive by accident.
     """
-    return {
+    return validate_trial_record({
+        "record_type": "evaluation_trial",
         "cohort_id": cohort_id,
         "trial_id": trial_id,
         "task_id": task.task_id,
@@ -348,28 +447,14 @@ def trial_record(  # noqa: PLR0913 - one parameter per frozen record field, by d
         "timeout_seconds": preflight.timeout_seconds,
         "max_retries": preflight.max_retries,
         "allowlist": list(task.allowlist),
-        "tools": list(observed.tools),
+        "tools": [name if name in FIXED_TOOL_ALLOWLIST else "unknown" for name in observed.tools],
         "tool_status": list(observed.tool_status),
         "steps": observed.steps,
         "execution_status": observed.execution_status,
         "answer_grounded": observed.answer_grounded,
         "answer_names_distractor": observed.answer_names_distractor,
         "tools_within_allowlist": observed.tools_within_allowlist,
-    }
-
-
-#: Paths this category adds that a trial's workspace must not open: the module
-#: holding the task texts and the rubric, and the test module exercising them.
-#:
-#: They are passed through ``sealed_workspace``'s own ``also_deny`` hatch
-#: rather than added to ``ANSWER_KEY``. That file holds the answer-key seal and
-#: three briefs have had to route around it; this category needs nothing from
-#: it but the function. The invariant test imports this tuple instead of
-#: restating it, so what the run seals and what the test checks cannot drift.
-SEALED_FROM_TRIALS: tuple[Path, ...] = (
-    PROJECT / "scripts" / "grounding_cohort.py",
-    PROJECT / "tests" / "test_grounding_cohort.py",
-)
+    })
 
 
 def grade(task: Task, answer: str, *, root: Path = PROJECT) -> tuple[bool, bool]:
@@ -481,7 +566,13 @@ def _execution_status(
 
 def _run_trial(task: Task, *, config: AgentConfig, client: OpenAI, root: Path) -> Observed:
     """One trial: a fresh agent, one turn, and sanitized categories out."""
-    agent = ReActAgent(config=config, client=client, printer=lambda _: None)
+    agent = ReActAgent(
+        config=config,
+        client=client,
+        printer=lambda _: None,
+        allowed_tools=task.allowlist,
+        before_model_request=lambda: verify_staged_fixture(root),
+    )
     try:
         answer = agent.run(task.prompt)
     except AgentError:
@@ -549,19 +640,34 @@ def run_cohort(  # noqa: PLR0913 - preflight, client and the run's own knobs
         timeout=preflight.timeout_seconds,
         max_retries=preflight.max_retries,
     )
-    fixture_hash = fixture_sha256(root / FIXTURE.name)
+    fixture_hash = FROZEN_FIXTURE_SHA256
     protocol_hash = protocol_sha256(tasks, preflight)
     records: list[dict[str, object]] = []
     stopped_on = _revision_mismatch(preflight, observe_revision())
 
     previous = get_workspace()
-    set_workspace(sealed_workspace(root, also_deny=SEALED_FROM_TRIALS))
-    try:
+    started = 0
+    with tempfile.TemporaryDirectory(prefix="omniagent-eval-") as scratch:
+      staged_root = Path(scratch)
+      staged_fixture = staged_root / FIXTURE.name
+      try:
+        source = root / FIXTURE.name
+        validate_fixture(source)
+        staged_fixture.mkdir()
+        for name in sorted(FIXTURE_FILES):
+            # Normalize checkout line endings before freezing the bytes read by tools.
+            content = (source / name).read_text(encoding="utf-8")
+            (staged_fixture / name).write_bytes(content.encode("utf-8"))
+        verify_staged_fixture(staged_root)
+        set_workspace(fixture_only_workspace(staged_root, staged_fixture))
         for task in tasks:
             for repeat in range(1, repeats + 1):
                 if stopped_on is not None:
                     break
-                observed = _run_trial(task, config=config, client=client, root=root)
+                verify_staged_fixture(staged_root)
+                started += 1
+                observed = _run_trial(task, config=config, client=client, root=staged_root)
+                verify_staged_fixture(staged_root)
                 records.append(
                     trial_record(
                         cohort_id=cohort_id,
@@ -580,7 +686,9 @@ def run_cohort(  # noqa: PLR0913 - preflight, client and the run's own knobs
                 if observed.execution_status in (TOOL_ERROR, AGENT_ERROR):
                     stopped_on = observed.execution_status
                     break
-    finally:
+      except (FixtureDriftError, OSError, ValueError, UnicodeError):
+        stopped_on = "fixture_drift"
+      finally:
         set_workspace(previous)
 
     if stopped_on is None:
@@ -590,8 +698,8 @@ def run_cohort(  # noqa: PLR0913 - preflight, client and the run's own knobs
     return CohortResult(
         records=tuple(records),
         config=config,
-        started=len(records),
+        started=started,
         completed=completed,
-        failed=len(records) - completed,
+        failed=started - completed,
         stopped_on=stopped_on,
     )

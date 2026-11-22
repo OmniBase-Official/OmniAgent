@@ -11,8 +11,7 @@ library pointed at `http://localhost:11434/v1`. Nothing leaves localhost.
 That cast is a snapshot of a real session (`main.py --profile demo`, model
 `omniagent-v2`), not a mock-up — including the moment `read_file` refuses a
 file too long to return, the error names the tool that can answer, and the
-agent switches to it. Regenerate it with
-`python scripts/make_demo_svg.py`.
+agent switches to it.
 
 ---
 
@@ -28,8 +27,8 @@ keeps the loop in plain sight so you can read it, break it, and change it:
 | [`tools.py`](tools.py) | Tool implementations, their pydantic argument schemas, and the registry the prompt is generated from. |
 | [`sandbox.py`](sandbox.py) | The filesystem boundary the file tools work inside, and its threat model. |
 | [`config.py`](config.py) | One settings model, and the documented precedence that fills it. |
-| [`observability.py`](observability.py) | Structured JSON-lines logging: session/turn/step context, credential redaction, truncation. |
-| [`export_dataset.py`](export_dataset.py) | Replays run logs into a chat-format SFT dataset. |
+| [`observability.py`](observability.py) | Structured JSON-lines logging with a closed, sanitized telemetry schema. |
+| [`export_dataset.py`](export_dataset.py) | Pure conversion helpers remain; the export CLI is disabled pending approval. |
 | [`validate_dataset.py`](validate_dataset.py) | Refuses a malformed dataset, or one containing a credential, before training. |
 
 `eval-fixture/` is a small tracked subject directory for stable evaluation listings.
@@ -127,8 +126,9 @@ Observation: Error: invalid arguments for calculate(expression: str) --
              the expression itself on one line, e.g. '(1250 * 0.07) + sqrt(144)'.
 ```
 
-Tools never raise either: a crash is caught, logged with a traceback, and
-returned as `Error: ...`.
+Tools return a short `Error: ...` observation when a call fails. Operational
+telemetry records only the event status and safe metadata; exception text and
+tracebacks are not persisted.
 
 ### Adding your own
 
@@ -178,7 +178,7 @@ perform; it is a leak that gets written down and then trained on.
 | Absolute paths outside the root | Same check — an absolute path is allowed only if it lands inside the workspace. |
 | Symlinks and junctions pointing out | `Path.resolve()` follows them *before* the containment check, so the target is tested, not the link. |
 | Secrets inside the workspace | Dot-files and dot-directories (`.env`, `.git`, `.ssh`) are refused outright, as are credential suffixes (`.pem`, `.key`, `.p12`, …) and names (`id_rsa`, `credentials`). |
-| The agent reading its own log back | The active `--log-file` is denied, so earlier conversations cannot re-enter the context and the dataset. |
+| The agent reading its own log back | Persistent operational logs are disabled; transcript paths remain excluded from any file-tool workspace. |
 | Huge files exhausting memory | Size is checked before the read (100 KB), and the returned text is capped (16 000 chars). |
 | Binary files flooding the context | A NUL byte in the first 8 KB rejects the file. |
 | Devices — `CON`, `NUL`, `COM1`, `\.\PhysicalDrive0` | Only regular files pass. |
@@ -297,7 +297,7 @@ python main.py --model qwen2.5-coder:7b --quiet
 | `--quiet` | off | Hide the Thought/Action/Observation trace. |
 | `--verbose` | off | Show the Thought/Action/Observation trace; cannot be combined with `--quiet`. |
 | `--ask` | — | Answer one question and exit. |
-| `--log-file` | — | Append structured JSON-lines logs here (env: `OMNIAGENT_LOG_FILE`). |
+| `--log-file` | disabled | Persistent operational logs are rejected until retention/deletion rules are approved. |
 | `--log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` (env: `OMNIAGENT_LOG_LEVEL`). |
 | `--log-console` | off | Also stream the JSON logs to stderr. |
 | `--workspace` | cwd | Directory the file tools may read inside. |
@@ -334,12 +334,11 @@ model = "qwen2.5-coder:7b"
 log_level = "INFO"
 
 [profile.demo]
-max_steps = 12
-log_file = "data/demo.jsonl"
+max_steps = 8
 temperature = 0.0
 
 [profile.collect]
-log_file = "data/collect.jsonl"
+# Persistent logs are disabled until retention/deletion rules are approved.
 log_level = "DEBUG"
 verbose = false
 ```
@@ -360,7 +359,7 @@ base_url              http://localhost:11434/v1           built-in
 api_key               ***redacted***                      built-in
 temperature           0.0                                 profile:demo
 max_steps             12                                  profile:demo
-log_file              data/demo.jsonl                     profile:demo
+log_file              None                                built-in
 ```
 
 Every setting also has an environment variable, `OMNIAGENT_` plus its name in
@@ -444,237 +443,52 @@ tool, or answer -- instead of handing back the same Observation again.
 
 ## Logging
 
-The console trace is for you; the log stream is for machines:
+Persistent operational logging is disabled until the project owner approves
+retention and deletion rules. The shipped profiles do not create log files,
+and the CLI rejects `--log-file` from command-line, environment, `.env`, TOML
+defaults, or TOML profiles until that policy exists. Direct
+`observability.configure(log_file=...)` calls also fail before touching the
+target path, including forced reconfiguration.
+Sanitized console telemetry can be explicitly enabled with `--log-console`; it
+contains only event/status, duration, step count, fixed tool name, model tag or
+digest, runtime version, and a fixed `record_type` marker. Prompts, reasoning,
+raw model replies, file contents, tool arguments or observations, secrets, raw
+errors, stack traces, and final answers are never emitted by this sink.
 
-```bash
-python main.py --log-file run.jsonl --ask "What is 18% of 1500?"
-```
-
-Every step of the loop becomes one JSON object per line:
-
-```json
-{"ts":"2026-10-01T10:16:49.357Z","level":"INFO","logger":"omniagent.agent","event":"agent.llm.response","message":"agent.llm.response","model":"qwen2.5-coder:7b","elapsed_ms":14097.35,"finish_reason":"stop","prompt_tokens":791,"completion_tokens":61,"session_id":"37202807c137","turn":1,"step":1}
-```
-
-One answered question produces this sequence, so a log alone explains what the
-agent did and how long each part took:
+Each console event is one JSON object written to stderr. Each line contains
+only fields from a closed allowlist. New event fields are dropped until they
+are explicitly added to the telemetry schema. No context ids, free-form
+messages, timestamps, or exception details are emitted.
 
 | Event | Carries |
 |---|---|
-| `agent.connection.ok` | endpoint, whether the requested model is installed |
-| `agent.turn.start` | question, step budget, history size |
-| `agent.llm.request` / `.response` | model, latency, finish reason, token counts, the raw reply |
-| `agent.tool.call` / `.result` | tool, input, observation, `ok`, latency |
-| `agent.step.final_answer` | the thought and the answer |
-| `agent.turn.end` | answer, steps used, total latency |
+| `agent.connection.*`, `agent.turn.*`, `agent.llm.*` | status, duration or step count, and model tag when relevant |
+| `agent.tool.*` | status, duration, step count, and an allowlisted tool name |
 
-Things going wrong get their own events, at `WARNING` or `ERROR` with a
-traceback attached: `agent.format.violation`, `agent.budget.exhausted`,
-`tool.unknown`, `tool.crashed`, `agent.llm.unreachable`, `agent.llm.error`.
-
-Context is ambient — `session_id`, `turn` and `step` attach themselves through
-`observability.bind()` rather than being threaded through every call site.
-Fields whose names look like credentials (`api_key`, `token`, `password`, ...)
-are masked, including inside nested dicts, and long values such as prompts are
-truncated, so a log file stays safe to paste into a bug report.
-
-Logs never go to stdout: that belongs to the human-readable trace. Use a file,
-or `console=True` to stream JSON to stderr.
+The human-readable console trace is separate from operational logging. The
+exporter rejects records marked as operational telemetry as well as legacy
+records carrying an OmniAgent logger name, because neither is an approved
+trajectory source.
 
 ---
 
-## Training data from your own runs
+## Dataset capture and training policy
 
-The log already records the exact conversation the model saw: the system
-prompt, the question, each raw reply and each Observation. That is a supervised
-fine-tuning dataset, so there is no separate collection step — just run the
-agent with `--log-file`, then replay:
+Dataset collection, `--resume`, and the dataset-export CLI are disabled until
+a separate sink, provenance contract, field preview, and retention/deletion
+policy are approved. Operational logs are never dataset inputs. Evaluation
+trials use only the synthetic fixture workspace and are tagged with
+`record_type = "evaluation_trial"`; user-workspace data is prohibited from
+evaluation and training. Existing training artifacts do not authorize new
+collection or use of workspace data.
 
-```bash
-python export_dataset.py "data/*.jsonl" -o data/dataset.jsonl --stats
-```
-
-```
-turns seen : 3
-exported   : 3
-step counts: 2 steps: 2, 3 steps: 1
-tools      : calculate: 2, get_current_time: 2
-```
-
-Each line of the output is one turn in the format TRL and transformers consume:
-
-```json
-{"messages": [
-  {"role": "system",    "content": "You are OmniAgent..."},
-  {"role": "user",      "content": "What is 15% of 2400 plus sqrt(169)?"},
-  {"role": "assistant", "content": "Thought: ...
-Action: calculate
-Action Input: (2400 * 0.15) + sqrt(169)"},
-  {"role": "user",      "content": "Observation: (2400 * 0.15) + sqrt(169) = 373"},
-  {"role": "assistant", "content": "Thought: I have the final result.
-Final Answer: ..."}
-]}
-```
-
-### What is deliberately left out
-
-Training on a turn where the model broke format teaches it to break format, so
-the exporter is strict by default:
-
-| Dropped | Why |
-|---|---|
-| `agent.format.violation`, `agent.loop.repeated_action`, `agent.budget.exhausted` | The turn contains a message the log does not record verbatim, so it cannot be replayed faithfully. Never exported. |
-| Any truncated field | A shortened prompt or reply is corrupt training data. |
-| Turns with no Final Answer | The conversation never reached one. |
-| Turns where a tool returned an error | Pass `--include-tool-errors` to keep them. |
-| Identical conversations | De-duplicated by digest. |
-
-Every example is validated before it is written: it must start with a non-empty
-system prompt, alternate user/assistant, end on an assistant turn, and contain
-no empty message.
-
-Multi-turn sessions are reconstructed with their history, exactly as the agent
-sent it — a dropped turn still counts as history for the turns after it.
-
-Because of this, the log schema *is* the training data format. Changing an
-event's fields changes the dataset.
-
----
-
-## Fine-tuning on your own runs
-
-The loop fights small models drifting out of the Thought/Action/Observation
-format. A model trained on that exact format drifts less, and the dataset for it
-is already being collected every time you pass `--log-file`.
-
-### Collecting enough of it
-
-Four runs is not a training set. [`scripts/collect_dataset.py`](scripts/collect_dataset.py)
-walks a bank of ~46 sessions covering every tool — arithmetic, dates, file
-reading, searching, and multi-turn conversations that carry history — against a
-real local model:
-
-```bash
-python scripts/collect_dataset.py --model qwen2.5-coder:7b
-```
-
-`--resume` skips questions the log already has an answer for, so an interrupted
-run tops itself up rather than starting over. `--dry-run` lists what it would
-ask; `--questions FILE` supplies your own bank, one session per line (a plain
-question, or a JSON array for a conversation).
-
-```
-run the agent  ->  JSONL log  ->  export_dataset.py  ->  validate_dataset.py
-                                                              |
-                     LoRA (this machine)  <---------------- dataset.jsonl
-                             |
-                     merge -> GGUF -> ollama create -> python main.py --model omniagent
-```
-
-Every arrow stays on one machine. That is not convenience, it is the same rule
-the rest of the project follows: the dataset holds your questions, your system
-prompt, and the contents of any file the agent read with `read_file` or
-`search_text`. Uploading it to a hosted notebook would be the one step that
-breaks the rule — and it buys nothing, because Ollama is already here, so there
-is no GGUF to download back either.
-
-### Validate before you train
-
-```bash
-python validate_dataset.py data/dataset.jsonl
-```
-
-```
-examples   : 47
-messages   : min 5, max 9, mean 5.5
-characters : 237,199
-tools      : calculate: 33, get_current_time: 8, list_directory: 6, read_file: 5, search_text: 3
-verdict    : OK
-```
-
-It refuses malformed conversations, and it refuses a dataset containing
-anything shaped like a credential — an OpenAI key, an AWS key, a GitHub or
-Slack token, a private key block, a bearer token, an `API_KEY=` assignment. A
-model trained on a leaked key will reproduce it, so this is an error rather
-than a warning. Too few examples, duplicates and a dataset with no tool use are
-warnings: your call.
-
-### The notebook
-
-[`notebooks/train_omniagent_lora.ipynb`](notebooks/train_omniagent_lora.ipynb)
-runs locally — open it in VS Code, pick this project's `.venv` as the kernel, and
-run the cells. It validates the dataset before loading a single weight, trains a
-LoRA adapter, merges it, converts to GGUF, writes a checksum manifest, registers
-the model with Ollama, and finishes by running `main.py` against it.
-
-```bash
-pip install -e ".[training]"
-```
-
-**It picks its strategy from your hardware.** With CUDA it loads the base model
-in 4-bit (QLoRA), which fits a 4 GB card; without CUDA it falls back to fp32 on
-the CPU, which is only sensible for a tiny model. Merging happens on the CPU in
-fp16, because a 4-bit model cannot be merged into and a small card has no room
-for a full-precision copy anyway. Set `FOUR_BIT = False` if you have VRAM to
-spare and want bf16 LoRA instead.
-
-**Licensing matters here.** The default base model is `Qwen/Qwen2.5-1.5B-Instruct`,
-which is Apache-2.0. The 3B of the same family is released under a different,
-more restrictive licence. Read the model card of whatever you put in
-`BASE_MODEL` before you train, not after.
-
-### What is actually verified
-
-Running the notebook needs a GPU, a 3 GB download and a quarter of an hour, so
-the test suite checks what it can in milliseconds and the rest was checked by
-running it:
-
-- [`tests/test_notebook.py`](tests/test_notebook.py) asserts it is valid
-  nbformat, that every code cell parses, that it ships no saved outputs, that it
-  still chooses its loading strategy from the hardware, that nothing uploads the
-  dataset anywhere, and that the `Modelfile` cell really produces the file
-  `ollama create` accepts.
-- [`scripts/smoke_train.py`](scripts/smoke_train.py) runs the same steps on a CPU
-  with a 135M model in about a minute, so an API change in transformers/trl/peft
-  fails there rather than fifteen minutes into a real run.
-
-```bash
-python scripts/smoke_train.py
-```
-
-### What a real run produced
-
-On an RTX 3050 Laptop (4 GB), 15.8 minutes end to end: 47 examples from real
-runs, 3 epochs of QLoRA, final loss 1.0036, a 3.1 GB GGUF, registered as
-`omniagent`.
-
-Measured against stock `qwen2.5-coder:7b` on eight questions absent from the
-collection bank — checked programmatically, so this is held out rather than a
-re-run of the training data:
-
-| | correct | used a tool | total time |
-|---|---|---|---|
-| `omniagent` (1.5B, fine-tuned) | 5/5 checkable | 7/8 | **55s** |
-| `qwen2.5-coder:7b` (stock) | 5/5 checkable | 8/8 | 212s |
-
-Same accuracy, roughly four times faster. Two bugs came out of that run which no
-unit test would have found:
-
-- **HTTP 400 on the first question needing a file read.** Ollama defaults to a
-  4096-token context whatever the model supports, and this system prompt is
-  ~900 tokens before any tool output. The generated `Modelfile` now sets
-  `num_ctx`.
-- **"How many lines does config.py have?" → "10,306".** That is the file's size
-  in bytes, which `list_directory` had shown the model one step earlier; it
-  conflated the units. `read_file` now states `278 lines, 10,306 bytes` in its
-  header, both labelled. A fact the tool already holds should not be left to the
-  model to infer.
-
-If a fine-tune comes out worse than the stock model, say so and keep the stock
-one. A fine-tune nobody measured is not an improvement.
-
----
-
+Grounding evaluation stages only the frozen synthetic fixture inventory in a
+temporary workspace. Source text is normalized to LF and staged as UTF-8;
+the frozen digest covers the staged paths and exact staged bytes. The digest is
+checked before model requests and around trials. Concurrent untrusted writers
+are outside the current threat model: these checks do not prevent a file swap
+between a check and a read. The staging directory must be controlled by the
+operator throughout a run.
 ## Tests
 
 Everything is covered by a pytest suite that needs no model running. A scripted

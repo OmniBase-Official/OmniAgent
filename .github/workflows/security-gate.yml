@@ -1,0 +1,101 @@
+name: Security Gate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security:
+    name: Secrets / SAST / dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Set up Go for pinned Gitleaks
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.24.4"
+          cache: false
+
+      - name: Install scanning tools
+        run: |
+          python -m venv .venv-security
+          echo "$GITHUB_WORKSPACE/.venv-security/bin" >> "$GITHUB_PATH"
+          .venv-security/bin/python -m pip install --disable-pip-version-check "semgrep==1.186.0" "pip-audit==2.10.1"
+          go install github.com/gitleaks/gitleaks/v8@v8.30.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Scan complete Git history for secrets
+        run: >-
+          gitleaks git --log-opts=--all --redact --exit-code=1
+          --no-banner --config=.gitleaks.toml .
+
+      - name: Run Semgrep ruleset and project rules
+        shell: bash
+        run: |
+          set +e
+          semgrep scan \
+            --config=.semgrep.yml \
+            --config=p/security-audit \
+            --config=p/secrets \
+            --error \
+            --skip-unknown-extensions \
+            --exclude=tests/security/semgrep \
+            --json > "$RUNNER_TEMP/semgrep-results.json" 2> "$RUNNER_TEMP/semgrep-stderr.txt"
+          scan_status=$?
+          python - "$RUNNER_TEMP/semgrep-results.json" "$scan_status" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report = Path(sys.argv[1])
+          status = int(sys.argv[2])
+          try:
+              payload = json.loads(report.read_text(encoding="utf-8"))
+          except (OSError, json.JSONDecodeError):
+              print("Semgrep failed; detailed output suppressed to avoid echoing source lines.")
+              raise SystemExit(status or 1)
+
+          findings = payload.get("results", [])
+          for finding in findings:
+              path = finding.get("path", "<unknown>")
+              line = finding.get("start", {}).get("line", "?")
+              rule = finding.get("check_id", "<unknown-rule>")
+              print(f"Semgrep finding: {rule} at {path}:{line}")
+          if not findings and status == 0:
+              print("Semgrep passed; no findings.")
+          elif status != 0 and not findings:
+              print("Semgrep failed; detailed output suppressed to avoid echoing source lines.")
+          raise SystemExit(status)
+          PY
+
+      - name: Test project Semgrep rules
+        run: >-
+          semgrep --test --config=.semgrep.yml tests/security/semgrep
+
+      - name: Install runtime and development dependencies
+        run: |
+          .venv-security/bin/python -m pip install --disable-pip-version-check -e ".[dev]"
+
+      - name: Audit runtime and development dependencies
+        run: .venv-security/bin/pip-audit --local --progress-spinner off

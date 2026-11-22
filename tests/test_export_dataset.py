@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 
+import export_dataset as exporter
+import observability as obs
 from export_dataset import (
     DatasetError,
     build_examples,
@@ -21,12 +23,47 @@ from export_dataset import (
     main,
     read_records,
     validate,
+    write_examples,
 )
 from observability import TRUNCATION_MARKER
+from tests.log_capture import configure_memory_sink, reset_capture
+from tests.log_capture import read_lines as read_memory_lines
 
 SYSTEM = "You are OmniAgent. Use the tools."
+
+
+def test_direct_writer_refuses_without_creating_a_directory(tmp_path: Path) -> None:
+    target = tmp_path / "missing" / "dataset.jsonl"
+    with pytest.raises(DatasetError, match="dataset writing is disabled"):
+        write_examples([], target)
+    assert not target.parent.exists()
 CALL = "Thought: maths\nAction: calculate\nAction Input: 2 + 2"
 DONE = "Thought: done\nFinal Answer: It is 4."
+
+
+def test_operational_logs_are_not_a_dataset_source() -> None:
+    operational = {
+        "logger": "omniagent.agent",
+        "event": "agent.turn.start",
+        "question": "MUST_NOT_BE_EXPORTED",
+    }
+
+    with pytest.raises(DatasetError, match="operational logs cannot be exported"):
+        collect_turns([operational])
+
+
+def test_current_operational_formatter_records_are_rejected(
+    tmp_path: Path,
+) -> None:
+    log_file = tmp_path / "memory-only.jsonl"
+    configure_memory_sink(log_file, force=True)
+    obs.event("agent.turn.start", status="started", step_count=0)
+    generated = read_memory_lines(log_file)[0]
+    reset_capture()
+
+    assert generated["record_type"] == "operational_telemetry"
+    with pytest.raises(DatasetError, match="operational logs cannot be exported"):
+        collect_turns([generated])
 
 
 def record(event: str, **fields: Any) -> dict[str, Any]:
@@ -393,42 +430,34 @@ def test_expand_paths_reports_a_missing_file(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def write_log(path: Path, records: list[dict[str, Any]]) -> Path:
-    path.write_text(
-        "\n".join(json.dumps(item) for item in records) + "\n", encoding="utf-8"
+def test_the_cli_is_disabled_before_reading_or_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing_log = tmp_path / "missing.jsonl"
+    output = tmp_path / "new-directory" / "dataset.jsonl"
+    monkeypatch.setattr(
+        exporter,
+        "read_records",
+        lambda _: pytest.fail("disabled export must not read input records"),
     )
-    return path
+
+    assert main([str(missing_log), "-o", str(output)]) == 2
+    assert "dataset export is disabled" in capsys.readouterr().err
+    assert not output.parent.exists()
+    assert not output.exists()
 
 
-def test_the_cli_writes_a_jsonl_dataset(tmp_path: Path) -> None:
-    log = write_log(tmp_path / "log.jsonl", [created(), *clean_turn()])
-    out = tmp_path / "out" / "dataset.jsonl"
-
-    assert main([str(log), "-o", str(out)]) == 0
-
-    lines = out.read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 1
-    assert json.loads(lines[0])["messages"][0]["role"] == "system"
-
-
-def test_the_cli_dry_run_writes_nothing(tmp_path: Path) -> None:
-    log = write_log(tmp_path / "log.jsonl", [created(), *clean_turn()])
-    out = tmp_path / "dataset.jsonl"
-
-    assert main([str(log), "-o", str(out), "--dry-run"]) == 0
-    assert not out.exists()
-
-
-def test_the_cli_fails_when_there_is_nothing_to_export(tmp_path: Path) -> None:
-    log = write_log(tmp_path / "log.jsonl", clean_turn())
-    out = tmp_path / "dataset.jsonl"
-
-    assert main([str(log), "-o", str(out)]) == 1
-    assert not out.exists()
+def test_the_cli_dry_run_does_not_bypass_the_export_disable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = tmp_path / "dataset.jsonl"
+    assert main([str(tmp_path / "missing.jsonl"), "-o", str(output), "--dry-run"]) == 2
+    assert "dataset export is disabled" in capsys.readouterr().err
+    assert not output.exists()
 
 
 def test_the_cli_reports_a_missing_log(tmp_path: Path) -> None:
-    assert main([str(tmp_path / "missing.jsonl")]) == 1
+    assert main([str(tmp_path / "missing.jsonl")]) == 2
 
 
 def test_stats_name_the_tools_that_were_used(tmp_path: Path) -> None:

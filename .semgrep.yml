@@ -1,0 +1,73 @@
+rules:
+  - id: omniagent.python.shell-command-from-user-input
+    languages: [python]
+    severity: ERROR
+    mode: taint
+    message: User-controlled input reaches a shell-enabled command. Use a fixed executable and argv without shell=True.
+    metadata:
+      category: security
+      cwe: "CWE-78"
+    pattern-sources:
+      - pattern: input(...)
+      - pattern: sys.argv[...]
+    pattern-sinks:
+      - pattern: os.system(...)
+      - pattern: os.popen(...)
+      - pattern: subprocess.run(..., shell=True, ...)
+      - pattern: subprocess.Popen(..., shell=True, ...)
+      - pattern: subprocess.call(..., shell=True, ...)
+      - pattern: subprocess.check_output(..., shell=True, ...)
+
+  - id: omniagent.python.user-input-path-join
+    languages: [python]
+    severity: ERROR
+    mode: taint
+    message: User-controlled input is joined into a filesystem path. Resolve and validate it with the workspace boundary before opening or writing.
+    metadata:
+      category: security
+      cwe: "CWE-22"
+    pattern-sources:
+      - pattern: input(...)
+      - pattern: sys.argv[...]
+    pattern-sinks:
+      - pattern: open(os.path.join(...), ...)
+      - pattern: open(Path(...) / ..., ...)
+      - pattern: open(pathlib.Path(...) / ..., ...)
+      - pattern: os.open(os.path.join(...), ...)
+      - pattern: Path(...).joinpath(...).open(...)
+      - pattern: pathlib.Path(...).joinpath(...).open(...)
+
+  - id: omniagent.python.secret-environment-value-logged
+    languages: [python]
+    severity: ERROR
+    mode: taint
+    message: A value read from a secret-like environment variable reaches a logging call. Redact it before logging.
+    metadata:
+      category: security
+      cwe: "CWE-532"
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: os.getenv($KEY, ...)
+              - pattern: os.environ.get($KEY, ...)
+          - metavariable-regex:
+              metavariable: $KEY
+              regex: (?i).*(token|secret|password|api[_-]?key|authorization|credential).*
+    pattern-sinks:
+      - pattern: logging.$METHOD(..., $VALUE, ...)
+      - pattern: $LOGGER.$METHOD(..., $VALUE, ...)
+
+  - id: omniagent.python.tls-verification-disabled
+    languages: [python]
+    severity: ERROR
+    message: TLS certificate verification is disabled. Keep certificate verification enabled.
+    metadata:
+      category: security
+      cwe: "CWE-295"
+    patterns:
+      - pattern-either:
+          - pattern: requests.$METHOD(..., verify=False, ...)
+          - pattern: httpx.$METHOD(..., verify=False, ...)
+          - pattern: httpx.Client(..., verify=False, ...)
+          - pattern: httpx.AsyncClient(..., verify=False, ...)
+          - pattern: ssl._create_unverified_context(...)

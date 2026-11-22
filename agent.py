@@ -14,13 +14,12 @@ The loop is deliberately small and readable:
 
 from __future__ import annotations
 
-import hashlib
 import ipaddress
 import logging
 import re
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from typing import Any, Final, Literal, cast
 from urllib.parse import urlsplit
 
@@ -30,7 +29,13 @@ from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 from pydantic import BaseModel, Field, field_validator
 
 import observability as obs
-from tools import NO_ARG_INPUTS, TOOLS, describe_tools, run_tool, tool_names
+from tools import (
+    FIXED_TOOL_ALLOWLIST,
+    NO_ARG_INPUTS,
+    describe_tools,
+    run_tool,
+    tool_names,
+)
 
 _log = obs.get_logger("agent")
 
@@ -623,6 +628,8 @@ class ReActAgent:
         config: AgentConfig | None = None,
         printer: Callable[[str], None] = print,
         client: OpenAI | None = None,
+        allowed_tools: Collection[str] | None = None,
+        before_model_request: Callable[[], None] | None = None,
     ) -> None:
         """Build an agent.
 
@@ -632,6 +639,9 @@ class ReActAgent:
         """
         self.config = config or AgentConfig()
         self._print = printer
+        self._before_model_request = before_model_request
+        requested_tools = FIXED_TOOL_ALLOWLIST if allowed_tools is None else allowed_tools
+        self.allowed_tools = frozenset(requested_tools) & FIXED_TOOL_ALLOWLIST
         self.client = client or build_openai_client(self.config)
         self.system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             tools=describe_tools(), tool_names=tool_names()
@@ -645,26 +655,22 @@ class ReActAgent:
         obs.event(
             "agent.created",
             logger=_log,
-            # INFO, not DEBUG: this record carries the system prompt the dataset
-            # exporter replays, so a log written at the default level has to
-            # contain it or none of the run is usable for training.
             level=logging.INFO,
-            # api_key is redacted by the formatter, which this proves.
-            config=self.config.model_dump(),
-            tools=list(TOOLS),
-            # The exporter replays this verbatim as the system turn, and the
-            # digest tells runs made with different prompts apart.
-            system_prompt=self.system_prompt,
-            system_prompt_sha256=hashlib.sha256(
-                self.system_prompt.encode("utf-8")
-            ).hexdigest(),
+            status="created",
+            model_tag=self.config.model,
         )
 
     # -- public API -------------------------------------------------------- #
 
     def reset(self) -> None:
         """Forget the conversation history."""
-        obs.event("agent.reset", logger=_log, level=logging.DEBUG, turns=self._turn)
+        obs.event(
+            "agent.reset",
+            logger=_log,
+            level=logging.DEBUG,
+            status="reset",
+            step_count=len(self.last_trace),
+        )
         self.history.clear()
         self.last_trace.clear()
 
@@ -677,8 +683,8 @@ class ReActAgent:
                 "agent.connection.unreachable",
                 logger=_log,
                 level=logging.ERROR,
-                base_url=self.config.base_url,
-                exc_info=True,
+                status="unreachable",
+                model_tag=self.config.model,
             )
             raise AgentError(
                 f"Cannot reach a local model server at {ENDPOINT_DESCRIPTION}. "
@@ -689,21 +695,18 @@ class ReActAgent:
                 "agent.connection.error",
                 logger=_log,
                 level=logging.ERROR,
-                base_url=self.config.base_url,
-                status_code=exc.status_code,
-                exc_info=True,
+                status="error",
+                model_tag=self.config.model,
             )
             raise AgentError(
-                f"Model server returned HTTP {exc.status_code}: {exc.message}"
+                f"Model server returned HTTP {exc.status_code}."
             ) from exc
 
         obs.event(
             "agent.connection.ok",
             logger=_log,
-            base_url=self.config.base_url,
-            model=self.config.model,
-            model_installed=model_is_installed(self.config.model, available),
-            available=available,
+            status="succeeded" if model_is_installed(self.config.model, available) else "failed",
+            model_tag=self.config.model,
         )
         return available
 
@@ -721,9 +724,8 @@ class ReActAgent:
         obs.event(
             "agent.turn.start",
             logger=_log,
-            question=question,
-            max_steps=self.config.max_steps,
-            history_messages=len(self.history),
+            status="started",
+            step_count=0,
         )
 
         for iteration in range(1, self.config.max_steps + 1):
@@ -751,8 +753,8 @@ class ReActAgent:
                     obs.event(
                         "agent.step.final_answer",
                         logger=_log,
-                        thought=step.thought,
-                        answer=step.final_answer,
+                        status="completed",
+                        step_count=iteration,
                     )
                     return self._finish(question, step.final_answer, started, iteration)
 
@@ -762,7 +764,8 @@ class ReActAgent:
                         "agent.format.violation",
                         logger=_log,
                         level=logging.WARNING,
-                        reply=reply,
+                        status="invalid_format",
+                        step_count=iteration,
                     )
                     nudge = (
                         "Your last reply did not follow the required format. Reply with "
@@ -775,6 +778,10 @@ class ReActAgent:
                     continue
 
                 observation = self._invoke_tool(step)
+                if step.action not in self.allowed_tools:
+                    # A task policy rejection terminates this turn immediately;
+                    # the model cannot retry or route around the denied tool.
+                    return ""
                 # The rut check below still sees the whole thing; only what the
                 # model is asked to read again is capped.
                 shown = cap_observation(observation, self.config.max_observation_tokens)
@@ -789,7 +796,8 @@ class ReActAgent:
             "agent.budget.exhausted",
             logger=_log,
             level=logging.WARNING,
-            max_steps=self.config.max_steps,
+            status="step_budget_exhausted",
+            step_count=self.config.max_steps,
         )
         fallback = self._force_final_answer(scratchpad, question)
         return self._finish(question, fallback, started, self.config.max_steps)
@@ -826,10 +834,8 @@ class ReActAgent:
             "agent.loop.repeated_action",
             logger=_log,
             level=logging.WARNING,
-            tool=signature[0],
-            tool_input=signature[1],
-            attempts=count,
-            failing=failed,
+            status="repeated_action",
+            tool_name=signature[0],
         )
         if failed:
             return (
@@ -848,16 +854,32 @@ class ReActAgent:
     def _invoke_tool(self, step: Step) -> str:
         """Run the tool a step asked for, logging the call and its result."""
         tool_name = step.action or ""
+        permitted = tool_name in self.allowed_tools
         obs.event(
             "agent.tool.call",
             logger=_log,
-            tool=tool_name,
-            tool_input=step.action_input or "",
-            thought=step.thought,
+            status="requested" if permitted else "rejected",
+            step_count=len(self.last_trace),
+            tool_name=tool_name,
         )
 
         started = time.perf_counter()
-        observation = run_tool(tool_name, step.action_input or "")
+        if permitted:
+            observation = run_tool(
+                tool_name,
+                step.action_input or "",
+                allowed_tools=self.allowed_tools,
+            )
+        else:
+            obs.event(
+                "agent.tool.policy_violation",
+                logger=_log,
+                level=logging.WARNING,
+                status="rejected",
+                step_count=len(self.last_trace),
+                tool_name=tool_name,
+            )
+            observation = "Error: tool is not allowed for this task."
         elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
 
         step.observation = observation
@@ -866,10 +888,10 @@ class ReActAgent:
             "agent.tool.result",
             logger=_log,
             level=logging.WARNING if failed else logging.INFO,
-            tool=tool_name,
-            ok=not failed,
-            observation=observation,
-            elapsed_ms=elapsed_ms,
+            status="failed" if failed else "succeeded",
+            duration_ms=elapsed_ms,
+            step_count=len(self.last_trace),
+            tool_name=tool_name,
         )
         self._trace_observation(observation)
         return observation
@@ -878,9 +900,9 @@ class ReActAgent:
         obs.event(
             "agent.turn.end",
             logger=_log,
-            answer=answer,
-            steps_used=steps,
-            elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+            status="completed",
+            step_count=steps,
+            duration_ms=round((time.perf_counter() - started) * 1000, 3),
         )
         return self._remember(question, answer)
 
@@ -949,17 +971,11 @@ class ReActAgent:
             if keep < len(content):
                 pad[-1]["content"] = content[:keep] + _CLIPPED
 
-        final = total()
         obs.event(
             "agent.context.trimmed",
             logger=_log,
             level=logging.WARNING,
-            estimated_tokens_before=original,
-            estimated_tokens_after=final,
-            budget=budget,
-            context_window=self.config.context_window,
-            earlier_turns_dropped=len(history) - len(kept_history),
-            still_over=final > budget,
+            status="trimmed",
         )
         return cast("list[ChatCompletionMessageParam]", assembled())
 
@@ -968,27 +984,22 @@ class ReActAgent:
         obs.event(
             "agent.llm.request",
             logger=_log,
-            model=self.config.model,
-            temperature=self.config.temperature,
-            message_count=len(messages),
-            stop_enabled=stop,
+            status="requested",
+            model_tag=self.config.model,
+            step_count=len(self.last_trace) + 1,
         )
 
         started = time.perf_counter()
         response = self._create_with_retries(messages, stop=stop)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
         content = (response.choices[0].message.content or "").strip()
-        usage = response.usage
         obs.event(
             "agent.llm.response",
             logger=_log,
-            model=self.config.model,
-            elapsed_ms=elapsed_ms,
-            reply_chars=len(content),
-            finish_reason=response.choices[0].finish_reason,
-            prompt_tokens=usage.prompt_tokens if usage else None,
-            completion_tokens=usage.completion_tokens if usage else None,
-            reply=content,
+            status="completed",
+            model_tag=self.config.model,
+            duration_ms=elapsed_ms,
+            step_count=len(self.last_trace) + 1,
         )
         return content
 
@@ -1004,6 +1015,8 @@ class ReActAgent:
         """
         attempts = self.config.max_retries + 1
         for attempt in range(1, attempts + 1):
+            if self._before_model_request is not None:
+                self._before_model_request()
             try:
                 return self.client.chat.completions.create(
                     model=self.config.model,
@@ -1037,11 +1050,10 @@ class ReActAgent:
                 "agent.llm.retry",
                 logger=_log,
                 level=logging.WARNING,
-                attempt=attempt,
-                of=attempts,
-                delay_seconds=round(delay, 3),
-                status_code=status_code,
-                reason=type(exc).__name__,
+                status="retrying",
+                model_tag=self.config.model,
+                duration_ms=round(delay * 1000, 3),
+                step_count=len(self.last_trace) + 1,
             )
             if delay:
                 time.sleep(delay)
@@ -1052,9 +1064,9 @@ class ReActAgent:
                 "agent.llm.unreachable",
                 logger=_log,
                 level=logging.ERROR,
-                base_url=self.config.base_url,
-                attempts=attempt,
-                exc_info=True,
+                status="unreachable",
+                model_tag=self.config.model,
+                step_count=len(self.last_trace) + 1,
             )
             raise AgentError(
                 f"Lost the connection to {ENDPOINT_DESCRIPTION} after {attempt} "
@@ -1065,11 +1077,9 @@ class ReActAgent:
             "agent.llm.error",
             logger=_log,
             level=logging.ERROR,
-            status_code=status_code,
-            model=self.config.model,
-            attempts=attempt,
-            retryable=retryable,
-            exc_info=True,
+            status="error",
+            model_tag=self.config.model,
+            step_count=len(self.last_trace) + 1,
         )
         hint = ""
         if status_code == _HTTP_NOT_FOUND:

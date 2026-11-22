@@ -1,24 +1,10 @@
-"""Drive the agent through a bank of questions to build up training data.
+"""Disabled persistent dataset collector pending privacy approvals.
 
-The dataset exporter can only work with runs that happened, and four runs is
-not a training set. This walks a bank of questions against a real local model,
-logging every step, so an evening of unattended running turns into something
-worth fine-tuning on.
-
-Sessions matter. A session is a list of questions asked of one agent instance,
-so a multi-question session produces a conversation with history -- which is
-what teaches the model to use what it already knows instead of re-deriving it.
-
-Usage::
-
-    python scripts/collect_dataset.py --model qwen2.5-coder:7b
-    python scripts/collect_dataset.py --limit 5 --dry-run
-    python scripts/collect_dataset.py --resume          # top up an existing log
-
-Then::
-
-    python export_dataset.py "data/collect.jsonl" -o data/dataset.jsonl --stats
-    python validate_dataset.py data/dataset.jsonl
+Operational logs are never dataset inputs. Persistent capture requires an
+approved separate sink, explicit opt-in and field preview, plus approved
+retention/deletion rules. User-workspace data is prohibited from evaluation
+and training. This command currently exits before reading inputs or contacting
+a model server.
 """
 
 from __future__ import annotations
@@ -26,15 +12,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import observability as obs
-from agent import AgentError, ReActAgent, model_is_installed
-from config import resolve
-from sandbox import Workspace, set_workspace, without_own_transcripts
+from sandbox import Workspace
 
 #: Each entry is one session: the questions are asked of a single agent, in
 #: order, so later ones can refer back to earlier answers.
@@ -196,35 +178,23 @@ def already_answered(log_file: Path) -> set[str]:
 
 
 
-def collection_workspace(root: Path, log_file: Path | None) -> Workspace:
-    """The workspace a collection run may read.
-
-    Narrower than the evaluation's seal, and deliberately so. The evaluation
-    seals every file holding a held-out question or its answer, which includes
-    ``omniagent.toml`` -- and a training question asks whether any ``.toml``
-    files are here, so reusing that seal would change the answer to a question
-    being collected.
-
-    What collection needs is that a trajectory cannot record the model reading
-    an earlier answer out of a transcript, because that trajectory becomes an
-    example teaching it to search the logs. So the transcripts directory is
-    listable -- 41 collected examples are a ``list_directory`` observation of
-    it -- and nothing inside it opens. The active log is denied by name as
-    well, since it may be written outside that directory.
-    """
-    return without_own_transcripts(root, log_file)
+def collection_workspace(root: Path, log_file: Path | None = None) -> Workspace:
+    """A collection workspace that cannot expose user files or directories."""
+    _ = log_file  # kept for call-site compatibility; the full root is denied
+    resolved_root = root.expanduser().resolve()
+    return Workspace.at(resolved_root, denied_paths=frozenset({resolved_root}))
 
 
-def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run a bank of questions through the agent to collect training data."
+        description="Disabled persistent dataset capture."
     )
     parser.add_argument("--model", help="Ollama model tag.")
     parser.add_argument(
         "--log-file",
         type=Path,
-        default=Path("data/collect.jsonl"),
-        help="Where to append the structured log (default: data/collect.jsonl).",
+        default=Path("data/collect-operational.jsonl"),
+        help="Operational log path option; persistent file logging is disabled.",
     )
     parser.add_argument("--workspace", type=Path, help="Directory the file tools may read.")
     parser.add_argument("--questions", type=Path, help="Question bank file to use instead.")
@@ -232,101 +202,41 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Skip questions the log already has an answer for.",
+        help="Unavailable while persistent dataset capture is disabled.",
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="List what would be asked, run nothing."
     )
+    parser.add_argument(
+        "--opt-in-dataset",
+        action="store_true",
+        help=(
+            "Request dataset capture (disabled pending sink, provenance, field preview, "
+            "and retention approval)."
+        ),
+    )
+    parser.add_argument(
+        "--dataset-sink",
+        type=Path,
+        help="Separate dataset sink path; it must never be the operational log path.",
+    )
     args = parser.parse_args(argv)
 
-    sessions = load_questions(args.questions) if args.questions else list(SESSIONS)
-
-    settings, _ = resolve(
-        {
-            key: value
-            for key, value in {
-                "model": args.model,
-                "workspace": args.workspace,
-                "log_file": args.log_file,
-                "verbose": False,
-            }.items()
-            if value is not None
-        }
+    if args.resume:
+        parser.error("--resume is unavailable while persistent dataset capture is disabled")
+    if not args.opt_in_dataset:
+        parser.error(
+            "dataset capture is disabled pending approval of a separate sink, "
+            "field preview, and retention/deletion policy"
+        )
+    if args.dataset_sink is None:
+        parser.error("dataset collection requires a separate --dataset-sink path")
+    if args.dataset_sink.expanduser().resolve() == args.log_file.expanduser().resolve():
+        parser.error("dataset sink must be separate from the operational log")
+    parser.error(
+        "dataset capture is disabled pending approval of a separate sink, "
+        "field preview, and retention/deletion policy"
     )
-
-    answered = already_answered(args.log_file) if args.resume else set()
-    if answered:
-        sessions = [[q for q in session if q not in answered] for session in sessions]
-        sessions = [session for session in sessions if session]
-        print(f"resuming: {len(answered)} question(s) already answered")
-
-    if args.limit is not None:
-        sessions = sessions[: args.limit]
-
-    questions = sum(len(session) for session in sessions)
-    print(f"{len(sessions)} session(s), {questions} question(s), model {settings.model}")
-
-    if args.dry_run:
-        for index, session in enumerate(sessions, start=1):
-            for position, question in enumerate(session, start=1):
-                marker = f"{index}.{position}"
-                print(f"  {marker:>6}  {question}")
-        return 0
-
-    if not sessions:
-        print("nothing left to ask")
-        return 0
-
-    session_id = obs.configure(level="INFO", log_file=settings.log_file)
-    set_workspace(collection_workspace(settings.workspace, settings.log_file))
-    print(f"logging to {settings.log_file} (session {session_id})")
-
-    probe = ReActAgent(config=settings.agent_config(), printer=lambda _: None)
-    try:
-        available = probe.check_connection()
-    except AgentError as exc:
-        print(f"[!] {exc}", file=sys.stderr)
-        return 1
-    if not model_is_installed(settings.model, available):
-        print(f"[!] model {settings.model!r} is not installed", file=sys.stderr)
-        print(f"    installed: {', '.join(available)}", file=sys.stderr)
-        return 1
-
-    started = time.perf_counter()
-    answers = failures = 0
-
-    for index, session in enumerate(sessions, start=1):
-        # Each session is its own conversation, and each new agent restarts
-        # its turn counter at 1. Without a distinct session_id the exporter
-        # keys them all to (session, turn 1) and merges them into one mangled
-        # conversation -- which is exactly what happened the first time.
-        with obs.bind(session_id=f"{session_id}-{index:03d}"):
-            agent = ReActAgent(config=settings.agent_config(), printer=lambda _: None)
-            for position, question in enumerate(session, start=1):
-                marker = f"[{index}/{len(sessions)}.{position}]"
-                print(f"{marker:>14} {question}", flush=True)
-                turn_started = time.perf_counter()
-                try:
-                    answer = agent.run(question)
-                except AgentError as exc:
-                    failures += 1
-                    print(f"{'':>14} !! {exc}", flush=True)
-                    break
-                except KeyboardInterrupt:
-                    print("\ninterrupted; the log keeps everything answered so far")
-                    return 130
-                answers += 1
-                elapsed = time.perf_counter() - turn_started
-                print(f"{'':>14} -> {answer[:110]}  ({elapsed:.1f}s)", flush=True)
-
-    elapsed = time.perf_counter() - started
-    print()
-    print(f"answered {answers}, failed {failures}, in {elapsed / 60:.1f} min")
-    print()
-    print("next:")
-    print(f'  python export_dataset.py "{settings.log_file}" -o data/dataset.jsonl --stats')
-    print("  python validate_dataset.py data/dataset.jsonl")
-    return 0
 
 
 if __name__ == "__main__":

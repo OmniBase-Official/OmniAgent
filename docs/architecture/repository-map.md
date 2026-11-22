@@ -25,16 +25,16 @@ document for the package move in their place.
 | `scripts/collect_dataset.py`, `scripts/publish_dataset.py`, `scripts/run_dir.py`, `scripts/promote_model.py` | Data/model lifecycle: collect runs, publish bundles, record runs, promote a local model. |
 | `scripts/eval_scoring.py`, `scripts/eval_workspace.py`, `scripts/holdout_eval.py`, `scripts/session_eval.py` | Evaluation: score answers, establish the evaluation workspace, run holdout/session evaluation, record and report. `eval_workspace.py` exists because the agent once answered a question out of the answer key. |
 | `scripts/smoke_train.py`, `scripts/build_notebook.py` | Training: CPU smoke training and notebook generation. **`build_notebook.py` is the source of truth for the notebook; editing the notebook is work that disappears.** |
-| `scripts/make_demo_svg.py`, `docs/demo1.svg` | Documentation/demo generator and generated asset. The cast was recorded on `omniagent-v2`. |
+| `docs/demo1.svg` | Static README demo asset. The cast was recorded on `omniagent-v2`. |
 | `tests/` | 30 flat test modules, 658 tests. 20 of the 30 import a flat root module. |
-| `questions/` | The 19-question bank. Changing it changes measured expectations, and the contract forbids using it as the MVP baseline. |
+| `data/question-bank/` | Local-only legacy 19-question bank; `data/` is gitignored and excluded from the public source tree. It is not the MVP evaluation baseline. |
 | `eval-fixture/` | Tracked stable evaluation subject. **Nothing may be written into it** — it is reachable by design, and adding one file once moved a question's step count from 3 to 2. |
 | `notebooks/train_omniagent_lora.ipynb` | Generated training interface. Regenerate from the generator; never edit in place. |
 | `docs/` | Public guides, generated demo material, PM briefs and records, the threat model, the contract, and (from ADR-0001) `docs/architecture/`. |
 | `.github/workflows/ci.yml` | Hosted lint, type-check and test gates, after an **editable** install — which is why it cannot see the ADR-0002 defect. |
 | `.github/workflows/waka-readme.yml` | Scheduled README update through a third-party action at `@master`, with a secret and `contents: write`. |
 | `pyproject.toml` | Packaging and all three static-analysis path lists. **The module list is maintained in three places and two of them disagree** (ADR-0002). |
-| `requirements.txt`, `LICENSE`, `README.md`, `NEXT_CHAT.md` | Contributor entry points. `README.md:7` claims "Nothing leaves localhost", which is too broad; `NEXT_CHAT.md` is 1,101 lines and half superseded. |
+| `requirements.txt`, `LICENSE`, `README.md` | Contributor entry points. `README.md:7` claims "Nothing leaves localhost", which is too broad. |
 | `data/`, `models/` | Referenced by source and docs, **absent from `git ls-tree HEAD`.** Operator-managed local locations; assume nothing about their contents or provenance. |
 | `omniagent-core` | Not on `main`. Branch `core-offline-runtime` (`fd5176a`), gated by `.github/workflows/core.yml` on a pinned `ubuntu-24.04`. Not merged; merging is undecided. |
 
