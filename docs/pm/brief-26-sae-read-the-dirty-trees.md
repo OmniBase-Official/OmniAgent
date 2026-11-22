@@ -82,3 +82,16 @@ SAE report: `origin/sae/snapshot-classification-20261122`. Re-run, nothing pushe
 **Rule for the salvage:** that ref is **never pushed wholesale**. It stays a local ref (nothing pushes it);
 salvage by path only. Deleting it unread would lose the 77 real files of the nested tree.
 Not verified: whether any salvage branch merges onto the canonical line (several parents are O-line or older).
+
+## Salvage executed, 2026-11-22 (owner: "salvage by path"; decision 2, option B)
+
+PM built `origin/wip/salvage-search-text-race-safety-20261122` = `7aa7af9`, one commit on the snapshot's own
+parent `2390568` (already on `organization`), by plumbing (temporary index, no tree touched). It carries only
+the five real files of snapshot `13c7bfb`: `README.md`, `sandbox.py`, `tools.py`,
+`tests/test_context_budget.py`, `tests/test_file_tools.py` (+339/-8 against the parent). Screened first: 0
+secret or personal-data pattern in the added lines. MEASURED after the push: `git ls-remote` returns `7aa7af9`;
+the pushed tree has no path under `.scratch/`; exactly one commit beyond the parent.
+Named `wip/` so the hook's clean-tree gates are skipped by design: **the branch is unreviewed and ungated.**
+The snapshot ref itself stays a **local-only** ref (not pushed). Still open: whether the 77 real files of the
+nested `publisher-acl-fix-20261115` tree are covered by a pushed branch; the branch does not merge onto the
+canonical line (O-line parent) until its owning chair rebases it.
