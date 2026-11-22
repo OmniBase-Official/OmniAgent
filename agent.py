@@ -792,7 +792,7 @@ class ReActAgent:
                 exc_info=True,
             )
             raise AgentError(
-                f"Model server returned HTTP {exc.status_code}: {exc.message}"
+                f"Model server returned HTTP {exc.status_code}."
             ) from exc
 
         obs.event(
