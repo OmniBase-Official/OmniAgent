@@ -37,6 +37,13 @@ words. Anything the PM merely assumed is listed separately and is not a ruling.*
    recorded here so the decision is made on known ground, and it does not block the
    work: the design proceeds on the owner's choice.
 
+8. **Today's weekly ceiling is 40%, not 28%.** Codex hit its own daily limit and is
+   paused, so the owner works on Claude until the weekly meter reads 40% today
+   (2026-11-22). It read 27% when the ruling was given.
+9. **All work lives under `D:\code-project\OmniAgent`; nothing is built outside it**
+   (the location rule, appended to both global instruction files). Isolated trees go
+   under `.scratch\`.
+
 ## Consequences of ruling 6 that the owner has not yet decided
 
 Turning hybrid on changes a promise of the product ("nothing leaves your machine"),
