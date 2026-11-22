@@ -44,6 +44,14 @@ StageId = Literal[
     "contract_clean_repo_setup",
     "contract_clean_scan_execution",
     "contract_clean_assertions",
+    "scan_commit_count",
+    "scan_docker_create",
+    "scan_docker_start",
+    "scan_docker_inspect",
+    "scan_commit_summary",
+    "scan_report_copy",
+    "scan_report_parse",
+    "scan_container_cleanup",
     "contract_canary_scan",
     "contract_mutant_scan",
     "contract_cli_validation",
@@ -53,6 +61,14 @@ ALLOWED_STAGE_IDS = frozenset(
         "contract_clean_repo_setup",
         "contract_clean_scan_execution",
         "contract_clean_assertions",
+        "scan_commit_count",
+        "scan_docker_create",
+        "scan_docker_start",
+        "scan_docker_inspect",
+        "scan_commit_summary",
+        "scan_report_copy",
+        "scan_report_parse",
+        "scan_container_cleanup",
         "contract_canary_scan",
         "contract_mutant_scan",
         "contract_cli_validation",
@@ -80,6 +96,12 @@ def fail_stage(stage: StageId) -> NoReturn:
     if stage not in ALLOWED_STAGE_IDS:
         fail()
     raise StageError(stage)
+
+
+def preserve_or_fallback(error: StageError, fallback: StageId) -> NoReturn:
+    if error.stage in ALLOWED_STAGE_IDS:
+        raise error
+    fail_stage(fallback)
 
 
 def report_error(error: ScanError) -> None:
@@ -239,91 +261,138 @@ def scanner_status_consistent(status: int, rows: list[tuple[str, str, str, int]]
     return (status == CLEAN_STATUS and not rows) or (status == FINDINGS_STATUS and bool(rows))
 
 
+def create_scan_container(repo: Path, template: Path, name: str, docker_bin: str) -> None:
+    args = [
+        docker_bin,
+        "create",
+        "--name",
+        name,
+        "--network=none",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--memory=512m",
+        "--cpus=1",
+        "--pids-limit=64",
+        "--tmpfs=/out:rw,noexec,nosuid,size=8388608",
+        "--volume",
+        f"{repo.resolve()}:/repo:ro",
+        "--volume",
+        f"{template.resolve()}:/template.tmpl:ro",
+        IMAGE,
+        "git",
+        "--redact=100",
+        "--no-banner",
+        "--exit-code=2",
+        "--report-format=template",
+        "--report-template=/template.tmpl",
+        "--report-path=/out/report.tsv",
+        "--log-opts=--all",
+        "/repo",
+    ]
+    try:
+        status, _, _ = capture(args)
+        if status != CLEAN_STATUS:
+            fail()
+    except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
+        fail_stage("scan_docker_create")
+
+
+def start_scan_container(docker_bin: str, name: str) -> tuple[int, bytes, bytes]:
+    try:
+        status, stdout, stderr = capture([docker_bin, "start", "--attach", name])
+        if status not in (CLEAN_STATUS, FINDINGS_STATUS):
+            fail()
+    except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
+        fail_stage("scan_docker_start")
+    else:
+        return status, stdout, stderr
+
+
+def inspect_scan_container(docker_bin: str, name: str, start_status: int) -> int:
+    try:
+        status, output, _ = capture(
+            [docker_bin, "inspect", "--format", "{{.State.ExitCode}}", name]
+        )
+        if status != CLEAN_STATUS or not output.endswith(b"\n"):
+            fail()
+        scan_status = int(output.decode("ascii").strip())
+        if scan_status not in (CLEAN_STATUS, FINDINGS_STATUS) or start_status != scan_status:
+            fail()
+    except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
+        fail_stage("scan_docker_inspect")
+    else:
+        return scan_status
+
+
+def verify_scan_summary(output: bytes, expected: int) -> None:
+    try:
+        if summary_count(output) != expected:
+            fail()
+    except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
+        fail_stage("scan_commit_summary")
+
+
+def copy_scan_report(name: str, report: Path, docker_bin: str) -> bytes:
+    try:
+        docker_cp(name, "/out/report.tsv", report, docker_bin)
+        return report.read_bytes()
+    except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
+        fail_stage("scan_report_copy")
+
+
+def parse_scan_report(raw: bytes, scan_status: int, allow_invalid: bool) -> list[FindingRow] | None:
+    try:
+        rows = parse_report(raw)
+    except ScanError:
+        if allow_invalid:
+            return None
+        fail_stage("scan_report_parse")
+    except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
+        fail_stage("scan_report_parse")
+    try:
+        if not scanner_status_consistent(scan_status, rows):
+            fail()
+    except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
+        fail_stage("scan_report_parse")
+    else:
+        return rows
+
+
+def cleanup_scan_container(docker_bin: str, name: str) -> None:
+    try:
+        status, _, _ = capture([docker_bin, "rm", "-f", name])
+        if status != CLEAN_STATUS:
+            fail()
+    except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
+        fail_stage("scan_container_cleanup")
+
+
 def scan(
     repo: Path, template: Path, *, docker_bin: str = "docker", allow_invalid: bool = False
 ) -> tuple[int, list[tuple[str, str, str, int]], bytes, bytes]:
-    expected = count_commits(repo)
+    try:
+        expected = count_commits(repo)
+    except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
+        fail_stage("scan_commit_count")
     name = "omni-gitleaks-" + uuid.uuid4().hex
     with tempfile.TemporaryDirectory(prefix="omni-report-") as td:
         root = Path(td)
         root.chmod(0o700)
         report = root / "report.tsv"
-        create_args = [
-            docker_bin,
-            "create",
-            "--name",
-            name,
-            "--network=none",
-            "--read-only",
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges",
-            "--memory=512m",
-            "--cpus=1",
-            "--pids-limit=64",
-            "--tmpfs=/out:rw,noexec,nosuid,size=8388608",
-            "--volume",
-            f"{repo.resolve()}:/repo:ro",
-            "--volume",
-            f"{template.resolve()}:/template.tmpl:ro",
-            IMAGE,
-            "git",
-            "--redact=100",
-            "--no-banner",
-            "--exit-code=2",
-            "--report-format=template",
-            "--report-template=/template.tmpl",
-            "--report-path=/out/report.tsv",
-            "--log-opts=--all",
-            "/repo",
-        ]
-        status, _, _ = capture(create_args)
-        if status != CLEAN_STATUS:
-            fail()
+        create_scan_container(repo, template, name, docker_bin)
         try:
-            start_status, stdout, stderr = capture([docker_bin, "start", "--attach", name])
-            # Read the container process exit status explicitly; `docker start --attach`
-            # itself can return a transport/client error distinct from the scan status.
-            inspect_status, inspected, _ = capture(
-                [
-                    docker_bin,
-                    "inspect",
-                    "--format",
-                    "{{.State.ExitCode}}",
-                    name,
-                ]
-            )
-            if inspect_status != CLEAN_STATUS or not inspected.endswith(b"\n"):
-                fail()
-            try:
-                scan_status = int(inspected.decode("ascii").strip())
-            except (UnicodeError, ValueError):
-                fail()
-            if start_status not in (CLEAN_STATUS, FINDINGS_STATUS) or scan_status not in (
-                CLEAN_STATUS,
-                FINDINGS_STATUS,
-            ):
-                fail()
-            if start_status != scan_status:
-                fail()
-            if summary_count(stdout + b"\n" + stderr) != expected:
-                fail()
-            # Missing report is always a failure, including a clean scan. This avoids
-            # treating a report-write failure as evidence of zero findings.
-            docker_cp(name, "/out/report.tsv", report, docker_bin)
-            raw = report.read_bytes()
-            try:
-                rows = parse_report(raw)
-            except ScanError:
-                if allow_invalid:
-                    return scan_status, [], stdout + stderr, raw
-                raise
-            if not scanner_status_consistent(scan_status, rows):
-                fail()
+            start_status, stdout, stderr = start_scan_container(docker_bin, name)
+            scan_status = inspect_scan_container(docker_bin, name, start_status)
+            output = stdout + b"\n" + stderr
+            verify_scan_summary(output, expected)
+            raw = copy_scan_report(name, report, docker_bin)
+            rows = parse_scan_report(raw, scan_status, allow_invalid)
+            if rows is None:
+                return scan_status, [], stdout + stderr, raw
             return scan_status, rows, stdout + stderr, raw
         finally:
-            rm_status, _, _ = capture([docker_bin, "rm", "-f", name])
-            if rm_status != CLEAN_STATUS:
-                fail()
+            cleanup_scan_container(docker_bin, name)
 
 
 def validate_report(path: Path) -> bytes:
@@ -379,18 +448,63 @@ def assert_clean_scan(
 def contract_clean_scan(root: Path, template: Path) -> None:
     try:
         clean = make_repo(root, "clean", b"ordinary fixture text\n")
+    except StageError as error:
+        preserve_or_fallback(error, "contract_clean_repo_setup")
     except Exception:  # noqa: BLE001 - map every phase failure to a fixed, non-sensitive stage ID.
         fail_stage("contract_clean_repo_setup")
 
     try:
         status, rows, output, raw = scan(clean, template)
+    except StageError as error:
+        preserve_or_fallback(error, "contract_clean_scan_execution")
     except Exception:  # noqa: BLE001 - map every phase failure to a fixed, non-sensitive stage ID.
         fail_stage("contract_clean_scan_execution")
 
     try:
         assert_clean_scan(clean, status, rows, output, raw)
+    except StageError as error:
+        preserve_or_fallback(error, "contract_clean_assertions")
     except Exception:  # noqa: BLE001 - map every phase failure to a fixed, non-sensitive stage ID.
         fail_stage("contract_clean_assertions")
+
+
+def contract_canary_scan(root: Path, template: Path, canary: bytes) -> None:
+    try:
+        positive = make_repo(root, "positive", b"token=" + canary + b"\n")
+        status, rows, output, raw = scan(positive, template)
+        if (
+            status != FINDINGS_STATUS
+            or len(rows) != 1
+            or canary in output
+            or canary in raw
+            or canary in render(rows)
+        ):
+            fail()
+        if rows[0][1] != "fixture.txt" or rows[0][3] != 1:
+            fail()
+        if FIELDS != ("RuleID", "File", "Commit", "StartLine"):
+            fail()
+        if render(rows).splitlines()[0].decode("ascii").count(chr(9)) != REPORT_FIELD_COUNT - 1:
+            fail()
+    except StageError as error:
+        preserve_or_fallback(error, "contract_canary_scan")
+    except Exception:  # noqa: BLE001 - map phase failures to a fixed, non-sensitive stage ID.
+        fail_stage("contract_canary_scan")
+
+
+def contract_mutant_scan(root: Path, template: Path, canary: bytes) -> tuple[bytes, Path]:
+    try:
+        mutant_repo = make_repo(root, "mutant", b"token=" + canary + b"\n")
+        mutant_status, _, mutant_output, mutant_raw = scan(
+            mutant_repo, template, allow_invalid=True
+        )
+        if mutant_status != FINDINGS_STATUS or canary not in mutant_raw or canary in mutant_output:
+            fail()
+        return mutant_raw, root / "mutant-report.tsv"
+    except StageError as error:
+        preserve_or_fallback(error, "contract_mutant_scan")
+    except Exception:  # noqa: BLE001 - map phase failures to a fixed, non-sensitive stage ID.
+        fail_stage("contract_mutant_scan")
 
 
 def contract(template: Path, mutant_template: Path) -> None:
@@ -402,41 +516,8 @@ def contract(template: Path, mutant_template: Path) -> None:
         canary = ("ghp_" + hashlib.sha256(b"omniagent-gitleaks-contract").hexdigest()[:36]).encode(
             "ascii"
         )
-        try:
-            positive = make_repo(root, "positive", b"token=" + canary + b"\n")
-            status, rows, output, raw = scan(positive, template)
-            if (
-                status != FINDINGS_STATUS
-                or len(rows) != 1
-                or canary in output
-                or canary in raw
-                or canary in render(rows)
-            ):
-                fail()
-            if rows[0][1] != "fixture.txt" or rows[0][3] != 1:
-                fail()
-            if FIELDS != ("RuleID", "File", "Commit", "StartLine"):
-                fail()
-            if render(rows).splitlines()[0].decode("ascii").count(chr(9)) != REPORT_FIELD_COUNT - 1:
-                fail()
-        except ScanError:
-            fail_stage("contract_canary_scan")
-
-        try:
-            mutant_repo = make_repo(root, "mutant", b"token=" + canary + b"\n")
-            mutant_status, _, mutant_output, mutant_raw = scan(
-                mutant_repo, mutant_template, allow_invalid=True
-            )
-            if (
-                mutant_status != FINDINGS_STATUS
-                or canary not in mutant_raw
-                or canary in mutant_output
-            ):
-                fail()
-        except ScanError:
-            fail_stage("contract_mutant_scan")
-
-        bad = root / "mutant-report.tsv"
+        contract_canary_scan(root, template, canary)
+        mutant_raw, bad = contract_mutant_scan(root, mutant_template, canary)
         bad.write_bytes(mutant_raw)
         code = [sys.executable, str(Path(__file__).resolve()), "validate", str(bad)]
         try:

@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import gitleaks_report as module
 import pytest
 from gitleaks_report import (
     MAX_CAPTURE,
@@ -11,7 +12,9 @@ from gitleaks_report import (
     ScanError,
     StageError,
     capture,
+    contract_canary_scan,
     contract_clean_scan,
+    contract_mutant_scan,
     docker_cp,
     fail_stage,
     parse_report,
@@ -239,8 +242,6 @@ def test_clean_contract_reports_only_isolated_phase_id(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import gitleaks_report as module
-
     canary = "ghp_" + hashlib.sha256(b"omniagent-stage-test-canary").hexdigest()[:36]
     injected = f"{tmp_path / 'private-path'}:{canary}"
 
@@ -266,6 +267,134 @@ def test_clean_contract_reports_only_isolated_phase_id(
     expect_equal(captured.err, f"security scan failed stage={expected_stage}\n")
     expect_equal(canary in captured.err, False)
     expect_equal(str(tmp_path / "private-path") in captured.err, False)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("clean", "scan_docker_create", "scan_docker_create"),
+        ("clean", "untrusted/path", "contract_clean_scan_execution"),
+        ("canary", "scan_docker_create", "scan_docker_create"),
+        ("canary", "untrusted/path", "contract_canary_scan"),
+        ("mutant", "scan_docker_create", "scan_docker_create"),
+        ("mutant", "untrusted/path", "contract_mutant_scan"),
+    ],
+)
+def test_contract_wrappers_preserve_only_allowlisted_nested_stages(
+    case: tuple[str, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    wrapper, nested_stage, expected_stage = case
+    canary = "ghp_" + hashlib.sha256(b"omniagent-nested-stage-canary").hexdigest()[:36]
+    private_path = str(tmp_path / "private-nested-path")
+    injected = f"{private_path}:{canary}:nested diagnostic"
+
+    def raise_nested_stage(*_args: object, **_kwargs: object) -> None:
+        error = StageError(nested_stage)  # type: ignore[arg-type]
+        error.args = (injected,)
+        raise error
+
+    monkeypatch.setattr(module, "make_repo", lambda *_args: tmp_path)
+    monkeypatch.setattr(module, "scan", raise_nested_stage)
+
+    def invoke_wrapper() -> None:
+        if wrapper == "clean":
+            contract_clean_scan(tmp_path, tmp_path / "template")
+        elif wrapper == "canary":
+            contract_canary_scan(tmp_path, tmp_path / "template", canary.encode())
+        else:
+            contract_mutant_scan(tmp_path, tmp_path / "mutant-template", canary.encode())
+
+    with pytest.raises(StageError) as caught:
+        invoke_wrapper()
+
+    expect_equal(caught.value.stage, expected_stage)
+    report_error(caught.value)
+    captured = capsys.readouterr()
+    expect_equal(captured.out, "")
+    expect_equal(captured.err, f"security scan failed stage={expected_stage}\n")
+    expect_equal(private_path in captured.err, False)
+    expect_equal(canary in captured.err, False)
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected_stage"),
+    [
+        ("commit_count", "scan_commit_count"),
+        ("docker_create", "scan_docker_create"),
+        ("docker_start", "scan_docker_start"),
+        ("docker_inspect", "scan_docker_inspect"),
+        ("summary", "scan_commit_summary"),
+        ("report_copy", "scan_report_copy"),
+        ("report_parse", "scan_report_parse"),
+        ("cleanup", "scan_container_cleanup"),
+    ],
+)
+def test_scan_substep_failures_emit_only_fixed_stage_ids(
+    phase: str,
+    expected_stage: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    canary = "ghp_" + hashlib.sha256(b"omniagent-scan-stage-canary").hexdigest()[:36]
+    private_path = str(tmp_path / "private-scan-path")
+    injected = ScanError(f"{private_path}:{canary}:untrusted diagnostic")
+    monkeypatch.setattr(module, "count_commits", lambda _repo: (_ for _ in ()).throw(injected))
+    if phase != "commit_count":
+        monkeypatch.setattr(module, "count_commits", lambda _repo: 1)
+
+    def capture_for_phase(
+        args: list[str], timeout: int = module.TIMEOUT
+    ) -> tuple[int, bytes, bytes]:
+        del timeout
+        if args[1] == "create":
+            if phase == "docker_create":
+                raise injected
+            return 0, b"", b""
+        if args[1] == "start":
+            if phase == "docker_start":
+                raise injected
+            if phase == "summary":
+                return 0, b"missing summary", b""
+            return 0, b"12:51AM INF 1 commits scanned\n", b""
+        if args[1] == "inspect":
+            if phase == "docker_inspect":
+                raise injected
+            return 0, b"0\n", b""
+        if args[1] == "rm":
+            if phase == "cleanup":
+                raise injected
+            return 0, b"", b""
+        raise AssertionError("unexpected synthetic command")
+
+    def copy_for_phase(*args: object) -> None:
+        if phase == "report_copy":
+            raise injected
+        destination = args[2]
+        if not isinstance(destination, Path):
+            raise TypeError("synthetic report destination must be a path")
+        destination.write_bytes(b"")
+
+    def parse_for_phase(_raw: bytes) -> list[tuple[str, str, str, int]]:
+        if phase == "report_parse":
+            raise injected
+        return []
+
+    monkeypatch.setattr(module, "capture", capture_for_phase)
+    monkeypatch.setattr(module, "docker_cp", copy_for_phase)
+    monkeypatch.setattr(module, "parse_report", parse_for_phase)
+    with pytest.raises(StageError) as caught:
+        module.scan(tmp_path, tmp_path / "template")
+    expect_equal(caught.value.stage, expected_stage)
+    report_error(caught.value)
+    captured = capsys.readouterr()
+    expect_equal(captured.out, "")
+    expect_equal(captured.err, f"security scan failed stage={expected_stage}\n")
+    expect_equal(canary in captured.err, False)
+    expect_equal(private_path in captured.err, False)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="RLIMIT_FSIZE fixture requires POSIX")
