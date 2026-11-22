@@ -95,3 +95,22 @@ Named `wip/` so the hook's clean-tree gates are skipped by design: **the branch 
 The snapshot ref itself stays a **local-only** ref (not pushed). Still open: whether the 77 real files of the
 nested `publisher-acl-fix-20261115` tree are covered by a pushed branch; the branch does not merge onto the
 canonical line (O-line parent) until its owning chair rebases it.
+
+## The 77 nested-tree files, checked 2026-11-22 (owner: "PM checks"; MEASURED)
+
+Snapshot `13c7bfb`, nested tree `.scratch/publisher-acl-fix-20261115/`, excluding `.pytest-output-base`:
+76 files have a blob (the diff counted 77 paths; the odd one is not a blob, not investigated).
+Method: every file's blob hash at its path, compared with every remote ref (60 refs; `origin` and
+`organization` mirror each other for these).
+
+- **73 of 76 are byte-identical, at the same path, on `codex/scale-security-hardening-20261113`**
+  (tip `3576aeb`, 2026-11-15, the same SHA on both remotes). The nested tree is that branch's work: covered.
+- **3 are on no remote ref at all** (no identical blob at any path on any ref):
+  - `securefs.py`: differs from the branch's version by **+227 / -3** lines (an unpublished revision of
+    the ctypes module that is the owner's open decision 3);
+  - `scripts/validate_windows_publish_acl.ps1` (8,275 bytes): absent on that branch;
+  - `tests/test_windows_publish_acl.py` (3,443 bytes): absent on that branch (a different file of the same name
+    is in the `windows-private-root-fix` `-index` twin).
+- The three belong to the `securefs` / publisher-ACL line, which the owner has **not ruled on**. They are
+  preserved only in the local snapshot ref `13c7bfb`, **not pushed**. That ref therefore must not be
+  deleted until the owner rules, or until these three are salvaged by path.
