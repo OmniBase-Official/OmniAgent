@@ -164,3 +164,12 @@ Last updated: **2026-11-23** by the Claude PM. Update the status of your own tas
 5. **Not merged, waiting for the owner:** `se/brief-29b-gitignore`, `aiml/first-measurement-20261123`.
 6. **Remote that hosts the canonical line**, "Update Coding Time", sec-search chair (or delete both variants), the Codex message paste, clean Codex worktrees, the endpoint line printed on a healthy preflight (`main.py:200`).
 7. **Graph runtime:** go-ahead for the hybrid spike (spends the Claude meter), ADR-0005 amendment, contract and egress policy.
+
+---
+
+# Update log (PM, 2026-11-23 evening)
+
+- **C-SE-01 progress:** SE 01 finished step 1 (consumer list, nothing parses the old shape) and has not edited code. Stop line raised to 13%; ship `read_file` first, then the `list_directory` header. Ruling: never print an inexact line count (omit it, or "more than N lines" only if N is a proven lower bound).
+- **Lead (MEASURED, cause UNVERIFIED):** the numbers the model answers for the line-count question (278 at temperature 0, 10,306 at 0.1) are in the comment at `tools.py:626-627` ("a 278-line file ... answered 10,306"). Possible source: the model learned them from that comment. **C-AIE-05** (new): count, without quoting anything sealed, whether `278` and `10,306` appear in the on-disk training and run data and in the model template.
+- **C-PM-06** (new, low): `docs/demo-script.md` and `docs/video-script.md` quote the old `read_file` "too long" text; update them after brief 31 merges. Briefs under `docs/pm/` are history: accept the drift.
+- **X-SWE-01** (addition): also update README line 13, which quotes the old `read_file` text, after brief 31 merges.
