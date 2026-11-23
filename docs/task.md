@@ -93,7 +93,7 @@ Last updated: **2026-11-23** by the Claude PM. Update the status of your own tas
 
 ## To do
 - C-AIE-01 **Step 2 of tool text (slipped to tomorrow):** run the temperature-0 pass at `1ce7c81` (`read_file` change only): the six questions plus q7, 10 passes each, plus q7 at `b164aaa` if today's run did not finish; compare per question with `dc0c78d`. q1 and q3 must stay 10/10. q4 and q6 should NOT move (they depend on part 2). Control run at `1384d63` only if q1 or q3 moves (q5 reads the real clock). Read q2 against q7: if q7 is right and q2 still says "278", it is file-specific memorisation.
-- C-AIE-00 **First thing tomorrow:** confirm `.git/omniagent-eval.lock` is gone and no model run is in flight (the lock was present at 17:46).
+- C-AIE-00 DONE 2026-11-23 evening: the lock is gone and no run is in flight (PM confirmed; the q7 baseline finished).
 - C-AIE-02 R1: read tree state per question, not once per `evaluate()`; R2: rule on bank question index 18 (scored on nothing).
 - C-AIE-03 After the owner rules: whether the q2/q5 failures are a training-data gap, a tool-text gap or accepted (synthetic examples only, nothing automatic); a grounding and an abstention question in the contract task inventory with an oracle that does not read the real clock; the six questions as a standing check.
 - C-AIE-04 `aiml/first-measurement-20261123` is **not merged** (owner decides).
@@ -222,3 +222,9 @@ Weekly meter at close: **13%** against the owner's range of 0% to 14% for the da
 2. Owner: decide on `inspect_config_precedence`, the §2 paragraph, the README, the four unmerged branches, the main checkout fast-forward.
 3. SE: brief 31 part 2 (`list_directory`) only after the part 1 numbers are read; then 29a (Docker Desktop must be running) and `inspect_config_precedence`.
 4. SAE: refresh brief 24 phase 3 after the PM's worktree work; MVP checklist with the owner.
+
+## Addendum, 2026-11-23 evening (after the day close)
+
+- **q7 baseline finished** (AIE-reported, PM re-counted the 10 rows): question "How many lines does observability.py have?" (true count 353) at `b164aaa`, temperature 0: **0 correct, 10 wrong, 0 blank**; "278" in **0** of 10; nine answered "12331 lines" after running to the 8-step budget (`read_file` > `list_directory` looped), one said it could not find the file. All rows carry temperature 0.0, commit `b164aaa`, clean tree. The lock file is gone (PM confirmed). Raw files are local and uncommitted (`.scratch/aie-first-measurement/data/first-measurement/q7-b164aaa/`).
+- **What it adds (PM reading):** "278" does not appear for another file, so it looks tied to `config.py` (consistent with memorisation); but the model is wrong on this file too, with a different confident figure ("12331"), so memorisation of 278 is **not** the whole problem.
+- **Tomorrow:** the q7 baseline is done; Step 2 needs only the new-tip runs (six questions plus q7 = 70 runs) at `1ce7c81`.
