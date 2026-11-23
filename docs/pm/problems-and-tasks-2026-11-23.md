@@ -145,3 +145,26 @@ until the owner says so.** No chair pushed anything after 07:22 Thai; all chairs
 | 13 | **Security** | Low | A built wheel is UNVERIFIED (no `setuptools`/`wheel` here; the wheel test skips) | one CI run with `-rs` |
 | 14 | **Docs** | Low | ADR-0003 on the carry-over branch still carries the SAE's wrong "both READMEs document localhost" sentence | do not quote it |
 | 15 | **Process** | Low | Worktree hygiene: 3 empty leftover directories; the clean Codex trees; seven nested trees found already gone before the PM started (unknown cause) | owner word needed |
+
+## PM verification of the AIE's temperature-0 run, 2026-11-23 (MEASURED, throwaway tree at `dc0c78d`, `__file__` inside it)
+
+Branch `aiml/first-measurement-20261123` @ `dc0c78d` (prediction `9c4a5ca` 16:13:46, pass-through `d5d0b22`, result `dc0c78d` 16:33:46): the 60 runs of pass 2 repeated at temperature 0, same commit
+(`b164aaa`), model, questions.
+
+| Claim | PM result |
+| --- | --- |
+| Prediction and lock came before the first request | **Confirmed.** Lock created 16:13:27, prediction committed 16:13:46, first run file 16:17:59 |
+| Gates | **Confirmed.** ruff clean, mypy 56 files, **1,082 passed, 2 skipped**; runner hash `7b167cd43554` equals the AIE's |
+| Mutations (hash restored to `7b167cd43554` each time) | **Confirmed.** flag never passed: 1 red; row hard-codes 0.0: 1 red; the other two (wrong value, field dropped) not re-run |
+| 60 rows carry temperature 0.0, commit `b164aaa`, clean tree | **Confirmed** from `runs.jsonl` |
+| The recorded `blank` field now agrees with the raw files | **Confirmed**: all 60 rows matched to a raw file, 0 disagree (it was wrong in 15 rows in pass 2) |
+| blank if and only if an unregistered tool was called | **Confirmed by independent recount, 60 of 60** (10 runs, all q6 `count_lines`) |
+| One tool sequence per question at temperature 0 (except q5) | **Confirmed.** q1 `calculate`; q2 `read_file > read_file > inspect_config_precedence`; q3 `read_file`; q4 `list_directory > search_text > calculate`; q6 `list_directory > count_lines`; q5 four sequences |
+| Answers | **Confirmed.** q1 identical; q2 "278" in 10 of 10 (never the true 302); q4 "50" in 10 of 10 (true 12); q6 blank in 10 of 10; q3 identical |
+
+Not re-run by the PM: the q5 classification (a reading; q5 reads the real clock), the GPU watcher log, the per-row seconds, the two other mutations.
+
+**What this adds (PM reading, MEASURED by the AIE and recounted by the PM):**
+at temperature 0 the failures are not noise, they are **deterministic**: the same wrong answer, ten times. The model has not reported the true file count in any of 40 runs (two wordings, two temperatures); line count 0 of 10;
+q2's wrong figure (278) and q4's (50) match nothing the PM could find. The model also called `inspect_config_precedence` (the unreviewed seventh tool) in every q2 run. The AIE's prediction was wrong on q4 and q5 (both stated surprises) and the AIE left it unedited: correct practice.
+A single temperature-0 pass of these six questions is now a usable regression test for any fix.
