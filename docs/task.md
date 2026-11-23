@@ -33,7 +33,7 @@ Last updated: **2026-11-23** by the Claude PM. Update the status of your own tas
 
 ## To do
 - C-PM-01 Tomorrow: verify the AIE's q7 baseline and its runner flag (`aiml/tool-text-measure-20261123` @ `4b99b0c`, not verified today), then the full tool-text measurement at `1ce7c81`; merge nothing without the owner.
-- C-PM-02 Fast-forward the main checkout's local `integration/canonical-20261122` to `1384d63` (**owner's word needed**; it is still at `388fa53`).
+- C-PM-02 DONE 2026-11-24: the main checkout's local `integration/canonical-20261122` was fast-forwarded from `388fa53` to `1384d63` on the owner's word (clean, tree identical to the origin tip; gates in it: ruff clean, mypy 57 files, 1,085 passed, 2 skipped).
 - C-PM-03 Apply the SAE's replacement for the stale contract §2 paragraph (draft in `docs/architecture/contract-gaps-draft-amendments-2026-11-23.md`) after the owner approves.
 - C-PM-04 Remove the clean Codex worktrees (**owner's word needed**); the empty leftover folders `.scratch/pm-verify-*` need the owner to delete them (the safety check blocks the PM).
 - C-PM-05 Bring the open owner decisions to the owner, one at a time (list at the end of this file).
