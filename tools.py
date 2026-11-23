@@ -639,8 +639,8 @@ def read_file(
         f"Error: {shown} is {size_phrase}, too long to return in full. Reading the "
         f"start of it would not tell you what the rest contains. For a relevant section, "
         f"use read_file with JSON like {{\"path\":\"file.py\",\"start_line\":1,"
-        f"\"end_line\":20}}. Use file_info for size or line facts and search_text "
-        f"to locate relevant text."
+        f"\"end_line\":20}}. For its size or line count, call file_info next ("
+        f"Action: file_info, Action Input: {shown}). Use search_text to locate relevant text."
     )
 
 
