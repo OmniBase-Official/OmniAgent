@@ -14,8 +14,8 @@ M1    process environment values never appear, though a layer is *about* the
 M2    source text outside the layer rows -- constants, comments, other function
       bodies -- never appears
 M3    exactly one file is opened: the one named, and no sibling
-M4    the error path is bounded like the report (strict xfail: it is NOT, and
-      this records the measurement; see the test for the number)
+M4    the error path is bounded like the report (this was a strict xfail that
+      recorded a measured defect; brief 33 fixed it and the marker is gone)
 ====  =========================================================================
 
 What this does not show, and the tests cannot: that the model will not misuse
@@ -188,19 +188,6 @@ def test_m3_the_recorder_does_see_a_second_file_when_one_is_read(
 REPORT_LIMIT = 2_400
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "MEASURED defect, severity Low: config_inspection.py:393 formats "
-        "ast.unparse(node.func) from the file into the error, so a long callable "
-        "name in an admitted file comes back in full: a 5,012-character name "
-        "returned a 5,093-character error. It is bounded only by the 16,000-"
-        "character read cap, past which the tool refuses earlier. The text is "
-        "from a file the model could already read, so this is hygiene, not a "
-        "boundary breach. strict=True: when the error is bounded this test "
-        "starts passing, the xfail turns red, and the marker must be removed."
-    ),
-)
 def test_m4_an_error_about_the_source_is_bounded_like_the_report(
     workspace: Workspace,
 ) -> None:
@@ -212,3 +199,7 @@ def test_m4_an_error_about_the_source_is_bounded_like_the_report(
 
     assert result.startswith("Error:")
     assert len(result) <= REPORT_LIMIT
+    # The cause, not only the size: the name is cut at the 200-character label
+    # limit and says so, and the whole name is not in the result.
+    assert f"unsupported call in resolve(): {long_name[:200]}...(truncated)" in result
+    assert long_name not in result

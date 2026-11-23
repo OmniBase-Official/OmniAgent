@@ -10,6 +10,7 @@ from sandbox import TRUNCATION_NOTE, SandboxError, get_workspace
 _MAX_CONFIG_LAYERS = 20
 _MAX_CONFIG_CONDITION_CHARS = 200
 _MAX_CONFIG_PRECEDENCE_OUTPUT_CHARS = 2_400
+_TRUNCATION_MARKER = "...(truncated)"
 _PAIR_SIZE = 2
 _UNSUPPORTED_CONTROL_FLOW = (ast.AsyncFor, ast.AsyncWith, ast.BoolOp, ast.For, ast.IfExp,
                              ast.Lambda, ast.ListComp, ast.Match, ast.SetComp, ast.Try,
@@ -368,6 +369,23 @@ def _is_profile_abort(
     return False
 
 
+def _bounded_name(name: str) -> str:
+    """Make a name read from the inspected file safe to repeat in an error.
+
+    The name is untrusted text from whatever file the model pointed the tool at.
+    It is cut at the same 200-character limit used for layer labels, with a
+    visible marker so a cut is never mistaken for the whole name, and any
+    character that is not printable becomes ``?`` so the name cannot carry a raw
+    newline or a bidirectional control into a model's scratchpad. A name within
+    the limit and made of printable characters comes back unchanged, so the
+    message for every realistic input is the one it always was.
+    """
+    visible = "".join(char if char.isprintable() else "?" for char in name)
+    if len(visible) > _MAX_CONFIG_CONDITION_CHARS:
+        return visible[:_MAX_CONFIG_CONDITION_CHARS] + _TRUNCATION_MARKER
+    return visible
+
+
 def _validate_static_calls(function: ast.FunctionDef) -> None:
     allowed_calls = {
         "dict", "_from_env", "layers.append", "_reject_unknown", "Settings",
@@ -390,7 +408,7 @@ def _validate_static_calls(function: ast.FunctionDef) -> None:
             raise TypeError("dynamic callable expressions are unsupported")
         callable_name = ast.unparse(node.func)
         if callable_name not in allowed_calls:
-            raise ValueError(f"unsupported call in resolve(): {callable_name}")
+            raise ValueError(f"unsupported call in resolve(): {_bounded_name(callable_name)}")
 
 
 @dataclass(frozen=True)
