@@ -20,18 +20,25 @@ this stays held out rather than becoming a re-run of the training data.
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 PROJECT = Path(__file__).resolve().parent.parent
+#: One JSONL row per question per run. Not session_eval.RUNS_PATH: that file holds a
+#: different record shape, and one path for both would interleave rows each reader
+#: would misread. tests/test_holdout_record.py asserts the two differ.
+RUNS_PATH = PROJECT / "data" / "holdout-runs.jsonl"
 sys.path.insert(0, str(PROJECT))
 sys.path.insert(0, str(PROJECT / "scripts"))
 
 from collect_dataset import SESSIONS
-from eval_scoring import Question, Score, header, judge, row
+from eval_scoring import Question, Score, Verdict, header, judge, row
 from eval_workspace import sealed_workspace
 from promote_model import (
     PromotionEvaluationError,
@@ -134,7 +141,72 @@ if leaked:
     raise SystemExit(f"not held out, these are in the training bank: {leaked}")
 
 
-def evaluate(model: str) -> Score:
+def question_record(
+    index: int, verdict: Verdict, steps: int, tools_called: list[str]
+) -> dict[str, int | list[str] | bool | str]:
+    """Build one question's measurement without carrying text or expectations."""
+    return {
+        "index": index,
+        "tools": list(tools_called),
+        "steps": steps,
+        "checkable": verdict.checkable,
+        "correct": verdict.correct,
+        "tool_expected": verdict.tool_expected,
+        "right_tool": verdict.right_tool,
+        "honest_expected": verdict.honest_expected,
+        "admitted": verdict.admitted,
+    }
+
+
+def _short_commit() -> str:
+    """Name the code version recorded in the measurement."""
+    try:
+        done = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
+            ["git", "-C", str(PROJECT), "rev-parse", "--short", "HEAD"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return done.stdout.strip() or "unknown"
+
+
+def _tree_clean() -> bool | str:
+    """Return True/False from Git status, or unknown if it cannot be read."""
+    try:
+        done = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
+            ["git", "-C", str(PROJECT), "status", "--porcelain"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return not bool(done.stdout.strip())
+
+
+def _append_question_record(
+    measurement: dict[str, int | list[str] | bool | str],
+    model: str,
+    version: str,
+    clean: bool | str,
+    path: Path = RUNS_PATH,
+) -> None:
+    record: dict[str, Any] = {
+        **measurement,
+        "commit": version,
+        "model": model,
+        "clean": clean,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
+def evaluate(model: str, *, runs_path: Path = RUNS_PATH) -> Score:
     obs.reset()
     obs.configure(level="ERROR")
     set_workspace(sealed_workspace(PROJECT))
@@ -144,12 +216,17 @@ def evaluate(model: str) -> Score:
         model=model, verbose=False, max_steps=8, retry_backoff=0.5, temperature=0.0
     )
     score = Score()
+    version = _short_commit()
+    clean = _tree_clean()
+    question_index = 0
 
     print(f"\n{'=' * 78}\n{model}\n{'=' * 78}", flush=True)
 
     for session in SESSIONS_UNDER_TEST:
         agent = ReActAgent(config=config, printer=lambda _: None)
         for position, question in enumerate(session):
+            index = question_index
+            question_index += 1
             follow_up = position > 0
             score.asked += 1
             score.follow_total += follow_up
@@ -158,6 +235,14 @@ def evaluate(model: str) -> Score:
             try:
                 answer = agent.run(question.text)
             except AgentError as exc:
+                tools_called = [s.action for s in agent.last_trace if s.action]
+                _append_question_record(
+                    question_record(
+                        index, judge(question, "", tools_called),
+                        len(agent.last_trace), tools_called,
+                    ),
+                    model, version, clean, runs_path,
+                )
                 score.errors.append(f"{question.text}: {exc}")
                 print(f"  !! {question.text}\n     {exc}", flush=True)
                 continue
@@ -170,6 +255,10 @@ def evaluate(model: str) -> Score:
             score.follow_ok += follow_up and used_any
 
             verdict = judge(question, answer, tools_called)
+            _append_question_record(
+                question_record(index, verdict, len(agent.last_trace), tools_called),
+                model, version, clean, runs_path,
+            )
             score.apply(verdict)
             marks = list(verdict.marks)
 
@@ -238,6 +327,143 @@ def evaluate_promotion_run(run: Path, report_path: Path | None = None) -> Score:
     return score
 
 
+def _read_run_records(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    with path.open(encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
+
+
+def _clean_state(record: dict[str, Any]) -> str:
+    value = record.get("clean")
+    if value is True:
+        return "clean"
+    if value is False:
+        return "dirty"
+    return "unknown"
+
+
+def _question_index(record: dict[str, Any]) -> int | str:
+    try:
+        return int(record["index"])
+    except (KeyError, TypeError, ValueError):
+        return "unknown"
+
+
+def _question_sort_key(index: int | str) -> tuple[int, int, str]:
+    if isinstance(index, int):
+        return (0, index, "")
+    return (1, 0, index)
+
+
+def _bank_summary() -> list[str]:
+    """The bank's denominators, derived from it now rather than written down."""
+    verdicts = [judge(q, "", []) for s in SESSIONS_UNDER_TEST for q in s]
+    nothing = sum(not (v.checkable or v.tool_expected or v.honest_expected) for v in verdicts)
+    summary = (
+        f"bank: {len(verdicts)} questions in {len(SESSIONS_UNDER_TEST)} sessions; "
+        f"{sum(v.checkable for v in verdicts)} answer-checked, "
+        f"{sum(v.tool_expected for v in verdicts)} tool-checked, "
+        f"{sum(v.honest_expected for v in verdicts)} honesty-checked, "
+        f"{nothing} scored on nothing."
+    )
+    baseline = (
+        "This is the canonical bank, a new baseline: not comparable with any figure "
+        "recorded before 2026-11-22."
+    )
+    return [summary, baseline]
+
+
+def report(path: Path | None = None) -> None:
+    """Print only clean records, keeping each code version in its own group."""
+    run_path = RUNS_PATH if path is None else path
+    print(chr(10).join(_bank_summary()))
+    records = _read_run_records(run_path)
+    if not records:
+        print(f"no runs recorded in {run_path}")
+        return
+
+    clean_count = sum(_clean_state(record) == "clean" for record in records)
+    dirty_count = sum(_clean_state(record) == "dirty" for record in records)
+    unknown_count = len(records) - clean_count - dirty_count
+    missing_count = sum("clean" not in record for record in records)
+    dropped = len(records) - clean_count
+    record_word = "record" if len(records) == 1 else "records"
+    if missing_count == len(records) and clean_count == dirty_count == 0:
+        summary = f"{len(records)} {record_word}, {dropped} dropped, no cleanliness recorded"
+    else:
+        summary = (
+            f"{len(records)} {record_word}, {dropped} dropped "
+            f"({dirty_count} dirty, {unknown_count} unknown)"
+        )
+    print(summary)
+    print(
+        f"Cleanliness: {clean_count} clean, {dirty_count} dirty, "
+        f"{unknown_count} unknown ({missing_count} missing field)."
+    )
+
+    by_commit: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        by_commit[str(record.get("commit", "unknown"))].append(record)
+    group_word = "commit group" if len(by_commit) == 1 else "commit groups"
+    print(f"{len(by_commit)} {group_word}; each is reported separately.")
+
+    for version, group in sorted(by_commit.items()):
+        retained = [record for record in group if _clean_state(record) == "clean"]
+        group_record_word = "record" if len(group) == 1 else "records"
+        print(
+            f"\ncommit {version}: {len(group)} {group_record_word}, "
+            f"{len(retained)} clean, "
+            f"{len(group) - len(retained)} dropped"
+        )
+        grouped: defaultdict[int | str, list[dict[str, Any]]] = defaultdict(list)
+        for record in group:
+            grouped[_question_index(record)].append(record)
+        for index, question_records in sorted(
+            grouped.items(), key=lambda item: _question_sort_key(item[0])
+        ):
+            question_runs = [
+                record for record in question_records if _clean_state(record) == "clean"
+            ]
+            if not question_runs:
+                print(f"  question {index}: no surviving runs")
+                continue
+            _report_question(index, question_runs)
+
+    print("Settled means every applicable verdict axis agrees across retained runs.")
+
+
+def _report_question(index: int | str, records: list[dict[str, Any]]) -> None:
+    axes = (
+        ("answer", "correct", "checkable"),
+        ("tool", "right_tool", "tool_expected"),
+        ("honesty", "admitted", "honest_expected"),
+    )
+    cells: list[str] = []
+    outcomes: list[list[bool]] = []
+    for label, passed_key, expected_key in axes:
+        applicable = [record for record in records if record.get(expected_key) is True]
+        if not applicable:
+            cells.append(f"{label}=n/a")
+            continue
+        values = [record.get(passed_key) is True for record in applicable]
+        outcomes.append(values)
+        cells.append(f"{label}={sum(values)}/{len(values)}")
+
+    steps = [
+        record["steps"]
+        for record in records
+        if isinstance(record.get("steps"), int) and not isinstance(record.get("steps"), bool)
+    ]
+    step_range = f"{min(steps)}-{max(steps)}" if steps else "n/a"
+    settled = bool(outcomes) and all(len(set(values)) == 1 for values in outcomes)
+    settlement = "yes" if settled else "no" if outcomes else "n/a"
+    print(
+        f"  question {index}: {len(records)} run(s); {'; '.join(cells)}; "
+        f"steps={step_range}; settled={settlement}"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Evaluate holdout questions or write a sanitized evaluation report."
@@ -249,7 +475,20 @@ def main(argv: list[str] | None = None) -> int:
         help="Evaluate this run's GGUF under a temporary tag for a sanitized report.",
     )
     parser.add_argument("--report", type=Path, help="Destination for sanitized report JSON.")
+    parser.add_argument(
+        "--runs-report",
+        action="store_true",
+        help="Print the recorded runs, dropping any whose tree was not clean.",
+    )
     args = parser.parse_args(argv)
+
+    if args.runs_report:
+        if args.models or args.promotion_run is not None or args.report is not None:
+            parser.error(
+                "--runs-report cannot be combined with models, --promotion-run or --report"
+            )
+        report()
+        return 0
 
     if args.promotion_run is not None:
         if args.models:
