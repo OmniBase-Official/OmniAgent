@@ -14,7 +14,7 @@ import pytest
 import main as cli
 import tools
 from agent import AgentConfig, cap_observation
-from sandbox import Workspace, get_workspace, set_workspace
+from sandbox import SandboxError, Workspace, get_workspace, set_workspace
 from tools import list_directory, read_file, run_tool, search_text
 
 
@@ -82,6 +82,53 @@ def test_read_file_refuses_rather_than_truncating(workspace: Workspace) -> None:
 
     assert observation.startswith("Error:")
     assert "too long to return in full" in observation
+
+
+def test_the_too_long_error_states_the_exact_line_count(workspace: Workspace) -> None:
+    """The facts a model needs are in the refusal, not only a pointer to file_info.
+
+    300 lines of ``"x = 1"`` is 1,800 characters, under the 16,000-character cut,
+    so this file's character count is also exact. The phrase must sit before the
+    comma so ``"too long to return in full"`` stays one contiguous string.
+    """
+    (workspace.root / "mid.txt").write_text("x = 1\n" * 300, encoding="utf-8")
+
+    observation = read_file("mid.txt")
+
+    assert "is 1,800 characters (300 lines), too long to return in full" in observation
+    assert "file_info" in observation
+
+
+def test_the_too_long_error_counts_the_whole_file_not_the_part_that_was_shown(
+    workspace: Workspace,
+) -> None:
+    """The trap: past 16,000 characters ``read_text`` cuts the text, and
+    ``len(lines)`` of what is left is only the visible part (about 3,200 here).
+    The exact count is 5,000, and a naive fix would print the wrong one."""
+    (workspace.root / "long.txt").write_text("line\n" * 5_000, encoding="utf-8")
+
+    observation = read_file("long.txt")
+
+    assert "over 16,000 characters (5,000 lines), too long to return in full" in observation
+
+
+def test_the_too_long_error_prints_no_count_when_the_exact_one_is_unavailable(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never a guess. If the bounded counter refuses, the error says nothing about
+    lines at all, and still carries the recommendation."""
+
+    def refuse(self: Workspace, candidate: str) -> object:
+        raise SandboxError("describe refused")
+
+    monkeypatch.setattr(Workspace, "describe", refuse)
+    (workspace.root / "long.txt").write_text("line\n" * 5_000, encoding="utf-8")
+
+    observation = read_file("long.txt")
+
+    assert "lines)" not in observation
+    assert "over 16,000 characters, too long to return in full" in observation
+    assert "file_info" in observation
 
 
 def test_read_file_reaches_a_nested_path(workspace: Workspace) -> None:

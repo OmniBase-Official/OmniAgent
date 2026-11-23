@@ -636,12 +636,34 @@ def read_file(
         else f"{len(text):,} characters"
     )
     return (
-        f"Error: {shown} is {size_phrase}, too long to return in full. Reading the "
+        f"Error: {shown} is {size_phrase}{_exact_line_phrase(workspace, path)}, "
+        f"too long to return in full. Reading the "
         f"start of it would not tell you what the rest contains. For a relevant section, "
         f"use read_file with JSON like {{\"path\":\"file.py\",\"start_line\":1,"
         f"\"end_line\":20}}. Use file_info for size or line facts and search_text "
         f"to locate relevant text."
     )
+
+
+def _exact_line_phrase(workspace: Workspace, path: str) -> str:
+    """`` (N lines)`` when the exact count is available, otherwise nothing.
+
+    The count comes from ``Workspace.describe``, which streams the file under a
+    byte ceiling and a per-line ceiling and refuses past either, so this never
+    reads an unbounded file. It is *not* ``len(text.splitlines())``: by the time
+    ``read_file`` knows a file is too long, ``text`` has been cut at
+    ``MAX_READ_CHARS`` and its line count is the count of the part the model can
+    see, which is the wrong number to hand a model asked how long a file is.
+
+    When the exact count cannot be had -- ``describe`` refused, or the file looks
+    binary -- the answer is no count at all. A guess would put a plausible wrong
+    number in front of a model that copies what it is shown.
+    """
+    try:
+        lines = workspace.describe(path).lines
+    except (SandboxError, OSError):
+        return ""
+    return f" ({lines:,} lines)" if lines is not None else ""
 
 
 def list_directory(path: str = ".") -> str:
