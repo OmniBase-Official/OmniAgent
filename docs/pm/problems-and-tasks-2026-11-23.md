@@ -106,3 +106,42 @@ Branch `aiml/first-measurement-20261123` @ `c9a00ea`: `docs/pm/measurement-2026-
 
 Not re-run by the PM: the per-question correct counts (q2 1 of 10, q3 and q1 10 of 10), the abstention classification (a reading, not an oracle), the GPU watcher log, the tool-error counts.
 The AIE's findings stand as reported, evidence MEASURED by the AIE and partly re-measured by the PM: the model invents tool names (15 of 60), counts files wrongly (0 of 20), counts lines wrongly (9 of 10), and does not reliably abstain (4 of 10).
+
+## Definition-of-done check and problem register, 2026-11-23 evening (PM; every row re-run by the PM unless marked REPORTED)
+
+**DoD used for every task:** branch pushed to `origin`; three gates green with full paths; each new test shown red under a mutation with file hashes
+equal before and after; PM re-ran it in a throwaway tree with the module path inside that tree; the final report sent to the PM chat; **nothing merged
+until the owner says so.** No chair pushed anything after 07:22 Thai; all chairs are idle.
+
+| Task | Branch @ SHA | DoD |
+| --- | --- | --- |
+| SE 01 S1 empty answer | `se/brief-30a-empty-answer` @ `682caba` | **Met** (1,072 passed; 6 red under mutation, G2e 14 green; 3 of 6 real-model runs exit 1 with the fixed line). Report reached the PM only through the branch, not a message |
+| SE 01 S2 (29a) | none | **Not met.** No commit; tree clean at `e7eed11`; no report |
+| SE 01 S3 (`judge()` review) | none | **Not started** (queued by design) |
+| SE (earlier chat) 29b `.gitignore` | `se/brief-29b-gitignore` @ `8071f93` | **Met** (diff verified by the PM; full gates not re-run by the PM) |
+| SAE A1 gate note, A2 drafts | `sae/snapshot-classification-20261122` @ `1861191` | **Met.** Claims verified by the PM (seven registry entries, allowlist, contract paragraph, 4,107 lines) |
+| AIE I1 runner and grader | `aiml/first-measurement-20261123` @ `c9a00ea` | **Met.** 1,079 passed; `main()` grading pinned (2 red); separator defect pinned (3 red) |
+| AIE I2 pass 1-2 | same branch | **Met.** Independent recount of 60 raw files: 15 blank = 15 unregistered-tool runs, 60 of 60. Not at temperature 0 |
+| AIE I3 record layer | `aiml/record-layer-20261123` @ `5aba0c2` | **Met.** 1,078 passed; 3 mutations red (1, 1, 3). `_tree_clean()` has one call site (read once per `evaluate()`): the AIE's Medium finding **confirmed** |
+| PM: dirty worktrees (ruling 3A) | n/a | **Met** (14 removed after a byte-for-byte snapshot match; 3 empty leftover directories the safety check will not let the PM delete) |
+| PM: merges | n/a | **Waiting** on the owner: S1, record layer, 29b, AIE measurement branch |
+
+### Problems, high to low, by kind
+
+| # | Kind | Sev | Problem | State |
+| --- | --- | --- | --- | --- |
+| 1 | **Quality (model)** | High | Confident wrong answers: file count 0 of 20, line count 1 of 10, a made-up share price in 4 of 10 | open; needs the owner's ruling (tool text, training data, or accept) |
+| 2 | **Product** | High | The model invents tool names; the turn then ended with an empty answer and exit 0 (15 of 60 runs) | fix exists on `se/brief-30a-empty-answer`, **not merged** |
+| 3 | **Product / Quality** | Medium | After a refused tool the model is not told what it may call; `read_file`'s "too long" error sends it to the wrong tool (9 of 10 miscounts, 3 report characters as lines) | open (AIE option B; changes tool text and prompt) |
+| 4 | **Security / Contract** | Medium | `inspect_config_precedence` is a seventh tool in the model-callable allowlist; the contract names six; no security review; the measured runs show the model calling it | open (SE proves metadata-only, or remove) |
+| 5 | **Instrument** | Medium | No measurement exists at temperature 0 (the contract baseline); both passes ran at 0.1 | open (AIE option A, about 15 minutes of model time) |
+| 6 | **Instrument** | Medium | The record layer reads tree state once per run, not per question; it has never recorded a real model run; bank question index 18 scored on nothing (AIE reading, not re-verified by the PM) | open (AIE R1, R2) |
+| 7 | **Security / CI** | Medium | `scan_report_copy` defect (29a) unfixed; the helper is not on canonical; the Security gates job has never run green on a runner | open (SE 01, no result) |
+| 8 | **Docs / Contract** | Medium | Contract section 2 still says the default is `localhost` and that loopback is not enforced; README says "~600 lines" against 4,107; README names a model a reader cannot pull | open (drafts exist, awaiting the owner) |
+| 9 | **Process** | Medium | Nothing is merged: S1, the record layer, 29b and the AIE branch sit beside the integration line `b164aaa` and will drift | waiting on the owner |
+| 10 | **Quality (model)** | Medium | Abstention: 4 of 10 valid | open (with problem 1) |
+| 11 | **Product** | Low | The endpoint prints on a healthy preflight (`main.py:200`): the owner's reading of the contract | owner |
+| 12 | **Security / Process** | Low | The owner's pre-push hook loads `qwen2.5-coder:7b` on the shared GPU on every chair's push, colliding with a measurement unless `.git/omniagent-eval.lock` exists | documented; chairs told |
+| 13 | **Security** | Low | A built wheel is UNVERIFIED (no `setuptools`/`wheel` here; the wheel test skips) | one CI run with `-rs` |
+| 14 | **Docs** | Low | ADR-0003 on the carry-over branch still carries the SAE's wrong "both READMEs document localhost" sentence | do not quote it |
+| 15 | **Process** | Low | Worktree hygiene: 3 empty leftover directories; the clean Codex trees; seven nested trees found already gone before the PM started (unknown cause) | owner word needed |
