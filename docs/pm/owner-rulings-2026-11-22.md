@@ -225,3 +225,9 @@ The message `docs/pm/codex-stop-and-snapshot-prompt.md` has still not been paste
     restored (`69007bd3d19e`; merged `486daf4c0ff2` before and after): S1 tests **6 red, 1 passed**, G2 guards **14 passed**; `_tree_clean` always true: **1 red**, restored hash `1a843b4196ff`.
     SE 01 wrote S1 and merged it; this re-run is the independent check. Not verified: GitHub Actions behaviour (no `.github/` on this line); the main checkout's local
     `integration/canonical-20261122` is still behind origin and was not touched.
+
+25. **Fix tool text** (owner, 2026-11-23, answering the AIE's option A after the temperature-0 run): change the **output and error text** of `read_file` (the "too long to return in full" error)
+    and `list_directory` (an additive footer) so the facts a counting question needs are in front of the model. **Scope limits set by the PM, not yet ruled by the owner:** the system prompt
+    is untouched; guard G2e and the contract §2 rule that a disallowed tool ends the turn are untouched (so "tell the model what it may call after a refusal" is **not** part of this ruling:
+    it would need a contract change). Carried by SE 01 on `se/brief-31-tool-text` from `1384d63`; the AIE re-measures at temperature 0 on that tip against a prediction written first; the SAE
+    writes a gate note on whether the contract bounds tool text. Nothing merges until the owner says so.
