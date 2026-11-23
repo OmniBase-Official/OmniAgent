@@ -88,3 +88,21 @@ Weekly meter was reset by the owner: today's allowance is 0% to 14% (day-1 rule)
 **Product finding from the PM's six real-model runs on the SE's branch (same counting question, tree truth 12):** answers 10, 10, 9, 10 (wrong, exit 0) and three refusals. **No run gave 12.**
 With the AIE's earlier 50, the agent has not yet counted the files correctly in any measured run (PM 11 runs: 0 correct). The silent-blank defect is fixed; the confident wrong number is not.
 Not merged anywhere; nothing deleted. Leftover empty directories `pm-verify-fm`, `pm-verify-rl`, `pm-verify-s1` under `.scratch/` (their worktrees are unregistered; the automatic safety check blocked the PM's `rmdir`).
+
+## PM verification of the AIE's second pass, 2026-11-23 (MEASURED, throwaway tree at `c9a00ea`, `__file__` inside it)
+
+Branch `aiml/first-measurement-20261123` @ `c9a00ea`: `docs/pm/measurement-2026-11-23-second-pass.md`, 60 recorded runs (6 questions x 10 passes) at `b164aaa`,
+`omniagent-v2:latest`, temperature 0.1 (the AIE states this is **not** the contract's temperature-0 baseline).
+
+| Claim | PM result |
+| --- | --- |
+| Three gates | **Confirmed.** ruff clean, mypy 56 files, **1,079 passed, 2 skipped** (1,065 + 14) |
+| Mutation, hashes (pristine runner `81f0213b7519`, equal before and after) | **Confirmed.** `main()` grades the whole output: **2 red** (the PM's own mutation, the gap I reported earlier, is now pinned). Answer region ignores the stderr marker (the defect found in this pass): **3 red** |
+| 15 of 60 runs blank, and exactly the 15 that called an unregistered tool | **Confirmed by an independent recount** of the 60 raw output files with the fixed function: blank q4 7, q5 1, q6 7 (15); unregistered tool q4 7, q5 1, q6 7 (15); blank if and only if unregistered tool in **60 of 60** |
+| Default temperature is 0.1; 0.0 sits only under a profile | **Confirmed.** `config.py:65` `default=0.1`; `omniagent.toml` has `temperature = 0.0` under the profile |
+| "10,748 lines" is a character count | **Confirmed.** `config.py` is **10,748 bytes** and **302 lines** at `b164aaa`. The origin of "10,306" is unexplained (the AIE says so too) |
+| The pass ran on `dd13605`, before the separator fix; `blank` in `runs.jsonl` is wrong for the 15 blank rows | Accepted as reported; the AIE recomputed the counts from the raw files and the PM's recount agrees. The rows themselves were not rewritten |
+| Lock file created and removed | **Confirmed absent** after the run (`.git/omniagent-eval.lock`). The first five minutes of the run were not covered (AIE says so) |
+
+Not re-run by the PM: the per-question correct counts (q2 1 of 10, q3 and q1 10 of 10), the abstention classification (a reading, not an oracle), the GPU watcher log, the tool-error counts.
+The AIE's findings stand as reported, evidence MEASURED by the AIE and partly re-measured by the PM: the model invents tool names (15 of 60), counts files wrongly (0 of 20), counts lines wrongly (9 of 10), and does not reliably abstain (4 of 10).
