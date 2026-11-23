@@ -28,9 +28,11 @@ Last updated: **2026-11-23** by the Claude PM. Update the status of your own tas
 - C-PM-D1 Snapshotted and salvaged all uncommitted Codex work out of band; 14 dirty worktrees removed after each matched a snapshot byte for byte; 12 snapshot refs remain (ruling 3A, manifest `.scratch/snapshots-manifest-2026-11-22.md`).
 - C-PM-D2 Switched the main checkout to the canonical line (ruling 11) and verified briefs 24 to 28, 30a, the record layer, the AIE passes and the SE merges (`b164aaa`, `1384d63`).
 - C-PM-D3 Recorded owner rulings 1 to 25; ran the weekly pacing; found that the owner's pre-push hook loads `qwen2.5-coder:7b` on the shared GPU (lock file `.git/omniagent-eval.lock` stops it).
+- C-PM-D4 (2026-11-23) Verified and recorded: S1 and the record layer merge (`1384d63`), the AIE temperature-0 run (`dc0c78d`), SE 01's brief 31 part 1 (`1ce7c81`, gates 1,088 passed, mutations red, real `read_file` output shows the exact count); wrote this register; copied the Codex `AGENTS.md` into `docs/AGENTS.md` (local copy, original kept).
+- C-PM-D5 (2026-11-23) Own mistakes, recorded: twice reported a chair as "started" when it was only waiting for the owner; wrote `C-SE-01` "in progress" wrongly (fixed).
 
 ## To do
-- C-PM-01 Re-verify SE 01's `se/brief-31-tool-text` and the AIE's tool-text measurement when they report; merge nothing without the owner.
+- C-PM-01 Tomorrow: verify the AIE's q7 baseline and its runner flag (`aiml/tool-text-measure-20261123` @ `4b99b0c`, not verified today), then the full tool-text measurement at `1ce7c81`; merge nothing without the owner.
 - C-PM-02 Fast-forward the main checkout's local `integration/canonical-20261122` to `1384d63` (**owner's word needed**; it is still at `388fa53`).
 - C-PM-03 Apply the SAE's replacement for the stale contract §2 paragraph (draft in `docs/architecture/contract-gaps-draft-amendments-2026-11-23.md`) after the owner approves.
 - C-PM-04 Remove the clean Codex worktrees (**owner's word needed**); the empty leftover folders `.scratch/pm-verify-*` need the owner to delete them (the safety check blocks the PM).
@@ -65,8 +67,10 @@ Last updated: **2026-11-23** by the Claude PM. Update the status of your own tas
 - C-SE-D2 Brief 25 (GitHub Actions security gates, on the Codex PR #10 branch); brief 27 (variant picks); brief 28 (preflight prints status only, bounded provenance readers, bounded export reader), merged at `b164aaa`.
 - C-SE-D3 S1 (an empty answer exits non-zero with a fixed `[!] No answer:` line) and the run-record layer, merged at `1384d63`. `se/brief-29b-gitignore` @ `8071f93` (adds `.ai/`, `.scratch/`, `omniagent-core/` to `.gitignore`) is verified and **not merged**.
 
+- C-SE-D4 (2026-11-23) **Brief 31 part 1** pushed: `se/brief-31-tool-text` @ `1ce7c81` (on `1384d63`): the `read_file` "too long" error carries the exact line count from the bounded `Workspace.describe` helper, and no count when it cannot be exact. PM-verified: gates 1,088 passed, mutations red (drop phrase 2 red, wrong count 2 red), hash `296506dc5cf6` restored. **Not merged.** Consumer list done: nothing parses the old shape; header-format constraint for part 2: `tests/test_file_tools.py:179,309` need `result.startswith(".:")`.
+
 ## To do (in order)
-- C-SE-01 **Brief 31, tool text** (**waiting for the owner**: SE 01 has not started and needs the owner to confirm in its own chat; the PM first wrote "in progress" by mistake; `se/brief-31-tool-text` from `1384d63`): `read_file` "too long" error carries the line count; `list_directory` carries a count **in the header line** (not a tail footer), counting only entries actually shown; bound the extension summary; keep the empty-directory string; do not touch the system prompt or guard G2e; grep every consumer of these outputs first. Tests and mutation per change.
+- C-SE-01 **Brief 31 part 2, `list_directory`: ON HOLD** (the PM wants part 1 measured alone first). When released: count **in the header line** `{shown}: N entries (...)` (colon directly after the name), counting only entries actually shown (a denied entry must not change the count), bound the extension summary, keep the empty-directory string, test the count survives the cap on a ~150-entry directory, mutation per change. Do not touch the system prompt or guard G2e. Known edge accepted for now: `describe` and `read_file`'s success path may count lone-CR files differently.
 - C-SE-02 Brief 29a, `scan_report_copy` (`docker cp` after the container exits cannot read a `--tmpfs` mount): cut from `e7eed11` (`organization/codex/security-ci-release-hardening-20261121`); choose a volume with an explicit size check over stdout (stdout would cut the 8 MiB cap to 256 KiB); needs Docker Desktop running; the GitHub-runner behaviour stays UNVERIFIED unless shown.
 - C-SE-03 Prove by test that `inspect_config_precedence` returns configuration metadata only, or remove it from the registry, the allowlist and the agent route (the measured runs show the model calling it).
 - C-SE-04 S3: review `scripts/eval_scoring.py` `judge()` for whole-output matching; counts only, quote no sealed expectation.
@@ -84,8 +88,12 @@ Last updated: **2026-11-23** by the Claude PM. Update the status of your own tas
 - C-AIE-D2 Findings, MEASURED and recounted by the PM: blank answer if and only if an unregistered tool was called (120 of 120); the model invents `count_lines`, `count_matches`; at temperature 0 the wrong answers are deterministic ("50" for 12, "278" for 302); file count never correct in 40 runs.
 - C-AIE-D3 Ported brief 12's run-record layer onto the canonical line (merged at `1384d63`); holdout memo (`dc7967f`); tool-text prediction (`63fc1ae`) and `exit_code` per row (`6730573`).
 
+- C-AIE-D4 (2026-11-23) Lead on the model's wrong numbers: "10,306" is in 76 of 7,551 on-disk training/run examples, "278 line(s)" in 20, both in 11 (PM recounted); it is in the `tools.py:626-627` comment (commit `94dd12c`, 2026-10-01), absent from the model template, the runtime prompt and every observation of the AIE's runs. Plausible memorisation, **UNVERIFIED** (the weights' real corpus is not known).
+- C-AIE-D5 (2026-11-23) Prepared the control question q7 ("How many lines does observability.py have?", 353 lines) on `aiml/tool-text-measure-20261123`: prediction `97faf15` (before any request), runner flag `--control-file` `4b99b0c`, tests; gates reported 1,096 passed. **Not verified by the PM.** The q7 baseline run at `b164aaa` was **in progress at 17:46** (lock file present).
+
 ## To do
-- C-AIE-01 **Step 2 of tool text:** when the PM sends SE 01's SHA, run one temperature-0 pass (6 questions x 10) on that tip and compare per question with the `dc0c78d` result; q1 and q3 must stay 10/10. Control run at `1384d63` only if q1 or q3 moves (q5 reads the real clock; judge it apart).
+- C-AIE-01 **Step 2 of tool text (slipped to tomorrow):** run the temperature-0 pass at `1ce7c81` (`read_file` change only): the six questions plus q7, 10 passes each, plus q7 at `b164aaa` if today's run did not finish; compare per question with `dc0c78d`. q1 and q3 must stay 10/10. q4 and q6 should NOT move (they depend on part 2). Control run at `1384d63` only if q1 or q3 moves (q5 reads the real clock). Read q2 against q7: if q7 is right and q2 still says "278", it is file-specific memorisation.
+- C-AIE-00 **First thing tomorrow:** confirm `.git/omniagent-eval.lock` is gone and no model run is in flight (the lock was present at 17:46).
 - C-AIE-02 R1: read tree state per question, not once per `evaluate()`; R2: rule on bank question index 18 (scored on nothing).
 - C-AIE-03 After the owner rules: whether the q2/q5 failures are a training-data gap, a tool-text gap or accepted (synthetic examples only, nothing automatic); a grounding and an abstention question in the contract task inventory with an oracle that does not read the real clock; the six questions as a standing check.
 - C-AIE-04 `aiml/first-measurement-20261123` is **not merged** (owner decides).
@@ -173,3 +181,44 @@ Last updated: **2026-11-23** by the Claude PM. Update the status of your own tas
 - **Lead (MEASURED, cause UNVERIFIED):** the numbers the model answers for the line-count question (278 at temperature 0, 10,306 at 0.1) are in the comment at `tools.py:626-627` ("a 278-line file ... answered 10,306"). Possible source: the model learned them from that comment. **C-AIE-05** (new): count, without quoting anything sealed, whether `278` and `10,306` appear in the on-disk training and run data and in the model template.
 - **C-PM-06** (new, low): `docs/demo-script.md` and `docs/video-script.md` quote the old `read_file` "too long" text; update them after brief 31 merges. Briefs under `docs/pm/` are history: accept the drift.
 - **X-SWE-01** (addition): also update README line 13, which quotes the old `read_file` text, after brief 31 merges.
+
+---
+
+# Day close, 2026-11-23 (PM)
+
+Weekly meter at close: **13%** against the owner's range of 0% to 14% for the day (reset by the owner; the weekly reset time is 2026-11-28 03:00 UTC). Tomorrow is day 4 (about 10:00 Thai); the general cumulative ceiling is then 56%.
+
+## What was done today, and how far it is checked
+
+| Item | Branch @ SHA | Status | Checked by |
+| --- | --- | --- | --- |
+| S1: an empty answer exits non-zero with a fixed `[!] No answer:` line | `se/brief-30a-empty-answer` @ `682caba` | **merged** into integration | PM re-ran (1,072 passed; mutation 6 red; 3 of 6 real-model runs exit 1) |
+| Run-record layer ported to the canonical line | `aiml/record-layer-20261123` @ `5aba0c2` | **merged** into integration | PM re-ran (1,078; mutations red) |
+| **Integration line** | `integration/canonical-20261122` @ **`1384d63`** | 1,085 passed, 2 skipped; fast-forward from `b164aaa`; `origin/main` `3c76fd2`, `organization/main` `5005039` untouched | PM re-ran in a throwaway tree |
+| AIE first measurement, pass 2 (T=0.1) and the temperature-0 run (60 runs each) | `aiml/first-measurement-20261123` @ `dc0c78d` | pushed, **not merged** | PM re-ran gates and mutations, recounted the 60 raw files twice |
+| SAE gate notes, securefs memo, contract/README drafts | `sae/snapshot-classification-20261122` @ `3dbf784` | pushed, docs only | PM verified the main claims in code |
+| Brief 31 part 1: `read_file` error carries the exact line count | `se/brief-31-tool-text` @ `1ce7c81` | pushed, **not merged** | PM re-ran (1,088; mutations red; real output "(302 lines)") |
+| AIE tool-text prediction, `exit_code` per row, q7 control question and runner flag | `aiml/tool-text-measure-20261123` @ `4b99b0c` | pushed, **not merged** | **NOT verified by the PM** (AIE-reported: 1,096 passed, 5 mutations red) |
+| `.gitignore` entries | `se/brief-29b-gitignore` @ `8071f93` | pushed, **not merged** | PM verified the diff and the effect; gates not re-run |
+| Ruling 3A: 14 dirty worktrees removed after a byte-for-byte snapshot match; 12 snapshot refs remain | n/a | done | PM |
+| Securefs parked (ruling 22); owner rulings 1 to 25 recorded | `docs/pm/owner-rulings-2026-11-22.md` | done | PM |
+| This register; `docs/AGENTS.md` copy (original in `~/.codex` kept) | `docs/task.md` | done | PM |
+
+## What we learned today (MEASURED, with the evidence in `docs/pm/problems-and-tasks-2026-11-23.md`)
+- The model answers confidently wrong on counting: file count never correct in 40 runs ("50" for 12), line count "278" for 302 at temperature 0, and it invents tool names (`count_lines`) in 15 of 60 runs; every run that called an unregistered tool ended with a blank answer (120 of 120), which S1 now reports and exits non-zero.
+- At temperature 0 the failures are the same ten times in ten: they are not noise.
+- The two wrong line-count figures are in a comment in `tools.py` and in 76 of 7,551 training examples: a likely source, not proven.
+- Abstention: 4 of 10 valid at temperature 0.1, 2 of 10 at temperature 0.
+
+## Left open at close
+- **q7 baseline run at `b164aaa` was in flight** (lock file present, `omniagent-v2` loaded, 17:46): first thing tomorrow, confirm the lock is gone and read the result (`C-AIE-00`).
+- Unmerged branches waiting for the owner: `se/brief-31-tool-text`, `aiml/first-measurement-20261123`, `aiml/tool-text-measure-20261123`, `se/brief-29b-gitignore`.
+- The main checkout's local `integration` branch is still at `388fa53` (`C-PM-02`, owner's word).
+- Three empty directories `.scratch/pm-verify-*` and four more created today (the safety check blocks the PM from deleting them): the owner can delete any empty `.scratch/pm-verify-*` folder.
+- Codex has not been consulted: every Codex task here is a proposal.
+
+## Plan for day 4 (PM proposal, not a ruling)
+1. AIE: confirm no run in flight; run the tool-text pass at `1ce7c81` with q7; report; PM verifies.
+2. Owner: decide on `inspect_config_precedence`, the §2 paragraph, the README, the four unmerged branches, the main checkout fast-forward.
+3. SE: brief 31 part 2 (`list_directory`) only after the part 1 numbers are read; then 29a (Docker Desktop must be running) and `inspect_config_precedence`.
+4. SAE: refresh brief 24 phase 3 after the PM's worktree work; MVP checklist with the owner.
