@@ -211,3 +211,9 @@ The message `docs/pm/codex-stop-and-snapshot-prompt.md` has still not been paste
     `_append_question_record`, `RUNS_PATH` and `report()` plus `tests/test_holdout_record.py`, onto the canonical line; the clean-tree test
     mutation-checked; the canonical bank declared a **new baseline with its own stated denominator**. No fixture, no new public data files, the
     old bank is not restored, no figure from before 2026-11-22 is called comparable. Carried by the AI/ML chair; the PM verifies before anything merges.
+
+24. **Merge brief 30a (S1) and the run-record layer into `integration/canonical-20261122`** (owner, 2026-11-23: "Merge S1 + records"). Branches:
+    `se/brief-30a-empty-answer` `682caba` and `aiml/record-layer-20261123` `5aba0c2`, both cut from `b164aaa`, disjoint files, `merge-tree` clean.
+    Carried by SE 01; the PM re-verifies the merged tip. **Not in this ruling:** `se/brief-29b-gitignore` (`8071f93`) and the AIE measurement branch
+    `aiml/first-measurement-20261123` (`c9a00ea`): they stay unmerged until the owner says so.
+    Standing rule (owner, same day): every chair sends its final report to the PM chat, not only its own.
