@@ -104,10 +104,29 @@ def _lines(project: Path, relative: str) -> str:
     return str(len((project / relative).read_text(encoding="utf-8").splitlines()))
 
 
-def _questions(project: Path) -> list[tuple[str, str, str | None, str | None]]:
-    """(id, text, expectation derived from the tree, tool it calls for)."""
+def _questions(
+    project: Path, control_file: str | None = None
+) -> list[tuple[str, str, str | None, str | None]]:
+    """(id, text, expectation derived from the tree, tool it calls for).
+
+    ``control_file`` adds one line-count question about a different file, worded like
+    q2, to tell a memorised answer for ``config.py`` from the effect of new tool text.
+    It adds a question and replaces none; the expectation is derived like the others.
+    """
     first = (project / "requirements.txt").read_text(encoding="utf-8").splitlines()[0].strip()
     scripts = len([p for p in (project / "scripts").iterdir() if p.suffix == ".py"])
+    control = (
+        []
+        if control_file is None
+        else [
+            (
+                "q7-control-lines",
+                f"How many lines does {control_file} have?",
+                _lines(project, control_file),
+                "file_info",
+            )
+        ]
+    )
     return [
         ("q1-arith", "What is 23 multiplied by 17, plus 44?", str(23 * 17 + 44), "calculate"),
         (
@@ -130,7 +149,14 @@ def _questions(project: Path) -> list[tuple[str, str, str | None, str | None]]:
             str(scripts),
             "list_directory",
         ),
+        *control,
     ]
+
+
+def _inside(project: Path, relative: str) -> bool:
+    """True for an existing regular file that really is inside ``project`` (no ``..``)."""
+    target = (project / relative).resolve()
+    return target.is_file() and project in target.parents
 
 
 def _git(project: Path, *arguments: str) -> str:
@@ -181,6 +207,11 @@ def main(argv: list[str] | None = None) -> int:
         help="passed to main.py as --temperature and recorded in every row; "
         "omit it and the program's own default applies, which the row records as null",
     )
+    parser.add_argument(
+        "--control-file",
+        default=None,
+        help="a file inside --project: adds one question, 'How many lines does <file> have?'",
+    )
     args = parser.parse_args(argv)
     temperature_args = (
         [] if args.temperature is None else ["--temperature", f"{args.temperature:g}"]
@@ -188,7 +219,9 @@ def main(argv: list[str] | None = None) -> int:
     project, out = args.project.resolve(), args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
 
-    questions = _questions(project)
+    if args.control_file is not None and not _inside(project, args.control_file):
+        parser.error(f"--control-file must be an existing file inside {project}")
+    questions = _questions(project, args.control_file)
     overlap = _banks_overlap(project, [q[1] for q in questions])
     print("bank overlap:", overlap or "none")
     if overlap:

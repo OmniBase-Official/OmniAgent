@@ -105,10 +105,12 @@ def test_the_trace_yields_tool_names_steps_and_tool_errors() -> None:
 _BANNER_TOKENS = "435 3 # dep 12"
 
 
-def _tree(tmp_path: Path) -> Path:
+def _tree(tmp_path: Path, control_lines: int = 7) -> Path:
     project = tmp_path / "tree"
     (project / "scripts").mkdir(parents=True)
     (project / "config.py").write_text("a\nb\nc\n", encoding="utf-8")  # 3 lines
+    # the control file: a different file with a known line count, derived by the runner
+    (project / "control.py").write_text("x\n" * control_lines, encoding="utf-8")
     (project / "requirements.txt").write_text("# dep\nmore\n", encoding="utf-8")
     for number in range(12):  # 12 python files
         (project / "scripts" / f"s{number}.py").write_text("x\n", encoding="utf-8")
@@ -126,6 +128,7 @@ def _run_main(  # noqa: PLR0913 - a test helper whose knobs are all keyword-only
     returncode: int = 0,
     raw_stdout: str | None = None,
     timeout: bool = False,
+    control_lines: int = 7,
 ) -> tuple[list[dict[str, Any]], Path]:
     """Run main() with the model process stubbed; the banner carries every expectation.
 
@@ -133,7 +136,7 @@ def _run_main(  # noqa: PLR0913 - a test helper whose knobs are all keyword-only
     what the program was actually asked to do rather than what the runner meant to ask.
     ``raw_stdout`` replaces the whole program output; ``timeout`` makes every launch time out.
     """
-    project = _tree(tmp_path)
+    project = _tree(tmp_path, control_lines)
     out = tmp_path / "out"
     stdout = (
         raw_stdout
@@ -348,3 +351,98 @@ def test_a_timeout_is_recorded_as_one_and_not_as_an_answer(
 
     assert {row["exit_code"] for row in rows} == {"TIMEOUT"}
     assert [row["blank"] for row in rows] == [True] * 6
+
+
+# --------------------------------------------------------------------------- #
+# --control-file: one extra line-count question on a different file
+# --------------------------------------------------------------------------- #
+#
+# Added to tell a memorised answer for config.py from the effect of new tool text: the
+# same question about another file with a known count. It adds one question and
+# replaces none, and is off unless asked for, so the six-question run is unchanged.
+
+
+def test_the_control_file_adds_exactly_one_question(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[list[str]] = []
+
+    rows, _ = _run_main(
+        monkeypatch, tmp_path, answer="x", extra_args=["--control-file", "control.py"], calls=calls
+    )
+
+    assert len(rows) == 7
+    assert len(calls) == 7
+    assert [row["id"] for row in rows][-1] == "q7-control-lines"
+    assert any("control.py" in " ".join(args) for args in calls)
+
+
+def test_without_the_flag_there_is_no_control_question(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows, _ = _run_main(monkeypatch, tmp_path, answer="x")
+
+    assert "q7-control-lines" not in {row["id"] for row in rows}
+    assert len(rows) == 6
+
+
+def test_the_control_expectation_is_derived_from_the_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Edit the file and the accepted count follows it; nothing is written down."""
+    rows, _ = _run_main(
+        monkeypatch,
+        tmp_path,
+        answer="The file has 9 lines.",
+        extra_args=["--control-file", "control.py"],
+        control_lines=9,
+    )
+
+    control = next(row for row in rows if row["id"] == "q7-control-lines")
+    assert control["correct"] is True
+
+
+def test_a_wrong_count_for_the_control_file_is_wrong(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows, _ = _run_main(
+        monkeypatch,
+        tmp_path,
+        answer="The file has 8 lines.",
+        extra_args=["--control-file", "control.py"],
+        control_lines=9,
+    )
+
+    assert next(row for row in rows if row["id"] == "q7-control-lines")["correct"] is False
+
+
+def test_a_banner_token_cannot_satisfy_the_control_expectation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The control is graded on the answer region like every other question."""
+    rows, _ = _run_main(
+        monkeypatch,
+        tmp_path,
+        answer="Nothing useful.",
+        extra_args=["--control-file", "control.py"],
+        control_lines=12,  # 12 is in the banner as a whole token
+    )
+
+    assert next(row for row in rows if row["id"] == "q7-control-lines")["correct"] is False
+
+
+@pytest.mark.parametrize("bad", ["missing.py", "../outside.py", "scripts"])
+def test_a_control_file_that_is_missing_or_outside_the_tree_is_refused_before_any_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad: str
+) -> None:
+    calls: list[list[str]] = []
+    # a real file next to the tree, so "../outside.py" is refused for being outside it and
+    # not merely for not existing: two guards that agree would make the test prove neither
+    (tmp_path / "outside.py").write_text("x\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        _run_main(
+            monkeypatch, tmp_path, answer="x", extra_args=["--control-file", bad], calls=calls
+        )
+
+    assert calls == []
