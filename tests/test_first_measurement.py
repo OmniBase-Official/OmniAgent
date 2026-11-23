@@ -18,7 +18,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import first_measurement
-from first_measurement import answer_region, grade, parse_trace
+from first_measurement import answer_region, exit_code, grade, parse_trace
 
 BANNER = (
     "    workspace: D:\\somewhere\\tree\n"
@@ -123,20 +123,30 @@ def _run_main(  # noqa: PLR0913 - a test helper whose knobs are all keyword-only
     revision: tuple[str, bool] = ("abc1234", True),
     extra_args: list[str] | None = None,
     calls: list[list[str]] | None = None,
+    returncode: int = 0,
+    raw_stdout: str | None = None,
+    timeout: bool = False,
 ) -> tuple[list[dict[str, Any]], Path]:
     """Run main() with the model process stubbed; the banner carries every expectation.
 
     ``calls`` collects the argv of every model-process launch, so a test can assert
     what the program was actually asked to do rather than what the runner meant to ask.
+    ``raw_stdout`` replaces the whole program output; ``timeout`` makes every launch time out.
     """
     project = _tree(tmp_path)
     out = tmp_path / "out"
-    stdout = f"{BANNER}    check    : {_BANNER_TOKENS}\n\nOmniAgent: {answer}\n\n"
+    stdout = (
+        raw_stdout
+        if raw_stdout is not None
+        else f"{BANNER}    check    : {_BANNER_TOKENS}\n\nOmniAgent: {answer}\n\n"
+    )
 
     def fake_run(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         if calls is not None:
             calls.append(list(args))
-        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+        if timeout:
+            raise subprocess.TimeoutExpired(args, 1)
+        return subprocess.CompletedProcess(args, returncode, stdout=stdout, stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(first_measurement, "_banks_overlap", lambda _p, _t: [])
@@ -271,3 +281,70 @@ def test_without_the_flag_no_temperature_is_passed_and_none_is_recorded(
 
     assert all("--temperature" not in args for args in calls)
     assert {row["temperature"] for row in rows} == {None}
+
+
+# --------------------------------------------------------------------------- #
+# the exit code, and the "[!] No answer" output of the empty-answer fix (1384d63)
+# --------------------------------------------------------------------------- #
+#
+# Since 1384d63 an empty turn prints "[!] No answer: <fixed sentence>" and exits 1,
+# and returns BEFORE the "OmniAgent:" line is printed. The runner has to record the
+# exit code to check that link, and has to keep counting that output as blank.
+
+NO_ANSWER = (
+    f"{BANNER}\n[!] No answer: the model asked for a tool that is not allowed for this task.\n"
+)
+
+
+def test_the_exit_code_is_read_from_the_marker_the_runner_wrote() -> None:
+    assert exit_code("x\n--- EXIT 1 ---\n") == 1
+    assert exit_code("x\n--- EXIT 0 ---\n") == 0
+    assert exit_code("x\n--- EXIT TIMEOUT ---\n") == "TIMEOUT"
+    assert exit_code("no marker at all") is None
+
+
+def test_a_no_answer_output_has_a_blank_answer_region() -> None:
+    """No ``OmniAgent:`` line, so nothing the program said is ever read as the answer."""
+    output = f"{NO_ANSWER}\n--STDERR--\n\n--- EXIT 1 ---\n"
+
+    assert answer_region(output) == ""
+    assert "No answer" in output
+
+
+def test_a_no_answer_line_is_never_graded_as_an_answer_even_with_an_expectation_in_it() -> None:
+    """The fixed sentence is the program's, so a token in it must not satisfy an expectation."""
+    output = f"{BANNER}\n[!] No answer: 435 3 # dep 12\n--- EXIT 1 ---\n"
+
+    assert grade(answer_region(output), "435") is False
+
+
+def test_every_row_records_the_exit_code_of_its_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows, out = _run_main(
+        monkeypatch, tmp_path, answer="", raw_stdout=NO_ANSWER, returncode=1
+    )
+
+    stored = [json.loads(line) for line in (out / "runs.jsonl").read_text("utf-8").splitlines()]
+    assert {row["exit_code"] for row in rows} == {1}
+    assert {row["exit_code"] for row in stored} == {1}
+    assert [row["blank"] for row in rows] == [True] * 6
+    assert [row["correct"] for row in rows if row["id"] != "q5-abstain"] == [False] * 5
+
+
+def test_an_answered_run_records_exit_code_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows, _ = _run_main(monkeypatch, tmp_path, answer=_BANNER_TOKENS)
+
+    assert {row["exit_code"] for row in rows} == {0}
+    assert [row["blank"] for row in rows] == [False] * 6
+
+
+def test_a_timeout_is_recorded_as_one_and_not_as_an_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows, _ = _run_main(monkeypatch, tmp_path, answer="", timeout=True)
+
+    assert {row["exit_code"] for row in rows} == {"TIMEOUT"}
+    assert [row["blank"] for row in rows] == [True] * 6

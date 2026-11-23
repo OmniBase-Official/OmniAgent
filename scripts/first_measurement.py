@@ -61,6 +61,24 @@ def answer_region(output: str) -> str:
     return _END_OF_ANSWER.split(output[matches[-1].end() :], maxsplit=1)[0].strip()
 
 
+_EXIT = re.compile(rf"{re.escape(DONE_MARKER)}(\S+) ---")
+
+
+def exit_code(output: str) -> int | str | None:
+    """The program's exit code as the runner wrote it into the run file.
+
+    An integer, ``"TIMEOUT"`` when the run was killed, or ``None`` when the marker is
+    missing. Read from the file rather than from the live process so a resumed run
+    reports the same value as a fresh one. Since 1384d63 an empty turn exits 1 and
+    prints ``[!] No answer`` instead of exiting 0 in silence, and this is how that
+    link is checked.
+    """
+    match = _EXIT.search(output)
+    if match is None:
+        return None
+    return int(match.group(1)) if match.group(1).isdigit() else match.group(1)
+
+
 def parse_trace(output: str) -> Trace:
     """Steps, tool names in order, and how many observations were errors."""
     return Trace(
@@ -214,6 +232,7 @@ def main(argv: list[str] | None = None) -> int:
                     "id": qid,
                     "seconds": seconds,
                     "temperature": args.temperature,
+                    "exit_code": exit_code(blob),
                     "steps": trace.steps,
                     "tools": trace.tools,
                     "tool_errors": trace.tool_errors,
