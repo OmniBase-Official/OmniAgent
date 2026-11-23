@@ -115,26 +115,36 @@ def _tree(tmp_path: Path) -> Path:
     return project
 
 
-def _run_main(
+def _run_main(  # noqa: PLR0913 - a test helper whose knobs are all keyword-only options
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     *,
     answer: str,
     revision: tuple[str, bool] = ("abc1234", True),
+    extra_args: list[str] | None = None,
+    calls: list[list[str]] | None = None,
 ) -> tuple[list[dict[str, Any]], Path]:
-    """Run main() with the model process stubbed; the banner carries every expectation."""
+    """Run main() with the model process stubbed; the banner carries every expectation.
+
+    ``calls`` collects the argv of every model-process launch, so a test can assert
+    what the program was actually asked to do rather than what the runner meant to ask.
+    """
     project = _tree(tmp_path)
     out = tmp_path / "out"
     stdout = f"{BANNER}    check    : {_BANNER_TOKENS}\n\nOmniAgent: {answer}\n\n"
 
     def fake_run(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        if calls is not None:
+            calls.append(list(args))
         return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(first_measurement, "_banks_overlap", lambda _p, _t: [])
     monkeypatch.setattr(first_measurement, "_revision", lambda _p: revision)
 
-    code = first_measurement.main(["--project", str(project), "--out", str(out), "--passes", "1"])
+    code = first_measurement.main(
+        ["--project", str(project), "--out", str(out), "--passes", "1", *(extra_args or [])]
+    )
 
     assert code == 0
     summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
@@ -218,3 +228,46 @@ def test_main_marks_an_empty_answer_blank_and_not_correct(
     assert [row["correct"] for row in rows if row["id"] != "q5-abstain"] == [False] * 5
     stored = [json.loads(line) for line in (out / "runs.jsonl").read_text("utf-8").splitlines()]
     assert [row["blank"] for row in stored] == [True] * 6
+
+
+# --------------------------------------------------------------------------- #
+# --temperature: passed to the program, and recorded in the row, never assumed
+# --------------------------------------------------------------------------- #
+
+
+def _after(args: list[str], flag: str) -> str:
+    return args[args.index(flag) + 1]
+
+
+def test_the_temperature_is_passed_to_every_model_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[list[str]] = []
+
+    _run_main(monkeypatch, tmp_path, answer="x", extra_args=["--temperature", "0"], calls=calls)
+
+    assert len(calls) == 6
+    assert all("--temperature" in args for args in calls)
+    assert {_after(args, "--temperature") for args in calls} == {"0"}
+
+
+def test_every_row_records_the_temperature_it_was_run_at(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows, out = _run_main(monkeypatch, tmp_path, answer="x", extra_args=["--temperature", "0"])
+
+    stored = [json.loads(line) for line in (out / "runs.jsonl").read_text("utf-8").splitlines()]
+    assert {row["temperature"] for row in rows} == {0.0}
+    assert {row["temperature"] for row in stored} == {0.0}
+
+
+def test_without_the_flag_no_temperature_is_passed_and_none_is_recorded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No flag means the program's own default applies; the row must not pretend otherwise."""
+    calls: list[list[str]] = []
+
+    rows, _ = _run_main(monkeypatch, tmp_path, answer="x", calls=calls)
+
+    assert all("--temperature" not in args for args in calls)
+    assert {row["temperature"] for row in rows} == {None}

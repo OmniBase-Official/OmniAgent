@@ -156,7 +156,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project", type=Path, required=True, help="tree to measure")
     parser.add_argument("--out", type=Path, required=True, help="directory for raw outputs")
     parser.add_argument("--passes", type=int, default=1)
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="passed to main.py as --temperature and recorded in every row; "
+        "omit it and the program's own default applies, which the row records as null",
+    )
     args = parser.parse_args(argv)
+    temperature_args = (
+        [] if args.temperature is None else ["--temperature", f"{args.temperature:g}"]
+    )
     project, out = args.project.resolve(), args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
 
@@ -182,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     done = subprocess.run(  # noqa: S603 - fixed argv, no shell
                         [sys.executable, "main.py", "--ask", text, "--model", MODEL,
-                         "--max-steps", str(MAX_STEPS), "--verbose"],
+                         "--max-steps", str(MAX_STEPS), "--verbose", *temperature_args],
                         capture_output=True,
                         text=True,
                         cwd=project,
@@ -203,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
                     "pass": number,
                     "id": qid,
                     "seconds": seconds,
+                    "temperature": args.temperature,
                     "steps": trace.steps,
                     "tools": trace.tools,
                     "tool_errors": trace.tool_errors,
