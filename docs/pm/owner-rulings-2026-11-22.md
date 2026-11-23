@@ -217,3 +217,11 @@ The message `docs/pm/codex-stop-and-snapshot-prompt.md` has still not been paste
     Carried by SE 01; the PM re-verifies the merged tip. **Not in this ruling:** `se/brief-29b-gitignore` (`8071f93`) and the AIE measurement branch
     `aiml/first-measurement-20261123` (`c9a00ea`): they stay unmerged until the owner says so.
     Standing rule (owner, same day): every chair sends its final report to the PM chat, not only its own.
+
+    **Ruling 24 done, PM-verified 2026-11-23 (MEASURED):** `origin/integration/canonical-20261122` = `1384d63`, a fast-forward from `b164aaa` (two `--no-ff` merges:
+    S1 `a49b2b7` from `682caba`, record layer `1384d63` from `5aba0c2`). Exactly five files changed (`main.py`, `scripts/holdout_eval.py`, `tests/test_empty_answer_exit.py`,
+    `tests/test_holdout_record.py`, `docs/pm/record-layer-2026-11-23-result.md`). `origin/main` still `3c76fd2`, `organization/main` still `5005039`; 29b and the AIE
+    measurement branch are not in the tip. Throwaway tree at `1384d63`, module paths inside it: ruff clean, mypy 57 files, **1,085 passed, 2 skipped**; canonical `main.py`
+    restored (`69007bd3d19e`; merged `486daf4c0ff2` before and after): S1 tests **6 red, 1 passed**, G2 guards **14 passed**; `_tree_clean` always true: **1 red**, restored hash `1a843b4196ff`.
+    SE 01 wrote S1 and merged it; this re-run is the independent check. Not verified: GitHub Actions behaviour (no `.github/` on this line); the main checkout's local
+    `integration/canonical-20261122` is still behind origin and was not touched.
