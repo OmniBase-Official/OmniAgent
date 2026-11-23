@@ -228,3 +228,23 @@ Weekly meter at close: **13%** against the owner's range of 0% to 14% for the da
 - **q7 baseline finished** (AIE-reported, PM re-counted the 10 rows): question "How many lines does observability.py have?" (true count 353) at `b164aaa`, temperature 0: **0 correct, 10 wrong, 0 blank**; "278" in **0** of 10; nine answered "12331 lines" after running to the 8-step budget (`read_file` > `list_directory` looped), one said it could not find the file. All rows carry temperature 0.0, commit `b164aaa`, clean tree. The lock file is gone (PM confirmed). Raw files are local and uncommitted (`.scratch/aie-first-measurement/data/first-measurement/q7-b164aaa/`).
 - **What it adds (PM reading):** "278" does not appear for another file, so it looks tied to `config.py` (consistent with memorisation); but the model is wrong on this file too, with a different confident figure ("12331"), so memorisation of 278 is **not** the whole problem.
 - **Tomorrow:** the q7 baseline is done; Step 2 needs only the new-tip runs (six questions plus q7 = 70 runs) at `1ce7c81`.
+
+---
+
+# Day 4 start, 2026-11-24 (PM)
+
+## New standing rule: push every activity to BOTH remotes (owner, ruling 26)
+Push your own work branch to `origin` (`mntoyg/OmniAgent`) **and** `organization` (`OmniBase-Official/OmniAgent`), naming the remote each time, and show both SHAs in your report (`git ls-remote` on each). "Main repo" means the remote `origin`, **not the `main` branch**: never push to either `main`, never force. A task is not done until both remotes hold the branch. Written as ADDENDUM 3 in `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`; local copies in `docs/AGENTS.md`, `docs/CLAUDE.md`, `docs/CODEX.md` (git-ignored, never pushed). The PM backfilled 14 branches to `organization` today; all 14 have the same SHA on both remotes.
+
+## Problems to do today, high to low, by kind
+| # | Kind | Sev | Problem | Owner of the next step |
+| --- | --- | --- | --- | --- |
+| 1 | Quality (model) | High | Confident wrong counts (file count 0 of 40; line count "278" for 302; q7 "12331" for 353). Part 1 of the fix (`1ce7c81`) is **not yet measured** | Claude AIE (run the 70 runs at `1ce7c81`); PM verifies |
+| 2 | Product | High | `list_directory` count header (part 2) | Claude SE, **after** the part 1 numbers are read (on hold) |
+| 3 | Security / Contract | Medium | `inspect_config_precedence` is a seventh, unreviewed tool the model can call and does call | Claude SE (prove metadata only, a test), then SAE and the owner |
+| 4 | Process | Medium | Five branches unmerged: `se/brief-31-tool-text`, `aiml/first-measurement-20261123`, `aiml/tool-text-measure-20261123`, `se/brief-29b-gitignore`, and the SAE docs | Owner decides; Claude SE merges; PM verifies |
+| 5 | Docs / Contract | Medium | Contract §2 paragraph stale; README "~600 lines" and the `omniagent-v2` claim; README and demo scripts quote the old `read_file` text | PM (§2, after the owner's word); Codex SWE (README); PM (demo scripts, low) |
+| 6 | Security / CI | Medium | `scan_report_copy` (29a) unfixed; Security gates job never green on a runner; "Update Coding Time" workflow | Claude SE (29a, needs Docker Desktop started by the owner); owner (workflow) |
+| 7 | Instrument | Medium | Tree state read once per run; bank question index 18 scored on nothing; the q2/q5 gap, task inventory | Claude AIE (R1); owner rules R2 and the rest |
+| 8 | Process | Low | Main checkout still at `388fa53`; clean Codex worktrees; empty `.scratch/pm-verify-*` folders; Codex not consulted | Owner's word (PM does the first two) |
+| 9 | Process | Low | New push rule: check every report shows both SHAs | PM |
