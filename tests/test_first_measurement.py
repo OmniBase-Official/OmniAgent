@@ -185,3 +185,36 @@ def test_a_run_row_carries_no_question_answer_or_output(
     assert "ANSWER-CANARY-5521" not in blob
     assert "127.0.0.1" not in blob
     assert "multiplied" not in blob
+
+
+# --------------------------------------------------------------------------- #
+# the separator between stdout and stderr is not part of the answer
+# --------------------------------------------------------------------------- #
+#
+# Found in the second pass: the runner writes stdout, then a --STDERR-- separator,
+# then stderr, then the exit marker. answer_region() cut only at the exit marker,
+# so an empty answer came back as "--STDERR--", every run counted as non-blank,
+# and 14 of 20 empty answers were reported as 0 blanks.
+
+
+def test_an_empty_answer_followed_by_the_stderr_separator_is_still_blank() -> None:
+    output = f"{BANNER}\nOmniAgent: \n\n\n--STDERR--\n\n--- EXIT 0 ---\n"
+
+    assert answer_region(output) == ""
+
+
+def test_a_real_answer_followed_by_the_stderr_separator_loses_the_separator() -> None:
+    output = f"{BANNER}\nOmniAgent: There are 12 files.\n\n\n--STDERR--\nwarn\n--- EXIT 0 ---\n"
+
+    assert answer_region(output) == "There are 12 files."
+
+
+def test_main_marks_an_empty_answer_blank_and_not_correct(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows, out = _run_main(monkeypatch, tmp_path, answer="")
+
+    assert [row["blank"] for row in rows] == [True] * 6
+    assert [row["correct"] for row in rows if row["id"] != "q5-abstain"] == [False] * 5
+    stored = [json.loads(line) for line in (out / "runs.jsonl").read_text("utf-8").splitlines()]
+    assert [row["blank"] for row in stored] == [True] * 6

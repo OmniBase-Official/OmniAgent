@@ -30,6 +30,9 @@ MODEL = "omniagent-v2:latest"
 MAX_STEPS = 8
 TIMEOUT_SECONDS = 600
 DONE_MARKER = "--- EXIT "
+#: Written between the program's stdout and its stderr. It is not the model's text.
+STDERR_MARKER = "--STDERR--"
+_END_OF_ANSWER = re.compile(f"{re.escape(STDERR_MARKER)}|{re.escape(DONE_MARKER)}")
 
 _STEP = re.compile(r"^\s*\[step \d+\]\s*$", re.MULTILINE)
 _ACTION = re.compile(r"^\s*Action\s*:\s*(\S+)\s*$", re.MULTILINE)
@@ -55,7 +58,7 @@ def answer_region(output: str) -> str:
     matches = list(_ANSWER_PREFIX.finditer(output))
     if not matches:
         return ""
-    return output[matches[-1].end() :].split(DONE_MARKER, maxsplit=1)[0].strip()
+    return _END_OF_ANSWER.split(output[matches[-1].end() :], maxsplit=1)[0].strip()
 
 
 def parse_trace(output: str) -> Trace:
@@ -186,7 +189,8 @@ def main(argv: list[str] | None = None) -> int:
                         timeout=TIMEOUT_SECONDS,
                         check=False,
                     )
-                    code, body = str(done.returncode), done.stdout + "\n--STDERR--\n" + done.stderr
+                    code = str(done.returncode)
+                    body = f"{done.stdout}\n{STDERR_MARKER}\n{done.stderr}"
                 except subprocess.TimeoutExpired:
                     code, body = "TIMEOUT", ""
                 seconds = round(time.perf_counter() - started, 1)
