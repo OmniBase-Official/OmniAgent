@@ -41,6 +41,46 @@ def capture_limit_diagnostic(stdout: bytes, stderr: bytes, limit: int) -> str:
     )
 
 
+def start_status_diagnostic(
+    exit_code: int, stdout: bytes, stderr: bytes, limit: int
+) -> str:
+    return (
+        "security scan failed stage=scan_docker_start "
+        f"exit_code={exit_code} stdout_bytes={len(stdout)} "
+        f"stderr_bytes={len(stderr)} limit={limit}"
+    )
+
+
+def portable_capture(
+    args: list[str], timeout: int = module.TIMEOUT
+) -> tuple[int, bytes, bytes]:
+    if args[1] == "create":
+        args = [*args[:2], "--env=NO_COLOR=1", *args[2:]]
+    result = subprocess.run(  # noqa: S603 - controlled argv, synthetic fixture, shell=False.
+        args,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+    if args[1] == "start" and result.returncode not in (
+        module.CLEAN_STATUS,
+        module.FINDINGS_STATUS,
+    ):
+        pytest.fail(
+            start_status_diagnostic(
+                result.returncode, result.stdout, result.stderr, module.MAX_CAPTURE
+            ),
+            pytrace=False,
+        )
+    if len(result.stdout) > module.MAX_CAPTURE or len(result.stderr) > module.MAX_CAPTURE:
+        pytest.fail(
+            capture_limit_diagnostic(result.stdout, result.stderr, module.MAX_CAPTURE),
+            pytrace=False,
+        )
+    return result.returncode, result.stdout, result.stderr
+
+
 def expect_equal(actual: object, expected: object) -> None:
     if actual != expected:
         raise AssertionError(f"expected {expected!r}, got {actual!r}")
@@ -184,6 +224,55 @@ def test_capture_limit_diagnostic_contains_only_numeric_metadata() -> None:
     expect_equal(secret_content.decode("ascii") in diagnostic, False)
 
 
+def test_portable_capture_enforces_cap_with_numeric_only_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canary = b"ghp_synthetic_cap_guard_canary"
+    private_path = b"private/path"
+    argv = ["docker", "start", "--attach", private_path.decode(), canary.decode()]
+    secret_content = b"argv=" + private_path + b" token=" + canary
+    stdout = secret_content * (MAX_CAPTURE // len(secret_content) + 1)
+    result = subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=b"")
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: result)
+
+    with pytest.raises(pytest.fail.Exception) as caught:
+        portable_capture(argv)
+
+    diagnostic = str(caught.value)
+    expect_equal(
+        diagnostic,
+        capture_limit_diagnostic(stdout, b"", MAX_CAPTURE),
+    )
+    expect_equal(canary.decode("ascii") in diagnostic, False)
+    expect_equal(private_path.decode("ascii") in diagnostic, False)
+    expect_equal(" ".join(argv) in diagnostic, False)
+    expect_equal(secret_content.decode("ascii") in diagnostic, False)
+    expect_equal(stdout.decode("ascii") in diagnostic, False)
+
+
+def test_start_status_diagnostic_contains_only_safe_numeric_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canary = b"ghp_synthetic_start_status_canary"
+    secret_content = b"private/path token=" + canary
+    args = ["docker", "start", "--attach", "synthetic-container"]
+    result = subprocess.CompletedProcess(
+        args, 153, stdout=secret_content, stderr=secret_content
+    )
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: result)
+    with pytest.raises(pytest.fail.Exception) as caught:
+        portable_capture(args)
+    diagnostic = str(caught.value)
+    expect_equal(
+        diagnostic,
+        start_status_diagnostic(153, secret_content, secret_content, MAX_CAPTURE),
+    )
+    expect_equal(canary.decode("ascii") in diagnostic, False)
+    expect_equal("private/path" in diagnostic, False)
+    expect_equal("synthetic-container" in diagnostic, False)
+    expect_equal(secret_content.decode("ascii") in diagnostic, False)
+
+
 @pytest.mark.skipif(
     shutil.which("docker") is None,
     reason="pinned-image integration requires Docker",
@@ -191,27 +280,6 @@ def test_capture_limit_diagnostic_contains_only_numeric_metadata() -> None:
 def test_scan_report_survives_container_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def portable_capture(
-        args: list[str], timeout: int = module.TIMEOUT
-    ) -> tuple[int, bytes, bytes]:
-        if args[1] == "create":
-            args = [*args[:2], "--env=NO_COLOR=1", *args[2:]]
-        result = subprocess.run(  # noqa: S603 - controlled argv, synthetic fixture, shell=False.
-            args,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
-        if len(result.stdout) > module.MAX_CAPTURE or len(result.stderr) > module.MAX_CAPTURE:
-            pytest.fail(
-                capture_limit_diagnostic(
-                    result.stdout, result.stderr, module.MAX_CAPTURE
-                ),
-                pytrace=False,
-            )
-        return result.returncode, result.stdout, result.stderr
-
     monkeypatch.setattr(module, "capture", portable_capture)
     canary = (
         "ghp_" + hashlib.sha256(b"omniagent-report-persistence-test").hexdigest()[:36]
