@@ -270,6 +270,85 @@ def test_scan_container_sets_exact_report_file_size_limit(
     expect_equal(args[limit_index + 1], f"fsize={MAX_REPORT}:{MAX_REPORT}")
 
 
+def test_scan_container_passes_available_report_directory_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[list[str]] = []
+
+    def capture_args(args: list[str], timeout: int = module.TIMEOUT) -> tuple[int, bytes, bytes]:
+        del timeout
+        captured.append(args)
+        return 0, b"", b""
+
+    monkeypatch.setattr(module, "report_directory_owner", lambda _path: (1234, 5678))
+    monkeypatch.setattr(module, "capture", capture_args)
+    module.create_scan_container(
+        tmp_path, tmp_path / "template", tmp_path / "report", "scan", "docker"
+    )
+    args = captured[0]
+    user_index = args.index("--user")
+    expect_equal(args[user_index + 1], "1234:5678")
+
+
+def test_scan_container_omits_user_when_report_owner_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[list[str]] = []
+
+    def capture_args(args: list[str], timeout: int = module.TIMEOUT) -> tuple[int, bytes, bytes]:
+        del timeout
+        captured.append(args)
+        return 0, b"", b""
+
+    monkeypatch.setattr(module, "report_directory_owner", lambda _path: None)
+    monkeypatch.setattr(module, "capture", capture_args)
+    module.create_scan_container(
+        tmp_path, tmp_path / "template", tmp_path / "report", "scan", "docker"
+    )
+    expect_equal("--user" in captured[0], False)
+
+
+def test_report_directory_owner_uses_posix_lstat_identity(tmp_path: Path) -> None:
+    if os.name != "posix":
+        pytest.skip("POSIX report-directory ownership metadata is unavailable")
+    tmp_path.chmod(0o700)
+    info = tmp_path.lstat()
+    expect_equal(module.report_directory_owner(tmp_path), (info.st_uid, info.st_gid))
+
+
+def test_report_directory_owner_rejects_symlink(tmp_path: Path) -> None:
+    if os.name != "posix":
+        pytest.skip("POSIX symlink ownership check")
+    target = tmp_path / "target"
+    target.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    with pytest.raises(ScanError):
+        module.report_directory_owner(link)
+
+
+def test_report_directory_owner_omits_windows_identity(tmp_path: Path) -> None:
+    expect_equal(module.report_directory_owner(tmp_path, platform_name="nt"), None)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows container creation must omit --user")
+def test_scan_container_omits_user_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[list[str]] = []
+
+    def capture_args(args: list[str], timeout: int = module.TIMEOUT) -> tuple[int, bytes, bytes]:
+        del timeout
+        captured.append(args)
+        return 0, b"", b""
+
+    monkeypatch.setattr(module, "capture", capture_args)
+    module.create_scan_container(
+        tmp_path, tmp_path / "template", tmp_path / "report", "scan", "docker"
+    )
+    expect_equal("--user" in captured[0], False)
+
+
 def test_capture_limit_diagnostic_contains_only_numeric_metadata() -> None:
     canary = b"ghp_synthetic_capture_canary"
     secret_content = b"private/path token=" + canary

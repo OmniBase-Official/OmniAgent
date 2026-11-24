@@ -265,9 +265,33 @@ def scanner_status_consistent(status: int, rows: list[tuple[str, str, str, int]]
     return (status == CLEAN_STATUS and not rows) or (status == FINDINGS_STATUS and bool(rows))
 
 
+def report_directory_owner(
+    report_dir: Path, *, platform_name: str | None = None
+) -> tuple[int, int] | None:
+    if (os.name if platform_name is None else platform_name) != "posix":
+        return None
+    try:
+        info = report_dir.lstat()
+        uid, gid = info.st_uid, info.st_gid
+    except (OSError, AttributeError):
+        fail()
+    if not stat.S_ISDIR(info.st_mode):
+        fail()
+    if not isinstance(uid, int) or isinstance(uid, bool):
+        fail()
+    if not isinstance(gid, int) or isinstance(gid, bool):
+        fail()
+    return uid, gid
+
+
 def create_scan_container(
     repo: Path, template: Path, report_dir: Path, name: str, docker_bin: str
 ) -> None:
+    try:
+        owner = report_directory_owner(report_dir)
+    except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
+        fail_stage("scan_docker_create")
+    user_args = [] if owner is None else ["--user", f"{owner[0]}:{owner[1]}"]
     args = [
         docker_bin,
         "create",
@@ -280,6 +304,7 @@ def create_scan_container(
         "--memory=512m",
         "--cpus=1",
         "--pids-limit=64",
+        *user_args,
         "--ulimit",
         f"fsize={MAX_REPORT}:{MAX_REPORT}",
         "--volume",
