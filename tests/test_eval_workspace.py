@@ -320,7 +320,9 @@ def test_the_transcripts_directory_is_listable_but_not_readable(transcripts: Wor
 
 def test_every_sealed_source_path_exists(sealed: Workspace) -> None:
     """Catch misspelled source paths; ignored local artifacts need not exist."""
-    optional_artifacts = {"models", "data", "omniagent.egg-info"}
+    # NEXT_CHAT.md left the tree (brief 36) but stays sealed in ANSWER_KEY, because
+    # an old checkout may still hold a copy; so it is optional here, not absent.
+    optional_artifacts = {"models", "data", "omniagent.egg-info", "NEXT_CHAT.md"}
     missing = [
         relative
         for relative in (*ANSWER_KEY, *LISTING_ONLY)
@@ -328,6 +330,16 @@ def test_every_sealed_source_path_exists(sealed: Workspace) -> None:
     ]
 
     assert missing == [], f"a sealed path is not there: {missing}"
+
+
+def test_a_local_copy_of_the_removed_journal_stays_unreadable(tmp_path: Path) -> None:
+    """The file left the tree, so it is optional above. It must stay sealed: an old
+    checkout can still hold one, and the answer key is denied by NAME, not by the
+    file existing when the workspace was built."""
+    workspace = sealed_workspace(tmp_path)
+    (tmp_path / "NEXT_CHAT.md").write_text(LEAKED_SENTENCE, encoding="utf-8")
+    with pytest.raises(SandboxError, match="not readable by the agent"):
+        workspace.read_text("NEXT_CHAT.md")
 
 
 @pytest.mark.parametrize("directory", ["models", "data", "omniagent.egg-info"])
