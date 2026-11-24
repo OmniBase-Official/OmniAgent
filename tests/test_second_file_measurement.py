@@ -61,7 +61,11 @@ def test_the_arm_that_goes_first_alternates() -> None:
 
 def _repo(path: Path, content: str) -> Path:
     path.mkdir()
-    for args in (["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "t"]):
+    for args in (
+        ["init", "-q"],
+        ["config", "user.email", "t@example.com"],
+        ["config", "user.name", "t"],
+    ):
         subprocess.run(["git", "-C", str(path), *args], check=True)  # noqa: S603, S607
     (path / "a.py").write_text(content, encoding="utf-8")
     subprocess.run(["git", "-C", str(path), "add", "a.py"], check=True)  # noqa: S603, S607

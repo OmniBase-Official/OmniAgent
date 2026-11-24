@@ -86,8 +86,19 @@ def _run(tree: Path, text: str, steps: int, temperature_args: list[str]) -> tupl
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     try:
         done = subprocess.run(  # noqa: S603 - fixed argv, no shell
-            [sys.executable, "-B", "main.py", "--ask", text, "--model", fm.MODEL,
-             "--max-steps", str(steps), "--verbose", *temperature_args],
+            [
+                sys.executable,
+                "-B",
+                "main.py",
+                "--ask",
+                text,
+                "--model",
+                fm.MODEL,
+                "--max-steps",
+                str(steps),
+                "--verbose",
+                *temperature_args,
+            ],
             capture_output=True,
             text=True,
             cwd=tree,
@@ -123,7 +134,9 @@ def main(argv: list[str] | None = None) -> int:
     temperature_args = ["--temperature", f"{args.temperature:g}"]
 
     questions = {f: args.wording.format(file=f) for f in files}
-    overlap = fm._banks_overlap(parent, list(questions.values()))
+    overlap = fm._banks_overlap(  # noqa: SLF001 - sibling script, same package of tools
+        parent, list(questions.values())
+    )
     print("bank overlap:", overlap or "none")
     if overlap:
         print("ABORT: nothing was run")
@@ -138,11 +151,11 @@ def main(argv: list[str] | None = None) -> int:
     expected = expectations(parent, child, files)
     arms = {"parent": parent, "child": child}
     for arm, tree in arms.items():
-        if fm._revision(tree)[1] is not True:
+        if fm._revision(tree)[1] is not True:  # noqa: SLF001
             print(f"ABORT: {arm} tree is not clean")
             return 3
     if _root_names(parent) != _root_names(child):
-        print("ABORT: the two trees have different root listings:", _root_names(parent), _root_names(child))
+        print("ABORT: the two trees have different root listings")
         return 4
     for number in range(1, args.passes + 1):
         for index, name in enumerate(files):
@@ -157,15 +170,25 @@ def main(argv: list[str] | None = None) -> int:
                 seconds = round(time.perf_counter() - started, 1)
                 blob = f"{body}\n{fm.DONE_MARKER}{code} ---\n"
                 path.write_text(blob, encoding="utf-8")
-                commit, clean = fm._revision(tree)
+                commit, clean = fm._revision(tree)  # noqa: SLF001
                 trace, answer = fm.parse_trace(blob), fm.answer_region(blob)
                 row = {
-                    "arm": arm, "commit": commit, "tree_clean": clean, "pass": number,
-                    "file": name, "seconds": seconds, "temperature": args.temperature,
-                    "exit_code": fm.exit_code(blob), "steps": trace.steps, "tools": trace.tools,
-                    "first_input": first_input(blob), "reached": reached_oversize(blob),
-                    "file_info_called": "file_info" in trace.tools, "blank": answer == "",
-                    "answer_numbers": answer_numbers(answer), "expected": expected[name],
+                    "arm": arm,
+                    "commit": commit,
+                    "tree_clean": clean,
+                    "pass": number,
+                    "file": name,
+                    "seconds": seconds,
+                    "temperature": args.temperature,
+                    "exit_code": fm.exit_code(blob),
+                    "steps": trace.steps,
+                    "tools": trace.tools,
+                    "first_input": first_input(blob),
+                    "reached": reached_oversize(blob),
+                    "file_info_called": "file_info" in trace.tools,
+                    "blank": answer == "",
+                    "answer_numbers": answer_numbers(answer),
+                    "expected": expected[name],
                     "correct": fm.grade(answer, expected[name]),
                 }
                 with (out / "runs.jsonl").open("a", encoding="utf-8") as handle:
