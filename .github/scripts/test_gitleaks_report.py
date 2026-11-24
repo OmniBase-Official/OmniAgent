@@ -262,8 +262,11 @@ def test_scan_container_sets_exact_report_file_size_limit(
         return 0, b"", b""
 
     monkeypatch.setattr(module, "capture", capture_args)
+    report_dir = tmp_path / "report"
+    report_dir.mkdir()
+    report_dir.chmod(0o700)
     module.create_scan_container(
-        tmp_path, tmp_path / "template", tmp_path / "report", "scan", "docker"
+        tmp_path, tmp_path / "template", report_dir, "scan", "docker"
     )
     args = captured[0]
     limit_index = args.index("--ulimit")
