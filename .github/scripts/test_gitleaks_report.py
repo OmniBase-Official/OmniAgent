@@ -4,7 +4,7 @@ import shutil
 import stat
 import subprocess
 import sys
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 import gitleaks_report as module
@@ -43,7 +43,7 @@ def capture_limit_diagnostic(stdout: bytes, stderr: bytes, limit: int) -> str:
     )
 
 
-class StartFailureCategory(str, Enum):
+class StartFailureCategory(StrEnum):
     PERMISSION_DENIED = "permission_denied"
     DUBIOUS_OWNERSHIP = "dubious_ownership"
     FILE_SIZE_LIMIT = "file_size_limit"
