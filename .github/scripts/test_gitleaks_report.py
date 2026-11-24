@@ -34,6 +34,13 @@ EXPECTED_COMMIT_COUNT = 270
 EXPECTED_COLUMN_COUNT = 4
 
 
+def capture_limit_diagnostic(stdout: bytes, stderr: bytes, limit: int) -> str:
+    return (
+        "security scan failed stage=scan_docker_start "
+        f"stdout_bytes={len(stdout)} stderr_bytes={len(stderr)} limit={limit}"
+    )
+
+
 def expect_equal(actual: object, expected: object) -> None:
     if actual != expected:
         raise AssertionError(f"expected {expected!r}, got {actual!r}")
@@ -162,6 +169,21 @@ def test_scan_container_sets_exact_report_file_size_limit(
     expect_equal(args[limit_index + 1], f"fsize={MAX_REPORT}:{MAX_REPORT}")
 
 
+def test_capture_limit_diagnostic_contains_only_numeric_metadata() -> None:
+    canary = b"ghp_synthetic_capture_canary"
+    secret_content = b"private/path token=" + canary
+    diagnostic = capture_limit_diagnostic(secret_content, secret_content, MAX_CAPTURE)
+    expect_equal(
+        diagnostic,
+        f"security scan failed stage=scan_docker_start "
+        f"stdout_bytes={len(secret_content)} stderr_bytes={len(secret_content)} "
+        f"limit={MAX_CAPTURE}",
+    )
+    expect_equal(canary.decode("ascii") in diagnostic, False)
+    expect_equal("private/path" in diagnostic, False)
+    expect_equal(secret_content.decode("ascii") in diagnostic, False)
+
+
 @pytest.mark.skipif(
     shutil.which("docker") is None,
     reason="pinned-image integration requires Docker",
@@ -182,7 +204,12 @@ def test_scan_report_survives_container_exit(
             check=False,
         )
         if len(result.stdout) > module.MAX_CAPTURE or len(result.stderr) > module.MAX_CAPTURE:
-            raise ScanError("synthetic integration output exceeded cap")
+            pytest.fail(
+                capture_limit_diagnostic(
+                    result.stdout, result.stderr, module.MAX_CAPTURE
+                ),
+                pytrace=False,
+            )
         return result.returncode, result.stdout, result.stderr
 
     monkeypatch.setattr(module, "capture", portable_capture)
