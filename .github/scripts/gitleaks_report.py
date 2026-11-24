@@ -317,6 +317,7 @@ def create_scan_container(
         "git",
         "--redact=100",
         "--no-banner",
+        "--no-color",
         "--exit-code=2",
         "--report-format=template",
         "--report-template=/template.tmpl",
@@ -542,15 +543,24 @@ def contract_canary_scan(root: Path, template: Path, canary: bytes) -> None:
         fail_stage("contract_canary_scan")
 
 
-def contract_mutant_scan(root: Path, template: Path, canary: bytes) -> tuple[bytes, Path]:
+def contract_mutant_scan(root: Path, template: Path, canary: bytes) -> None:
     try:
         mutant_repo = make_repo(root, "mutant", b"token=" + canary + b"\n")
         mutant_status, _, mutant_output, mutant_raw = scan(
             mutant_repo, template, allow_invalid=True
         )
-        if mutant_status != FINDINGS_STATUS or canary not in mutant_raw or canary in mutant_output:
+        if (
+            mutant_status != FINDINGS_STATUS
+            or not mutant_raw
+            or canary in mutant_raw
+            or canary in mutant_output
+        ):
             fail()
-        return mutant_raw, root / "mutant-report.tsv"
+        try:
+            parse_report(mutant_raw)
+        except ScanError:
+            return
+        fail()
     except StageError as error:
         preserve_or_fallback(error, "contract_mutant_scan")
     except Exception:  # noqa: BLE001 - map phase failures to a fixed, non-sensitive stage ID.
@@ -567,14 +577,16 @@ def contract(template: Path, mutant_template: Path) -> None:
             "ascii"
         )
         contract_canary_scan(root, template, canary)
-        mutant_raw, bad = contract_mutant_scan(root, mutant_template, canary)
-        bad.write_bytes(mutant_raw)
+        contract_mutant_scan(root, mutant_template, canary)
+        bad = root / "malformed-report.tsv"
+        bad.write_bytes(b'R\t"fixture.txt"\tinvalid\t1\t' + canary + b"\n")
         code = [sys.executable, str(Path(__file__).resolve()), "validate", str(bad)]
         try:
             proc_status, proc_out, proc_err = capture(code)
             if (
                 proc_status == CLEAN_STATUS
                 or proc_out
+                or canary in proc_out
                 or canary in proc_err
                 or proc_err != (GENERIC + "\n").encode()
             ):

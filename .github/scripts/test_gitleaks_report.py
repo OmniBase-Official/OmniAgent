@@ -271,6 +271,8 @@ def test_scan_container_sets_exact_report_file_size_limit(
     args = captured[0]
     limit_index = args.index("--ulimit")
     expect_equal(args[limit_index + 1], f"fsize={MAX_REPORT}:{MAX_REPORT}")
+    no_banner_index = args.index("--no-banner")
+    expect_equal(args[no_banner_index + 1], "--no-color")
 
 
 def test_scan_container_passes_available_report_directory_owner(
@@ -554,6 +556,25 @@ def test_actual_entrypoint_clean_and_invalid_reports(tmp_path: Path) -> None:
     expect_equal(rejected.returncode, 1)
     expect_equal(rejected.stdout, b"")
     expect_equal(rejected.stderr.replace(b"\r\n", b"\n"), b"security scan failed\n")
+
+    canary = (
+        "ghp_" + hashlib.sha256(b"omniagent-validator-nondisclosure").hexdigest()[:36]
+    ).encode("ascii")
+    malformed_canary = tmp_path / "malformed-canary.tsv"
+    malformed_canary.write_bytes(b'R\t"fixture.txt"\tinvalid\t1\t' + canary + b"\n")
+    rejected_canary = subprocess.run(  # noqa: S603 - controlled local helper path and argv, shell=False.
+        [sys.executable, str(helper), "validate", str(malformed_canary)],
+        capture_output=True,
+        check=False,
+    )
+    expect_equal(rejected_canary.returncode, 1)
+    expect_equal(rejected_canary.stdout, b"")
+    expect_equal(
+        rejected_canary.stderr.replace(b"\r\n", b"\n"),
+        b"security scan failed\n",
+    )
+    expect_equal(canary in rejected_canary.stdout, False)
+    expect_equal(canary in rejected_canary.stderr, False)
 
 
 def test_stage_diagnostics_emit_only_allowlisted_ids(tmp_path: Path) -> None:
