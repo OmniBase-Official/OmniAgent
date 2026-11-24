@@ -34,6 +34,7 @@ HASH = "0123456789abcdef0123456789abcdef01234567"
 ROW = f'R\t"fixture.txt"\t{HASH}\t1\n'.encode("ascii")
 EXPECTED_COMMIT_COUNT = 270
 EXPECTED_COLUMN_COUNT = 4
+EXPECTED_MERGE_PARENT_LINE_FIELDS = 3
 
 
 def capture_limit_diagnostic(stdout: bytes, stderr: bytes, limit: int) -> str:
@@ -147,6 +148,107 @@ def expect_equal(actual: object, expected: object) -> None:
         raise AssertionError(f"expected {expected!r}, got {actual!r}")
 
 
+def make_history_fixture(root: Path, name: str) -> Path:
+    repo = root / name
+    repo.mkdir()
+
+    def git(*args: str) -> bytes:
+        status, output, _ = module.capture(["git", "-C", str(repo), *args])
+        if status != 0:
+            raise AssertionError("synthetic git history setup failed")
+        return output
+
+    status, _, _ = module.capture(["git", "init", "-q", str(repo)])
+    if status != 0:
+        raise AssertionError("synthetic git history setup failed")
+    git("config", "user.email", "fixture@example.invalid")
+    git("config", "user.name", "Synthetic Fixture")
+    git("branch", "-M", "main")
+
+    (repo / "ordinary.txt").write_bytes(b"initial fixture\n")
+    (repo / "delete-only.txt").write_bytes(b"delete-only fixture\n")
+    git("add", "-A")
+    git("commit", "-qm", "initial history fixture")
+
+    (repo / "ordinary.txt").write_bytes(b"ordinary modification\n")
+    git("add", "ordinary.txt")
+    git("commit", "-qm", "ordinary commit")
+    git("commit", "--allow-empty", "-qm", "empty commit")
+
+    git("branch", "side")
+    git("checkout", "-q", "side")
+    (repo / "side.txt").write_bytes(b"side branch fixture\n")
+    git("add", "side.txt")
+    git("commit", "-qm", "side branch commit")
+
+    git("checkout", "-q", "main")
+    (repo / "main.txt").write_bytes(b"main branch fixture\n")
+    git("add", "main.txt")
+    git("commit", "-qm", "main branch commit")
+    git("merge", "--no-ff", "-qm", "merge fixture", "side")
+
+    git("rm", "-q", "delete-only.txt")
+    git("commit", "-qm", "delete-only commit")
+    return repo
+
+
+def make_merge_resolution_fixture(root: Path, name: str, canary: bytes) -> Path:
+    repo = root / name
+    repo.mkdir()
+
+    def git(*args: str) -> bytes:
+        status, output, _ = module.capture(["git", "-C", str(repo), *args])
+        if status != 0:
+            raise AssertionError("synthetic merge fixture setup failed")
+        return output
+
+    status, _, _ = module.capture(["git", "init", "-q", str(repo)])
+    if status != 0:
+        raise AssertionError("synthetic merge fixture setup failed")
+    git("config", "user.email", "fixture@example.invalid")
+    git("config", "user.name", "Synthetic Fixture")
+    git("branch", "-M", "main")
+    (repo / "fixture.txt").write_bytes(b"value=base\n")
+    git("add", "fixture.txt")
+    git("commit", "-qm", "merge base")
+    base = git("rev-parse", "HEAD").strip().decode("ascii")
+
+    git("checkout", "-q", "-b", "side", base)
+    (repo / "fixture.txt").write_bytes(b"value=side-parent\n")
+    git("add", "fixture.txt")
+    git("commit", "-qm", "side parent")
+
+    git("checkout", "-q", "main")
+    (repo / "fixture.txt").write_bytes(b"value=main-parent\n")
+    git("add", "fixture.txt")
+    git("commit", "-qm", "main parent")
+    merge_status, _, _ = module.capture(
+        ["git", "-C", str(repo), "merge", "--no-ff", "--no-commit", "side"]
+    )
+    if merge_status == 0:
+        raise AssertionError("synthetic merge fixture did not create a conflict")
+
+    (repo / "fixture.txt").write_bytes(b"token=" + canary + b"\n")
+    git("add", "fixture.txt")
+    git("commit", "-qm", "resolution-only canary merge")
+    parent_line = git("rev-list", "--parents", "-n", "1", "HEAD").strip()
+    parents = parent_line.split()
+    if len(parents) != EXPECTED_MERGE_PARENT_LINE_FIELDS:
+        raise AssertionError("synthetic resolution commit is not a two-parent merge")
+    for parent in parents[1:]:
+        status, parent_file, _ = module.capture(
+            ["git", "-C", str(repo), "show", f"{parent.decode('ascii')}:fixture.txt"]
+        )
+        if status != 0 or canary in parent_file:
+            raise AssertionError("synthetic canary must be absent from both merge parents")
+    status, merge_file, _ = module.capture(
+        ["git", "-C", str(repo), "show", "HEAD:fixture.txt"]
+    )
+    if status != 0 or canary not in merge_file:
+        raise AssertionError("synthetic canary must exist only in the merge result")
+    return repo
+
+
 def test_ascii_unicode_quote_round_trip() -> None:
     rows = parse_report(f'R\t"dir/quote\\"-caf\\u00e9.txt"\t{HASH}\t1\n'.encode())
     expect_equal(rows[0][1], 'dir/quote"-café.txt')
@@ -251,6 +353,40 @@ def test_status_rows_consistency() -> None:
     expect_equal(scanner_status_consistent(2, []), False)
 
 
+def test_scan_summary_requires_one_positive_parseable_count() -> None:
+    module.verify_scan_summary(b"INF 1 commits scanned.\n")
+    for invalid in (
+        b"INF 0 commits scanned.\n",
+        b"no summary\n",
+        b"INF 1 commits scanned.\nINF 1 commits scanned.\n",
+    ):
+        with pytest.raises(StageError) as caught:
+            module.verify_scan_summary(invalid)
+        expect_equal(caught.value.stage, "scan_commit_summary")
+
+
+def test_shallow_repository_is_rejected_before_container_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(module, "capture", PortableCapture())
+    repo = make_repo(tmp_path, "shallow-repo", b"synthetic shallow fixture\n")
+    status, head, _ = module.capture(["git", "-C", str(repo), "rev-parse", "HEAD"])
+    expect_equal(status, 0)
+    expect_equal(head.endswith(b"\n"), True)
+    (repo / ".git" / "shallow").write_bytes(head)
+
+    def reject_docker(args: list[str], timeout: int = module.TIMEOUT) -> tuple[int, bytes, bytes]:
+        del timeout
+        if args[-1] != "--is-shallow-repository":
+            raise AssertionError("container creation must not run for shallow repositories")
+        return 0, b"true\n", b""
+
+    monkeypatch.setattr(module, "capture", reject_docker)
+    with pytest.raises(StageError) as caught:
+        module.scan(repo, tmp_path / "template")
+    expect_equal(caught.value.stage, "scan_repository_policy")
+
+
 def test_scan_container_sets_exact_report_file_size_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -273,6 +409,10 @@ def test_scan_container_sets_exact_report_file_size_limit(
     expect_equal(args[limit_index + 1], f"fsize={MAX_REPORT}:{MAX_REPORT}")
     no_banner_index = args.index("--no-banner")
     expect_equal(args[no_banner_index + 1], "--no-color")
+    expect_equal(
+        "--log-opts=--full-history --all --diff-filter=tuxdb --diff-merges=first-parent" in args,
+        True,
+    )
 
 
 def test_scan_container_passes_available_report_directory_owner(
@@ -493,6 +633,52 @@ def test_scan_report_survives_container_exit(
     expect_equal(len(raw) > 0, True)
     expect_equal(canary in raw, False)
     expect_equal(canary in output, False)
+    expect_equal(canary in module.render(rows), False)
+
+
+@pytest.mark.skipif(
+    shutil.which("docker") is None,
+    reason="pinned-image synthetic Git history test requires Docker",
+)
+def test_history_with_merge_empty_and_delete_only_commits_scans_consistently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(module, "capture", PortableCapture())
+    repo = make_history_fixture(tmp_path, "synthetic-history-repo")
+    graph_status, graph_count, _ = module.capture(
+        ["git", "-C", str(repo), "rev-list", "--all", "--count"]
+    )
+    expect_equal((graph_status, graph_count), (0, b"7\n"))
+
+    template = Path(__file__).with_name("gitleaks-report.tmpl")
+    status, rows, output, raw = module.scan(repo, template)
+    expect_equal(status, module.CLEAN_STATUS)
+    expect_equal(rows, [])
+    expect_equal(parse_report(raw), [])
+    expect_equal(summary_count(output) > 0, True)
+
+
+@pytest.mark.skipif(
+    shutil.which("docker") is None,
+    reason="pinned-image merge-resolution test requires Docker",
+)
+def test_merge_resolution_only_canary_is_detected_and_redacted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(module, "capture", PortableCapture())
+    canary = (
+        "ghp_" + hashlib.sha256(b"omniagent-merge-resolution-canary").hexdigest()[:36]
+    ).encode("ascii")
+    repo = make_merge_resolution_fixture(tmp_path, "synthetic-merge-repo", canary)
+    template = Path(__file__).with_name("gitleaks-report.tmpl")
+
+    status, rows, output, raw = module.scan(repo, template)
+    expect_equal(status, module.FINDINGS_STATUS)
+    expect_equal(len(rows), 1)
+    expect_equal(rows[0][1], "fixture.txt")
+    expect_equal(rows[0][3], 1)
+    expect_equal(canary in output, False)
+    expect_equal(canary in raw, False)
     expect_equal(canary in module.render(rows), False)
 
 
@@ -723,7 +909,7 @@ def test_contract_wrappers_preserve_only_allowlisted_nested_stages(
 @pytest.mark.parametrize(
     ("phase", "expected_stage"),
     [
-        ("commit_count", "scan_commit_count"),
+        ("repository_policy", "scan_repository_policy"),
         ("docker_create", "scan_docker_create"),
         ("docker_start", "scan_docker_start"),
         ("file_size_limit", "scan_docker_start"),
@@ -744,9 +930,11 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
     canary = "ghp_" + hashlib.sha256(b"omniagent-scan-stage-canary").hexdigest()[:36]
     private_path = str(tmp_path / "private-scan-path")
     injected = ScanError(f"{private_path}:{canary}:untrusted diagnostic")
-    monkeypatch.setattr(module, "count_commits", lambda _repo: (_ for _ in ()).throw(injected))
-    if phase != "commit_count":
-        monkeypatch.setattr(module, "count_commits", lambda _repo: 1)
+    def verify_policy(_repo: Path) -> None:
+        if phase == "repository_policy":
+            raise injected
+
+    monkeypatch.setattr(module, "verify_scan_repository", verify_policy)
 
     def capture_for_phase(
         args: list[str], timeout: int = module.TIMEOUT

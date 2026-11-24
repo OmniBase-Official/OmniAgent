@@ -48,7 +48,7 @@ StageId = Literal[
     "contract_clean_repo_setup",
     "contract_clean_scan_execution",
     "contract_clean_assertions",
-    "scan_commit_count",
+    "scan_repository_policy",
     "scan_docker_create",
     "scan_docker_start",
     "scan_docker_inspect",
@@ -65,7 +65,7 @@ ALLOWED_STAGE_IDS = frozenset(
         "contract_clean_repo_setup",
         "contract_clean_scan_execution",
         "contract_clean_assertions",
-        "scan_commit_count",
+        "scan_repository_policy",
         "scan_docker_create",
         "scan_docker_start",
         "scan_docker_inspect",
@@ -238,17 +238,12 @@ def parse_report(raw: bytes) -> list[FindingRow]:
     return rows
 
 
-def count_commits(repo: Path) -> int:
-    status, out, _ = capture(["git", "-C", str(repo), "rev-list", "--all", "--count"])
-    if status != CLEAN_STATUS or not out.endswith(b"\n"):
+def verify_scan_repository(repo: Path) -> None:
+    status, output, _ = capture(
+        ["git", "-C", str(repo), "rev-parse", "--is-shallow-repository"]
+    )
+    if status != CLEAN_STATUS or output != b"false\n":
         fail()
-    try:
-        count = int(out.decode("ascii").strip())
-    except (UnicodeError, ValueError):
-        fail()
-    if count < 1:
-        fail()
-    return count
 
 
 def summary_count(output: bytes) -> int:
@@ -322,7 +317,7 @@ def create_scan_container(
         "--report-format=template",
         "--report-template=/template.tmpl",
         "--report-path=/out/report.tsv",
-        "--log-opts=--all",
+        "--log-opts=--full-history --all --diff-filter=tuxdb --diff-merges=first-parent",
         "/repo",
     ]
     try:
@@ -360,9 +355,9 @@ def inspect_scan_container(docker_bin: str, name: str, start_status: int) -> int
         return scan_status
 
 
-def verify_scan_summary(output: bytes, expected: int) -> None:
+def verify_scan_summary(output: bytes) -> None:
     try:
-        if summary_count(output) != expected:
+        if summary_count(output) < 1:
             fail()
     except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
         fail_stage("scan_commit_summary")
@@ -423,9 +418,9 @@ def scan(
     repo: Path, template: Path, *, docker_bin: str = "docker", allow_invalid: bool = False
 ) -> tuple[int, list[tuple[str, str, str, int]], bytes, bytes]:
     try:
-        expected = count_commits(repo)
+        verify_scan_repository(repo)
     except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
-        fail_stage("scan_commit_count")
+        fail_stage("scan_repository_policy")
     name = "omni-gitleaks-" + uuid.uuid4().hex
     with tempfile.TemporaryDirectory(prefix="omni-report-") as td:
         root = Path(td)
@@ -436,7 +431,7 @@ def scan(
             start_status, stdout, stderr = start_scan_container(docker_bin, name)
             scan_status = inspect_scan_container(docker_bin, name, start_status)
             output = stdout + b"\n" + stderr
-            verify_scan_summary(output, expected)
+            verify_scan_summary(output)
             raw = copy_scan_report(report)
             rows = parse_scan_report(raw, scan_status, allow_invalid)
             if rows is None:
@@ -479,7 +474,6 @@ def make_repo(root: Path, name: str, content: bytes) -> Path:
 
 
 def assert_clean_scan(
-    clean: Path,
     status: int,
     rows: list[FindingRow],
     output: bytes,
@@ -489,7 +483,7 @@ def assert_clean_scan(
         status != CLEAN_STATUS
         or rows
         or parse_report(raw)
-        or summary_count(output) != count_commits(clean)
+        or summary_count(output) < 1
         or b"finding" in output.lower()
         or b"secret" in output.lower()
     ):
@@ -512,7 +506,7 @@ def contract_clean_scan(root: Path, template: Path) -> None:
         fail_stage("contract_clean_scan_execution")
 
     try:
-        assert_clean_scan(clean, status, rows, output, raw)
+        assert_clean_scan(status, rows, output, raw)
     except StageError as error:
         preserve_or_fallback(error, "contract_clean_assertions")
     except Exception:  # noqa: BLE001 - map every phase failure to a fixed, non-sensitive stage ID.
