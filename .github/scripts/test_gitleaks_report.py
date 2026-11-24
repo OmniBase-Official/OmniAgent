@@ -151,6 +151,7 @@ def expect_equal(actual: object, expected: object) -> None:
 def make_history_fixture(root: Path, name: str) -> Path:
     repo = root / name
     repo.mkdir()
+    (repo / ".gitleaksignore").write_bytes(b"")
 
     def git(*args: str) -> bytes:
         status, output, _ = module.capture(["git", "-C", str(repo), *args])
@@ -195,6 +196,7 @@ def make_history_fixture(root: Path, name: str) -> Path:
 def make_merge_resolution_fixture(root: Path, name: str, canary: bytes) -> Path:
     repo = root / name
     repo.mkdir()
+    (repo / ".gitleaksignore").write_bytes(b"")
 
     def git(*args: str) -> bytes:
         status, output, _ = module.capture(["git", "-C", str(repo), *args])
@@ -247,6 +249,23 @@ def make_merge_resolution_fixture(root: Path, name: str, canary: bytes) -> Path:
     if status != 0 or canary not in merge_file:
         raise AssertionError("synthetic canary must exist only in the merge result")
     return repo
+
+
+def test_gitleaksignore_contains_only_approved_fixture_locations() -> None:
+    expected = {
+        "3576aebaf297c5e956ac9d9f0b80eb50a9af44af:tests/test_publish_dataset.py:generic-api-key:194",
+        "3576aebaf297c5e956ac9d9f0b80eb50a9af44af:tests/test_publish_dataset.py:generic-api-key:200",
+        "3576aebaf297c5e956ac9d9f0b80eb50a9af44af:tests/test_publish_dataset.py:generic-api-key:202",
+        "3576aebaf297c5e956ac9d9f0b80eb50a9af44af:tests/test_validate_dataset.py:generic-api-key:126",
+        "3576aebaf297c5e956ac9d9f0b80eb50a9af44af:tests/test_validate_dataset.py:generic-api-key:148",
+        "3576aebaf297c5e956ac9d9f0b80eb50a9af44af:tests/test_validate_dataset.py:generic-api-key:161",
+        "3576aebaf297c5e956ac9d9f0b80eb50a9af44af:tests/test_validate_dataset.py:generic-api-key:188",
+        "8ebc04a8f548817e75834bb864659b357872a140:tests/test_validate_dataset.py:generic-api-key:168",
+        "8ebc04a8f548817e75834bb864659b357872a140:tests/test_validate_dataset.py:generic-api-key:178",
+    }
+    allowlist = Path(__file__).resolve().parents[2] / ".gitleaksignore"
+    actual = set(allowlist.read_text(encoding="ascii").splitlines())
+    expect_equal(actual, expected)
 
 
 def test_ascii_unicode_quote_round_trip() -> None:
@@ -413,6 +432,7 @@ def test_scan_container_sets_exact_report_file_size_limit(
         "--log-opts=--full-history --all --diff-filter=tuxdb --diff-merges=first-parent" in args,
         True,
     )
+    expect_equal("--gitleaks-ignore-path=/repo/.gitleaksignore" in args, True)
 
 
 def test_scan_container_passes_available_report_directory_owner(
@@ -680,6 +700,58 @@ def test_merge_resolution_only_canary_is_detected_and_redacted(
     expect_equal(canary in output, False)
     expect_equal(canary in raw, False)
     expect_equal(canary in module.render(rows), False)
+
+
+@pytest.mark.skipif(
+    shutil.which("docker") is None,
+    reason="pinned-image exact ignore integration requires Docker",
+)
+def test_gitleaksignore_suppresses_only_exact_commit_path_rule_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(module, "capture", PortableCapture())
+    first = hashlib.sha256(b"synthetic generic key first line").hexdigest()
+    second = hashlib.sha256(b"synthetic generic key second line").hexdigest()
+    content = f'api_key = "{first}"\napi_key = "{second}"\n'.encode("ascii")
+    repo = module.make_repo(tmp_path, "synthetic-ignore-repo", content)
+    status, commit_bytes, _ = module.capture(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"]
+    )
+    expect_equal(status, 0)
+    commit = commit_bytes.strip().decode("ascii")
+    ignore_file = repo / ".gitleaksignore"
+    template = Path(__file__).with_name("gitleaks-report.tmpl")
+
+    def scan_with(identifier: str) -> list[tuple[str, str, str, int]]:
+        ignore_file.write_text(identifier + "\n", encoding="ascii", newline="")
+        scan_status, rows, output, raw_report = module.scan(repo, template)
+        expect_equal(scan_status, module.FINDINGS_STATUS)
+        expect_equal(summary_count(output), 1)
+        for value in (first.encode("ascii"), second.encode("ascii")):
+            expect_equal(value in output, False)
+            expect_equal(value in raw_report, False)
+        return sorted(rows)
+
+    exact = f"{commit}:fixture.txt:generic-api-key:1"
+    expect_equal(
+        scan_with(exact),
+        [("generic-api-key", "fixture.txt", commit, 2)],
+    )
+    expect_equal(
+        scan_with(f"{commit}:fixture.txt:generic-api-key:3"),
+        [
+            ("generic-api-key", "fixture.txt", commit, 1),
+            ("generic-api-key", "fixture.txt", commit, 2),
+        ],
+    )
+    other_commit = ("0" if commit[0] != "0" else "1") + commit[1:]
+    expect_equal(
+        scan_with(f"{other_commit}:fixture.txt:generic-api-key:1"),
+        [
+            ("generic-api-key", "fixture.txt", commit, 1),
+            ("generic-api-key", "fixture.txt", commit, 2),
+        ],
+    )
 
 
 def test_cli_clean_and_finding_exit_behavior_and_safe_output() -> None:

@@ -317,6 +317,7 @@ def create_scan_container(
         "--report-format=template",
         "--report-template=/template.tmpl",
         "--report-path=/out/report.tsv",
+        "--gitleaks-ignore-path=/repo/.gitleaksignore",
         "--log-opts=--full-history --all --diff-filter=tuxdb --diff-merges=first-parent",
         "/repo",
     ]
@@ -453,6 +454,7 @@ def validate_report(path: Path) -> bytes:
 def make_repo(root: Path, name: str, content: bytes) -> Path:
     repo = root / name
     repo.mkdir()
+    (repo / ".gitleaksignore").write_bytes(b"")
     commands = [
         ["git", "init", "-q", str(repo)],
         ["git", "-C", str(repo), "config", "user.email", "fixture@example.invalid"],
