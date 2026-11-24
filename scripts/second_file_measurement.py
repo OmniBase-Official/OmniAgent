@@ -51,6 +51,12 @@ def answer_numbers(answer: str) -> list[str]:
     return [n.replace(",", "").strip() for n in _NUMBER.findall(answer) if n.replace(",", "")]
 
 
+def clean_git_env() -> dict[str, str]:
+    """The environment without ``GIT_*``: a pre-push hook sets ``GIT_DIR``, which would
+    make ``git -C <tree>`` read, or a test write, the *hooked* repository instead."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def lines_in_commit(tree: Path, relative: str) -> int:
     """True line count of ``relative`` at the tree's HEAD, from git, not from the model."""
     done = subprocess.run(  # noqa: S603 - fixed argv, no shell
@@ -58,6 +64,7 @@ def lines_in_commit(tree: Path, relative: str) -> int:
         capture_output=True,
         check=True,
         timeout=15,
+        env=clean_git_env(),
     )
     return len(done.stdout.decode("utf-8").splitlines())
 

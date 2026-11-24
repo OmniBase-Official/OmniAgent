@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from second_file_measurement import (
     answer_numbers,
     arm_order,
+    clean_git_env,
     expectations,
     first_input,
     reached_oversize,
@@ -66,10 +67,10 @@ def _repo(path: Path, content: str) -> Path:
         ["config", "user.email", "t@example.com"],
         ["config", "user.name", "t"],
     ):
-        subprocess.run(["git", "-C", str(path), *args], check=True)  # noqa: S603, S607
+        subprocess.run(["git", "-C", str(path), *args], check=True, env=clean_git_env())  # noqa: S603, S607
     (path / "a.py").write_text(content, encoding="utf-8")
-    subprocess.run(["git", "-C", str(path), "add", "a.py"], check=True)  # noqa: S603, S607
-    subprocess.run(["git", "-C", str(path), "commit", "-qm", "x"], check=True)  # noqa: S603, S607
+    subprocess.run(["git", "-C", str(path), "add", "a.py"], check=True, env=clean_git_env())  # noqa: S603, S607
+    subprocess.run(["git", "-C", str(path), "commit", "-qm", "x"], check=True, env=clean_git_env())  # noqa: S603, S607
     return path
 
 
@@ -85,3 +86,22 @@ def test_expectation_comes_from_git_and_a_file_that_differs_is_refused(tmp_path:
     other = _repo(tmp_path / "d", "one\ntwo\n")
     with pytest.raises(SystemExit, match="3 lines at the parent and 2 at the child"):
         expectations(parent, other, ["a.py"])
+
+
+def test_a_hooked_environment_does_not_redirect_git_to_another_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-push hook exports GIT_DIR. The first version of these tests ran ``git init``
+    and ``git config`` under it and rewrote the hooked repository's own config
+    (``core.bare = true``), which broke ``git status`` in every worktree. With GIT_DIR
+    pointing at a decoy, the helper must still read the tree it was given."""
+    tree = _repo(tmp_path / "tree", "one\ntwo\n")
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    subprocess.run(["git", "-C", str(decoy), "init", "-q"], check=True, env=clean_git_env())  # noqa: S603, S607
+    before = (decoy / ".git" / "config").read_text(encoding="utf-8")
+
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    assert "GIT_DIR" not in clean_git_env()
+    assert expectations(tree, tree, ["a.py"]) == {"a.py": "2"}
+    assert (decoy / ".git" / "config").read_text(encoding="utf-8") == before
