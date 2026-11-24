@@ -1,5 +1,6 @@
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -15,8 +16,10 @@ from gitleaks_report import (
     contract_canary_scan,
     contract_clean_scan,
     contract_mutant_scan,
+    copy_scan_report,
     docker_cp,
     fail_stage,
+    make_repo,
     parse_report,
     render,
     report_error,
@@ -62,6 +65,29 @@ def test_rejects_total_row_and_row_count_boundaries() -> None:
         parse_report(b'R\t"' + b"x" * 16_384 + b'"\t' + HASH.encode() + b"\t1\n")
     with pytest.raises(ScanError):
         parse_report(ROW * 20_001)
+
+
+def test_scan_report_read_rejects_non_regular_and_over_limit_files(tmp_path: Path) -> None:
+    directory = tmp_path / "directory-report"
+    directory.mkdir()
+    with pytest.raises(ScanError):
+        copy_scan_report(directory)
+
+    oversized = tmp_path / "oversized-report"
+    with oversized.open("wb") as stream:
+        stream.truncate(MAX_REPORT + 1)
+    with pytest.raises(ScanError):
+        copy_scan_report(oversized)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlink no-follow check is POSIX-specific")
+def test_scan_report_read_rejects_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "target-report"
+    target.write_bytes(b"")
+    link = tmp_path / "linked-report"
+    link.symlink_to(target)
+    with pytest.raises(ScanError):
+        copy_scan_report(link)
 
 
 @pytest.mark.parametrize(
@@ -115,6 +141,65 @@ def test_status_rows_consistency() -> None:
     expect_equal(scanner_status_consistent(2, [row]), True)
     expect_equal(scanner_status_consistent(0, [row]), False)
     expect_equal(scanner_status_consistent(2, []), False)
+
+
+def test_scan_container_sets_exact_report_file_size_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[list[str]] = []
+
+    def capture_args(args: list[str], timeout: int = module.TIMEOUT) -> tuple[int, bytes, bytes]:
+        del timeout
+        captured.append(args)
+        return 0, b"", b""
+
+    monkeypatch.setattr(module, "capture", capture_args)
+    module.create_scan_container(
+        tmp_path, tmp_path / "template", tmp_path / "report", "scan", "docker"
+    )
+    args = captured[0]
+    limit_index = args.index("--ulimit")
+    expect_equal(args[limit_index + 1], f"fsize={MAX_REPORT}:{MAX_REPORT}")
+
+
+@pytest.mark.skipif(
+    shutil.which("docker") is None,
+    reason="pinned-image integration requires Docker",
+)
+def test_scan_report_survives_container_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def portable_capture(
+        args: list[str], timeout: int = module.TIMEOUT
+    ) -> tuple[int, bytes, bytes]:
+        if args[1] == "create":
+            args = [*args[:2], "--env=NO_COLOR=1", *args[2:]]
+        result = subprocess.run(  # noqa: S603 - controlled argv, synthetic fixture, shell=False.
+            args,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+        if len(result.stdout) > module.MAX_CAPTURE or len(result.stderr) > module.MAX_CAPTURE:
+            raise ScanError("synthetic integration output exceeded cap")
+        return result.returncode, result.stdout, result.stderr
+
+    monkeypatch.setattr(module, "capture", portable_capture)
+    canary = (
+        "ghp_" + hashlib.sha256(b"omniagent-report-persistence-test").hexdigest()[:36]
+    ).encode("ascii")
+    repo = make_repo(tmp_path, "synthetic-canary-repo", b"token=" + canary + b"\n")
+    template = Path(__file__).with_name("gitleaks-report.tmpl")
+    status, rows, output, raw = module.scan(repo, template)
+    expect_equal(status, module.FINDINGS_STATUS)
+    expect_equal(len(rows), 1)
+    expect_equal(summary_count(output), 1)
+    expect_equal(parse_report(raw), rows)
+    expect_equal(len(raw) > 0, True)
+    expect_equal(canary in raw, False)
+    expect_equal(canary in output, False)
+    expect_equal(canary in module.render(rows), False)
 
 
 def test_cli_clean_and_finding_exit_behavior_and_safe_output() -> None:
@@ -328,6 +413,7 @@ def test_contract_wrappers_preserve_only_allowlisted_nested_stages(
         ("commit_count", "scan_commit_count"),
         ("docker_create", "scan_docker_create"),
         ("docker_start", "scan_docker_start"),
+        ("file_size_limit", "scan_docker_start"),
         ("docker_inspect", "scan_docker_inspect"),
         ("summary", "scan_commit_summary"),
         ("report_copy", "scan_report_copy"),
@@ -360,6 +446,8 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
         if args[1] == "start":
             if phase == "docker_start":
                 raise injected
+            if phase == "file_size_limit":
+                return 153, b"", b""
             if phase == "summary":
                 return 0, b"missing summary", b""
             return 0, b"12:51AM INF 1 commits scanned\n", b""
@@ -373,21 +461,19 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
             return 0, b"", b""
         raise AssertionError("unexpected synthetic command")
 
-    def copy_for_phase(*args: object) -> None:
-        if phase == "report_copy":
-            raise injected
-        destination = args[2]
-        if not isinstance(destination, Path):
-            raise TypeError("synthetic report destination must be a path")
-        destination.write_bytes(b"")
-
     def parse_for_phase(_raw: bytes) -> list[tuple[str, str, str, int]]:
         if phase == "report_parse":
             raise injected
         return []
 
     monkeypatch.setattr(module, "capture", capture_for_phase)
-    monkeypatch.setattr(module, "docker_cp", copy_for_phase)
+    def copy_for_phase(report: Path) -> bytes:
+        if phase == "report_copy":
+            module.fail_stage("scan_report_copy")
+        report.write_bytes(b"")
+        return b""
+
+    monkeypatch.setattr(module, "copy_scan_report", copy_for_phase)
     monkeypatch.setattr(module, "parse_report", parse_for_phase)
     with pytest.raises(StageError) as caught:
         module.scan(tmp_path, tmp_path / "template")

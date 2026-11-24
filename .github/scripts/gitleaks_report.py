@@ -3,7 +3,9 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -263,7 +265,9 @@ def scanner_status_consistent(status: int, rows: list[tuple[str, str, str, int]]
     return (status == CLEAN_STATUS and not rows) or (status == FINDINGS_STATUS and bool(rows))
 
 
-def create_scan_container(repo: Path, template: Path, name: str, docker_bin: str) -> None:
+def create_scan_container(
+    repo: Path, template: Path, report_dir: Path, name: str, docker_bin: str
+) -> None:
     args = [
         docker_bin,
         "create",
@@ -276,7 +280,10 @@ def create_scan_container(repo: Path, template: Path, name: str, docker_bin: str
         "--memory=512m",
         "--cpus=1",
         "--pids-limit=64",
-        "--tmpfs=/out:rw,noexec,nosuid,size=8388608",
+        "--ulimit",
+        f"fsize={MAX_REPORT}:{MAX_REPORT}",
+        "--volume",
+        f"{report_dir.resolve()}:/out:rw",
         "--volume",
         f"{repo.resolve()}:/repo:ro",
         "--volume",
@@ -335,10 +342,26 @@ def verify_scan_summary(output: bytes, expected: int) -> None:
         fail_stage("scan_commit_summary")
 
 
-def copy_scan_report(name: str, report: Path, docker_bin: str) -> bytes:
+def copy_scan_report(report: Path) -> bytes:
     try:
-        docker_cp(name, "/out/report.tsv", report, docker_bin)
-        return report.read_bytes()
+        info = report.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_REPORT:
+            fail()
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(report, flags)
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_size > MAX_REPORT:
+                fail()
+            with os.fdopen(fd, "rb", closefd=False) as source:
+                raw = source.read(MAX_REPORT + 1)
+            if len(raw) > MAX_REPORT:
+                fail()
+            return raw
+        finally:
+            os.close(fd)
     except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
         fail_stage("scan_report_copy")
 
@@ -382,13 +405,13 @@ def scan(
         root = Path(td)
         root.chmod(0o700)
         report = root / "report.tsv"
-        create_scan_container(repo, template, name, docker_bin)
+        create_scan_container(repo, template, root, name, docker_bin)
         try:
             start_status, stdout, stderr = start_scan_container(docker_bin, name)
             scan_status = inspect_scan_container(docker_bin, name, start_status)
             output = stdout + b"\n" + stderr
             verify_scan_summary(output, expected)
-            raw = copy_scan_report(name, report, docker_bin)
+            raw = copy_scan_report(report)
             rows = parse_scan_report(raw, scan_status, allow_invalid)
             if rows is None:
                 return scan_status, [], stdout + stderr, raw
