@@ -1,8 +1,10 @@
 import hashlib
 import os
 import shutil
+import stat
 import subprocess
 import sys
+from enum import Enum
 from pathlib import Path
 
 import gitleaks_report as module
@@ -41,44 +43,103 @@ def capture_limit_diagnostic(stdout: bytes, stderr: bytes, limit: int) -> str:
     )
 
 
+class StartFailureCategory(str, Enum):
+    PERMISSION_DENIED = "permission_denied"
+    DUBIOUS_OWNERSHIP = "dubious_ownership"
+    FILE_SIZE_LIMIT = "file_size_limit"
+    OTHER = "other"
+
+
+def classify_start_stderr(stderr: bytes) -> StartFailureCategory:
+    diagnostic = stderr.lower()
+    if b"permission denied" in diagnostic or b"operation not permitted" in diagnostic:
+        return StartFailureCategory.PERMISSION_DENIED
+    if b"dubious ownership" in diagnostic or b"safe.directory" in diagnostic:
+        return StartFailureCategory.DUBIOUS_OWNERSHIP
+    if (
+        b"file too large" in diagnostic
+        or b"file size limit" in diagnostic
+        or b"sigxfsz" in diagnostic
+    ):
+        return StartFailureCategory.FILE_SIZE_LIMIT
+    return StartFailureCategory.OTHER
+
+
+def report_directory_metadata(report_dir: Path | None) -> str:
+    if report_dir is None or os.name != "posix":
+        return ""
+    try:
+        info = report_dir.lstat()
+    except OSError:
+        return ""
+    if not stat.S_ISDIR(info.st_mode):
+        return ""
+    return (
+        f" report_uid={info.st_uid} report_gid={info.st_gid}"
+        f" report_mode_octal={stat.S_IMODE(info.st_mode):04o}"
+    )
+
+
 def start_status_diagnostic(
-    exit_code: int, stdout: bytes, stderr: bytes, limit: int
+    exit_code: int,
+    stdout: bytes,
+    stderr: bytes,
+    limit: int,
+    report_dir: Path | None = None,
 ) -> str:
     return (
         "security scan failed stage=scan_docker_start "
-        f"exit_code={exit_code} stdout_bytes={len(stdout)} "
-        f"stderr_bytes={len(stderr)} limit={limit}"
+        f"category={classify_start_stderr(stderr).value} exit_code={exit_code} "
+        f"stdout_bytes={len(stdout)} stderr_bytes={len(stderr)} limit={limit}"
+        f"{report_directory_metadata(report_dir)}"
     )
 
 
-def portable_capture(
-    args: list[str], timeout: int = module.TIMEOUT
-) -> tuple[int, bytes, bytes]:
-    if args[1] == "create":
-        args = [*args[:2], "--env=NO_COLOR=1", *args[2:]]
-    result = subprocess.run(  # noqa: S603 - controlled argv, synthetic fixture, shell=False.
-        args,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        timeout=timeout,
-        check=False,
-    )
-    if args[1] == "start" and result.returncode not in (
-        module.CLEAN_STATUS,
-        module.FINDINGS_STATUS,
-    ):
-        pytest.fail(
-            start_status_diagnostic(
-                result.returncode, result.stdout, result.stderr, module.MAX_CAPTURE
-            ),
-            pytrace=False,
+class PortableCapture:
+    def __init__(self) -> None:
+        self.report_dir: Path | None = None
+
+    def __call__(
+        self, args: list[str], timeout: int = module.TIMEOUT
+    ) -> tuple[int, bytes, bytes]:
+        if args[1] == "create":
+            args = [*args[:2], "--env=NO_COLOR=1", *args[2:]]
+            self.report_dir = report_dir_from_create_args(args)
+        result = subprocess.run(  # noqa: S603 - controlled argv, synthetic fixture, shell=False.
+            args,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
         )
-    if len(result.stdout) > module.MAX_CAPTURE or len(result.stderr) > module.MAX_CAPTURE:
-        pytest.fail(
-            capture_limit_diagnostic(result.stdout, result.stderr, module.MAX_CAPTURE),
-            pytrace=False,
-        )
-    return result.returncode, result.stdout, result.stderr
+        if args[1] == "start" and result.returncode not in (
+            module.CLEAN_STATUS,
+            module.FINDINGS_STATUS,
+        ):
+            pytest.fail(
+                start_status_diagnostic(
+                    result.returncode,
+                    result.stdout,
+                    result.stderr,
+                    module.MAX_CAPTURE,
+                    self.report_dir,
+                ),
+                pytrace=False,
+            )
+        if len(result.stdout) > module.MAX_CAPTURE or len(result.stderr) > module.MAX_CAPTURE:
+            pytest.fail(
+                capture_limit_diagnostic(result.stdout, result.stderr, module.MAX_CAPTURE),
+                pytrace=False,
+            )
+        return result.returncode, result.stdout, result.stderr
+
+
+def report_dir_from_create_args(args: list[str]) -> Path | None:
+    mount_suffix = ":/out:rw"
+    for index, arg in enumerate(args[:-1]):
+        if arg == "--volume" and args[index + 1].endswith(mount_suffix):
+            return Path(args[index + 1][: -len(mount_suffix)])
+    return None
 
 
 def expect_equal(actual: object, expected: object) -> None:
@@ -236,7 +297,7 @@ def test_portable_capture_enforces_cap_with_numeric_only_diagnostic(
     monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: result)
 
     with pytest.raises(pytest.fail.Exception) as caught:
-        portable_capture(argv)
+        PortableCapture()(argv)
 
     diagnostic = str(caught.value)
     expect_equal(
@@ -250,27 +311,81 @@ def test_portable_capture_enforces_cap_with_numeric_only_diagnostic(
     expect_equal(stdout.decode("ascii") in diagnostic, False)
 
 
+@pytest.mark.parametrize(
+    ("stderr", "expected_category"),
+    [
+        (
+            b"permission denied private/path ghp_synthetic_permission_canary",
+            StartFailureCategory.PERMISSION_DENIED,
+        ),
+        (
+            b"detected dubious ownership private/path ghp_synthetic_owner_canary",
+            StartFailureCategory.DUBIOUS_OWNERSHIP,
+        ),
+        (
+            b"File too large private/path ghp_synthetic_limit_canary",
+            StartFailureCategory.FILE_SIZE_LIMIT,
+        ),
+        (b"unknown private/path ghp_synthetic_other_canary", StartFailureCategory.OTHER),
+    ],
+)
+def test_start_stderr_classification_is_allowlisted_and_sanitized(
+    stderr: bytes, expected_category: StartFailureCategory
+) -> None:
+    diagnostic = start_status_diagnostic(153, b"", stderr, MAX_CAPTURE)
+    expect_equal(classify_start_stderr(stderr), expected_category)
+    expect_equal(f"category={expected_category.value}" in diagnostic, True)
+    expect_equal("153" in diagnostic, True)
+    expect_equal(str(len(stderr)) in diagnostic, True)
+    expect_equal(stderr.decode("ascii") in diagnostic, False)
+    expect_equal("private/path" in diagnostic, False)
+    expect_equal("ghp_synthetic" in diagnostic, False)
+
+
 def test_start_status_diagnostic_contains_only_safe_numeric_metadata(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     canary = b"ghp_synthetic_start_status_canary"
     secret_content = b"private/path token=" + canary
     args = ["docker", "start", "--attach", "synthetic-container"]
     result = subprocess.CompletedProcess(
-        args, 153, stdout=secret_content, stderr=secret_content
+        args, 153, stdout=b"", stderr=secret_content
     )
-    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: result)
+
+    def run_fake(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        if command[1] == "create":
+            return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+        return result
+
+    monkeypatch.setattr(subprocess, "run", run_fake)
+    capture = PortableCapture()
+    if os.name == "posix":
+        tmp_path.chmod(0o700)
+    capture(
+        [
+            "docker",
+            "create",
+            "--volume",
+            f"{tmp_path.resolve()}:/out:rw",
+            "synthetic-image",
+        ]
+    )
     with pytest.raises(pytest.fail.Exception) as caught:
-        portable_capture(args)
+        capture(args)
     diagnostic = str(caught.value)
     expect_equal(
         diagnostic,
-        start_status_diagnostic(153, secret_content, secret_content, MAX_CAPTURE),
+        start_status_diagnostic(153, b"", secret_content, MAX_CAPTURE, tmp_path),
     )
     expect_equal(canary.decode("ascii") in diagnostic, False)
     expect_equal("private/path" in diagnostic, False)
     expect_equal("synthetic-container" in diagnostic, False)
     expect_equal(secret_content.decode("ascii") in diagnostic, False)
+    if os.name == "posix":
+        info = tmp_path.lstat()
+        expect_equal(f"report_uid={info.st_uid}" in diagnostic, True)
+        expect_equal(f"report_gid={info.st_gid}" in diagnostic, True)
+        expect_equal(f"report_mode_octal={stat.S_IMODE(info.st_mode):04o}" in diagnostic, True)
 
 
 @pytest.mark.skipif(
@@ -280,7 +395,7 @@ def test_start_status_diagnostic_contains_only_safe_numeric_metadata(
 def test_scan_report_survives_container_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(module, "capture", portable_capture)
+    monkeypatch.setattr(module, "capture", PortableCapture())
     canary = (
         "ghp_" + hashlib.sha256(b"omniagent-report-persistence-test").hexdigest()[:36]
     ).encode("ascii")
