@@ -387,3 +387,15 @@ Each row names its evidence. Evidence labels: MEASURED = the PM ran it; RECORDED
 - **Not re-run by the PM:** SAE findings 2 to 4 (deterministic route, default allowlist, "model calls it on line-count questions" unverified) were read as claims, not re-measured; brief 32 checks M1 to M3 under mutation; prompt injection through a label; CI.
 
 **Decision for the owner (pending):** A) approve as written, PM applies the two replacements with an amendment record, Low stays open; B) SE closes the RecursionError Low first (one catch, one test mutation-checked), then PM applies the text (SAE 01's pick); C) decline, SE removes the tool.
+
+# C-SAE-02 (brief 42) done, PM verification, 2026-11-25 (PM 02)
+
+**Report (SAE 01, REPORTED):** `sae/agents-claude-md-review-20261125` @ `37b2034`, one new file `docs/pm/proposed-agents-claude-md-2026-11-25.md` (310 lines): the final text of the proposed tracked `AGENTS.md` and `CLAUDE.md`, then findings F1 to F9 and owner decisions A to H. No `AGENTS.md` or `CLAUDE.md` created in any tree; nothing pushed to `main` or integration. Gates reported green (1,330 passed, 2 skipped).
+
+**PM checks (MEASURED 2026-11-25; I did NOT re-run the gates, the branch adds one doc; I did not open the root rule files, only sizes and ignore status):**
+- `git ls-remote`: `origin` and `organization` both `37b20340bb8dee33bd1eba30fff04b3f3a0bdbfe`; integration still `3b4bcd6`; author `mntoyg` noreply; one file, 310 insertions.
+- Leak scan of the pushed document (owner's email, `OMNIAGENT_SKIP_REVIEW`, token patterns): 0 matches.
+- **F1 (Medium, order hazard) confirmed in its facts:** main checkout root `AGENTS.md` 26,975 bytes, `CLAUDE.md` 26,522, `CODEX.md` 16,183 (and `CURSOR.md` 9,237), all untracked and ignored; `.git/info/exclude` holds `/AGENTS.md`, `/CLAUDE.md`, `/CODEX.md` (lines 58 to 69) and `/CURSOR.md` (line 70); the integration tip's `.gitignore` names none of them (MEASURED by `git show 3b4bcd6:.gitignore | grep`); the hook directory's three files name none of them (grep, no match). So removing the exclude lines before overwriting the files would let `git add -A` stage the private rules. SAE 01's counts agree; SAE 01 missed `CURSOR.md` (a fourth private file, same hazard).
+- **Not checked by the PM:** the drafts' claim-by-claim table (F3, F4), whether Codex reads `AGENTS.md`, whether Claude Code imports `@AGENTS.md`, the remotes' rulesets, CI beyond `main`.
+
+**Decisions for the owner (pending, after brief 40):** A track as written after the F1 order; B track after the owner edits Part 1; C do not track; D show the remotes' rulesets; E owner edits his own files and PM amends ruling 3; F SE builds the F1 test first, then track (SAE 01's pick); G code-style section; H one line in `graph-runtime-engineering-rules.md`. PM addition: the F1 order must also cover `CURSOR.md`.
