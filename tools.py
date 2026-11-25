@@ -18,6 +18,7 @@ import itertools
 import logging
 import math
 import operator
+import re
 import tomllib
 from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
@@ -585,6 +586,51 @@ def _iter_search_files(start: Path, workspace: Workspace) -> Iterator[Path]:
             yield candidate
 
 
+#: Brief 39. A model that has never seen the file's line count invents arguments
+#: after the path ("observability.py 1", "-1 -1"). The path as given does not
+#: exist, so the lookup fails with "no such file" and the next-call text of brief 34
+#: is never reached. Behaviour stays strict; only the error text learns to say what
+#: the path probably was. Integers are ASCII digits with an optional leading "-",
+#: separated by a space or tab, one or two of them, at the very end.
+_STRAY_ARGS = re.compile(r"(.+?)((?:[ \t]+-?[0-9]+){1,2})")
+_NO_SUCH_FILE = "no such file: "
+_HINT_MAX_CHARS = 200
+
+
+def _error_with_hint(
+    workspace: Workspace,
+    given: str,
+    error: SandboxError,
+    tool: str,
+    probe: Callable[[str], object],
+) -> str:
+    """The tool's error, plus a "did you mean" when trailing numbers are the cause.
+
+    Said only when the direct lookup failed as "no such file" and the path with
+    its numeric tail removed passes ``probe``, the very call the tool would make
+    on it. Every other case returns "", so the message is byte-identical to the
+    one a nonexistent candidate gets: a hint for a sealed, denied, hidden,
+    oversized or outside path would confirm that it exists.
+    """
+    plain = f"Error: {error}"
+    if not str(error).startswith(_NO_SUCH_FILE) or len(given) > _HINT_MAX_CHARS:
+        return plain
+    found = _STRAY_ARGS.fullmatch(given.strip())
+    if not found:
+        return plain
+    try:
+        probe(found[1])
+        shown = workspace.display(workspace.resolve(found[1]))
+    except (SandboxError, OSError, RuntimeError, ValueError):
+        return plain
+    if len(shown) > _HINT_MAX_CHARS or not shown.isprintable():
+        return plain
+    return (
+        f"{plain}. Did you mean {shown}? Call {tool} again with the path only "
+        f"(Action Input: {shown}), no line numbers."
+    )
+
+
 def read_file(
     path: str, start_line: int | None = None, end_line: int | None = None
 ) -> str:
@@ -609,7 +655,7 @@ def read_file(
     try:
         text = workspace.read_text(path)
     except SandboxError as exc:
-        return f"Error: {exc}"
+        return _error_with_hint(workspace, path, exc, "read_file", workspace.read_text)
     except OSError as exc:
         return f"Error: could not read {path!r}: {exc.strerror or exc}"
 
@@ -1200,7 +1246,7 @@ def file_info(path: str) -> str:
     try:
         facts = workspace.describe(path)
     except SandboxError as exc:
-        return f"Error: {exc}"
+        return _error_with_hint(workspace, path, exc, "file_info", workspace.describe)
     except OSError as exc:
         return f"Error: could not inspect {path!r}: {exc.strerror or exc}"
 
