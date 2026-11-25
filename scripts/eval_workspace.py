@@ -56,6 +56,7 @@ LISTING_ONLY: tuple[str, ...] = ("data",)
 ANSWER_KEY: tuple[str, ...] = (
     "docs",
     "models",
+    "NEXT_CHAT.md",
     # A build artifact holding a copy of README.md, which documents the log
     # event the 'budget' question is scored against. Found by measurement, not
     # by reading the tree: a sealed search still returned two matches from it.
