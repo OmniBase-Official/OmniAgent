@@ -655,6 +655,7 @@ def inspect_config_precedence(path: str) -> str:
         return f"Error: {workspace.display(admitted)} is too large to inspect completely."
     try:
         report = _extract_config_precedence(source)
-    except (TypeError, ValueError) as exc:
-        return f"Error: cannot inspect config precedence in {workspace.display(admitted)}: {exc}."
+    except (TypeError, ValueError, RecursionError) as exc:
+        cause = exc if isinstance(exc, TypeError | ValueError) else "nesting is too deep to inspect"
+        return f"Error: cannot inspect config precedence in {workspace.display(admitted)}: {cause}."
     return f"{workspace.display(admitted)}:\n{report}"

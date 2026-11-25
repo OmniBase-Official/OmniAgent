@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 import os
+import traceback
 from collections.abc import Iterator
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
 
+import config_inspection
 from agent import AgentConfig, ReActAgent
 from sandbox import Workspace, get_workspace, set_workspace
 from tests.fakes import FakeOpenAI
@@ -593,3 +595,89 @@ def test_config_precedence_rejects_unrelated_raise_before_initialization(
     )
 
     assert inspect_config_precedence("config.py").startswith("Error:")
+
+
+def _deepened(statement: str) -> str:
+    """The resolver with ``statement`` inserted where an unrelated line could sit."""
+    source = RESOLVER_SOURCE.replace("    merged = {}\n", statement + "    merged = {}\n")
+    return "# canary-9f3a\n" + source
+
+
+def _terms(count: int) -> str:
+    return "+".join(["1"] * count)
+
+
+#: shape -> (statement, the call that overflows on it). Sizes keep the file under the
+#: 16,000-character read cap, so each one is a file the tool really reads.
+DEEP_SHAPES = {
+    "plus-chain": (f"    x = {_terms(7000)}\n", "parse"),
+    "attribute-chain": ("    a." + ".".join(["b"] * 4000) + "\n", "parse"),
+    "subscript-chain": ("    x = a" + "[0]" * 4000 + "\n", "parse"),
+    "deep-layer-value": (f"    layers.append(('deep', {_terms(7000)}))\n", "parse"),
+    "attribute-chain-call": ("    a." + ".".join(["b"] * 1000) + "()\n", "_validate_static_calls"),
+    "deep-test-else-raise": (
+        f"    if {_terms(1000)}:\n        pass\n    else:\n        raise ValueError('x')\n",
+        "_is_profile_abort",
+    ),
+    "not-chain-else-raise": (
+        "    if " + "not " * 1000 + "x:\n        pass\n    else:\n        raise ValueError('x')\n",
+        "_is_profile_abort",
+    ),
+}
+DEEP = pytest.mark.parametrize("shape", list(DEEP_SHAPES))
+TOO_DEEP = "Error: cannot inspect config precedence in deep.py: nesting is too deep to inspect."
+
+
+@DEEP
+def test_each_deep_shape_overflows_the_recursion_limit_at_its_own_call(shape: str) -> None:
+    """Without this, the refusals below could pass because nothing ever overflowed."""
+    statement, site = DEEP_SHAPES[shape]
+    source = _deepened(statement)
+
+    with pytest.raises(RecursionError) as caught:
+        config_inspection._extract_config_precedence(source)
+
+    assert len(source) < 16_000
+    assert site in [frame.name for frame in traceback.extract_tb(caught.value.__traceback__)]
+
+
+@DEEP
+def test_a_source_nested_too_deeply_is_refused_not_crashed(
+    config_workspace: Workspace, tmp_path: Path, shape: str
+) -> None:
+    (config_workspace.root / "deep.py").write_text(
+        _deepened(DEEP_SHAPES[shape][0]), encoding="utf-8"
+    )
+    telemetry_key = tmp_path / "capture"
+    reset_capture()
+    configure_memory_sink(telemetry_key, level=logging.INFO)
+    try:
+        dispatched = run_tool("inspect_config_precedence", "deep.py")
+        events = [record["event"] for record in read_lines(telemetry_key)]
+    finally:
+        reset_capture()
+
+    assert "tool.crashed" not in events
+    assert dispatched == TOO_DEEP
+    assert "RecursionError" not in dispatched
+    assert "canary-9f3a" not in dispatched
+    assert inspect_config_precedence("deep.py") == TOO_DEEP
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "    layers.append(('deep', " + "dict(" * 300 + ")" * 300 + "))\n",
+        f"    if {'(' * 300}x{')' * 300}:\n        layers.append(('a', defaults))\n",
+    ],
+    ids=["nested-calls-in-a-layer-row", "nested-parentheses-in-a-condition"],
+)
+def test_nesting_the_parser_already_refuses_stays_a_clean_refusal(
+    config_workspace: Workspace, statement: str
+) -> None:
+    (config_workspace.root / "deep.py").write_text(_deepened(statement), encoding="utf-8")
+
+    result = inspect_config_precedence("deep.py")
+
+    assert result.startswith("Error: cannot inspect config precedence in deep.py: malformed")
+    assert "RecursionError" not in result
