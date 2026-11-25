@@ -465,6 +465,8 @@ def test_a_control_file_that_is_missing_or_outside_the_tree_is_refused_before_an
         ("It has 1,330 lines.", "330", False),
         ("1,330.5 lines", "1330", False),
         ("Between 1, 330 and 400.", "1330", False),
+        ("The counts are x,330 and y.", "330", True),
+        ("lines,330", "330", True),
     ],
 )
 def test_grade_reads_a_thousands_separator_as_one_number(
