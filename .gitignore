@@ -38,9 +38,31 @@ omniagent.local.toml
 models/
 .superpowers/
 
-# NEXT_CHAT.md must never be created again, in any spelling or case, anywhere
-# (owner ruling 30). Bracket classes because git ignore is case-sensitive, and
-# two patterns because it has no optional character. tests/test_no_next_chat.py
-# is the stronger guard: it also catches repeated or mixed separators.
-[Nn][Ee][Xx][Tt][Cc][Hh][Aa][Tt].[Mm][Dd]
-[Nn][Ee][Xx][Tt][-_][Cc][Hh][Aa][Tt].[Mm][Dd]
+# NEXT_CHAT.md must never be created again, in any form (owner ruling 30). This is the
+# best-effort half: git ignore is case-sensitive, has no optional or repeated character
+# and cannot say 'files only'. Each pattern is the stem (next, chat, joined by nothing or
+# by one of - _ . space) plus one note-like or backup extension and a trailing *, which
+# also covers .md.bak, .md.txt and a trailing ~. NOT expressible: two separators in a row,
+# fullwidth or zero-width spellings, and the bare name with no extension (it would also
+# ignore a DIRECTORY of that name, and everything in it). tests/test_no_next_chat.py is
+# the strong guard.
+[nN][eE][xX][tT][cC][hH][aA][tT].[mM][dD]*
+[nN][eE][xX][tT][cC][hH][aA][tT].[mM][aA][rR][kK][dD][oO][wW][nN]*
+[nN][eE][xX][tT][cC][hH][aA][tT].[tT][xX][tT]*
+[nN][eE][xX][tT][cC][hH][aA][tT].[tT][eE][xX][tT]*
+[nN][eE][xX][tT][cC][hH][aA][tT].[rR][sS][tT]*
+[nN][eE][xX][tT][cC][hH][aA][tT].[bB][aA][kK]*
+[nN][eE][xX][tT][cC][hH][aA][tT].[oO][lL][dD]*
+[nN][eE][xX][tT][cC][hH][aA][tT].[oO][rR][iI][gG]*
+[nN][eE][xX][tT][cC][hH][aA][tT].[tT][mM][pP]*
+[nN][eE][xX][tT][cC][hH][aA][tT].[cC][oO][pP][yY]*
+[nN][eE][xX][tT][-_. ][cC][hH][aA][tT].[mM][dD]*
+[nN][eE][xX][tT][-_. ][cC][hH][aA][tT].[mM][aA][rR][kK][dD][oO][wW][nN]*
+[nN][eE][xX][tT][-_. ][cC][hH][aA][tT].[tT][xX][tT]*
+[nN][eE][xX][tT][-_. ][cC][hH][aA][tT].[tT][eE][xX][tT]*
+[nN][eE][xX][tT][-_. ][cC][hH][aA][tT].[rR][sS][tT]*
+[nN][eE][xX][tT][-_. ][cC][hH][aA][tT].[bB][aA][kK]*
+[nN][eE][xX][tT][-_. ][cC][hH][aA][tT].[oO][lL][dD]*
+[nN][eE][xX][tT][-_. ][cC][hH][aA][tT].[oO][rR][iI][gG]*
+[nN][eE][xX][tT][-_. ][cC][hH][aA][tT].[tT][mM][pP]*
+[nN][eE][xX][tT][-_. ][cC][hH][aA][tT].[cC][oO][pP][yY]*
