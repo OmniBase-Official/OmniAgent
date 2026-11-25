@@ -27,6 +27,7 @@ MAX_ROWS = 20_000
 MAX_ROW = 16 * 1024
 MAX_PATH = 4096
 MAX_CANONICAL = 1024 * 1024
+REDACTED_PATH = "[redacted]"
 TIMEOUT = 120
 FIELDS = ("RuleID", "File", "Commit", "StartLine")
 SUMMARY = re.compile(
@@ -182,13 +183,26 @@ def safe_path(value: str) -> bool:
 
 def render(rows: list[tuple[str, str, str, int]]) -> bytes:
     output = bytearray()
-    for rule, path, commit, line in rows:
+    for rule, _path, commit, line in rows:
         output.extend(
-            f"{rule}\t{json.dumps(path, ensure_ascii=True)}\t{commit}\t{line}\n".encode("ascii")
+            f"{rule}\t{json.dumps(REDACTED_PATH, ensure_ascii=True)}\t{commit}\t{line}\n".encode(
+                "ascii"
+            )
         )
         if len(output) > MAX_CANONICAL:
             fail()
     return bytes(output)
+
+
+def canonical_size(rows: list[tuple[str, str, str, int]]) -> int:
+    size = 0
+    for rule, path, commit, line in rows:
+        size += len(
+            f"{rule}\t{json.dumps(path, ensure_ascii=True)}\t{commit}\t{line}\n".encode("ascii")
+        )
+        if size > MAX_CANONICAL:
+            fail()
+    return size
 
 
 def parse_row(line: str) -> FindingRow:
@@ -231,8 +245,7 @@ def parse_report(raw: bytes) -> list[FindingRow]:
     if len(lines) > MAX_ROWS:
         fail()
     rows = [parse_row(line) for line in lines]
-    if len(render(rows)) > MAX_CANONICAL:
-        fail()
+    canonical_size(rows)
     return rows
 
 
