@@ -88,16 +88,21 @@ def parse_trace(output: str) -> Trace:
     )
 
 
+#: A comma between digits that opens a group of exactly three: ``1,330`` is 1330, ``1,33`` is not.
+_THOUSANDS = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+
+
 def grade(answer: str, expected: str | None) -> bool | None:
     """True when the answer contains the expectation as a whole token.
 
     A bare substring is not enough: ``12`` is inside ``120`` and inside
-    ``3.12``. ``None`` means the question has no expectation (abstention).
+    ``3.12``. Thousands separators are removed first, so "1,330" is 1330 and "5,200"
+    is no longer a hit for 200. ``None`` means the question has no expectation (abstention).
     """
     if expected is None:
         return None
     pattern = rf"(?<![\w.]){re.escape(expected)}(?![\w]|\.\d)"
-    return re.search(pattern, answer, re.IGNORECASE) is not None
+    return re.search(pattern, _THOUSANDS.sub("", answer), re.IGNORECASE) is not None
 
 
 def _lines(project: Path, relative: str) -> str:

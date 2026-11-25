@@ -446,3 +446,28 @@ def test_a_control_file_that_is_missing_or_outside_the_tree_is_refused_before_an
         )
 
     assert calls == []
+
+
+# A model that writes "1,330" has answered 1330. The second-file run scored such an answer wrong
+# (agent.py, 1,330 lines) because grade() wanted a bare token. The table is both directions: a
+# grader that accepts everything, or one that strips every comma, must fail a row.
+@pytest.mark.parametrize(
+    ("answer", "expected", "graded"),
+    [
+        ("There are 1,330 lines in agent.py.", "1330", True),
+        ("It has 1,330 lines (56,479 bytes).", "1330", True),
+        ("About 12,345,678 lines.", "12345678", True),
+        ("1330 lines", "1330", True),
+        ("There are 13,300 lines.", "1330", False),
+        ("There are 1,3300 lines.", "13300", False),
+        ("The range is 1,33 to 5.", "133", False),
+        ("It has 5,200 lines.", "200", False),
+        ("It has 1,330 lines.", "330", False),
+        ("1,330.5 lines", "1330", False),
+        ("Between 1, 330 and 400.", "1330", False),
+    ],
+)
+def test_grade_reads_a_thousands_separator_as_one_number(
+    answer: str, expected: str, graded: bool
+) -> None:
+    assert grade(answer, expected) is graded
