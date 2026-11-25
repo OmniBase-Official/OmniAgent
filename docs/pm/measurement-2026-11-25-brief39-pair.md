@@ -1,5 +1,7 @@
 # Result: SE brief 39 (`1125e9c`) against its parent (`b860ead`), one session, counts only
 
+**Correction, 2026-11-25 (found by the PM's recount):** the first version of this file gave per-arm correct totals as "38 of 40" and "34 of 40" and a parent hint count "of 40"; each arm has 20 runs, so the totals are **child 18 of 20, parent 14 of 20** and the parent hint count is 0 of 20. The per-file counts were right. Fixed below.
+
 **From:** AI/ML engineer · **2026-11-25** · branch `aiml/brief34-measure-20261124`. Prediction (not edited):
 `docs/pm/prediction-2026-11-25-brief39-pair.md`, in `c995dd8`, on both remotes before any request. Instruction acted on (PM 01, relaying the
 owner's "A: Measure first" for SE brief 39): an adjacent pair, one server session, prediction first; my stop line is the owner's 40%.
@@ -47,7 +49,7 @@ brief but the commit applies to it.)
 - **After a hint (13 hints in the child):** the very next call was `read_file`/`file_info` with the exact candidate path in **5**; an exact-path
   call came later in the same run in **11 of 13**; the 2 that never did are both `dataset_limits.py` (the model wrote `dataset_limits`, no extension,
   then gave up with "does not exist").
-- **All 40 rows:** child correct 38 of 40 (misses: `dataset_limits.py` x2), parent correct 34 of 40 (misses: `observability.py` x2,
+- **All 20 runs per arm:** child correct 18 of 20 (misses: `dataset_limits.py` x2), parent correct 14 of 20 (misses: `observability.py` x2,
   `dataset_limits.py` x1, `dataset_provenance.py` x1, `config_inspection.py` x2).
 - **The four path-only controls (`config.py`, `main.py`, `sandbox.py`, `agent.py`):** identical answers and tool sequences in both arms and passes.
 - **Nondeterminism across passes changed things:** the first call differs between passes in the same arm for `dataset_limits.py` (parent: `0 100`,
@@ -60,7 +62,7 @@ brief but the commit applies to it.)
    both passes (`observability.py`, `validate_dataset.py` already right unaided, `config_inspection.py`), against 0/2, 2/2 and 0/2 in the parent.
    The only target the child fails is `dataset_limits.py` (0/2, parent 1/2 on the strength of one run whose first call was different).
 2. **No leak and no miss in this session:** 0 unexpected, 0 missing hints.
-3. **The arms are distinguishable** (9 of 11 against 5 of 11 on stray first calls; 38 against 34 of 40), on 40 runs in one session, so read the
+3. **The arms are distinguishable** (9 of 11 against 5 of 11 on stray first calls; 18 against 14 of 20 per arm), on 40 runs in one session, so read the
    counts as a direction with one real exception, not as a rate.
 4. **One failure mode the hint does not cover:** after "Did you mean dataset_limits.py?" the model typed `dataset_limits` (the stem), in
    both passes. That is a model behaviour, not the tool; whether other files do this is not tested.
@@ -69,7 +71,7 @@ brief but the commit applies to it.)
 
 | Prediction | Outcome |
 | --- | --- |
-| Parent hint shown in 0 of 40 (99%) | Held. |
+| Parent hint shown in 0 runs (99%; the prediction wrote "0 of 40", the parent has 20 runs) | Held (0 of 20). |
 | Child unexpected hints = 0 (97%); missing = 0 (90%) | Held (0 and 0). |
 | Stray first call in at least one run of at least 2 of the 4 targets (80%) | Held (all 4). |
 | Hint shown in at least 93% of child stray first-call runs | Held (11 of 11). |
@@ -84,8 +86,8 @@ brief but the commit applies to it.)
 
 ## What this does and does not establish
 
-- **Established (one session, 40 runs):** the hint text appears exactly where SE's rule says (13 of 13), never where it should not (0 of 40 in the parent,
-  0 unexpected in the child), and in this session the child answers 38 of 40 correctly against 34 of 40, with the gain on the stray first calls
+- **Established (one session, 40 runs):** the hint text appears exactly where SE's rule says (13 of 13), never where it should not (0 of 20 parent runs,
+  0 unexpected in the child), and in this session the child answers 18 of 20 correctly against 14 of 20, with the gain on the stray first calls
   (9 of 11 against 5 of 11).
 - **Not established:** a second server session (the first call is nondeterministic across sessions, so the set of stray runs will differ), files outside the
   repository root, a hint for a path that should be refused (the sandbox cases are SE's tests, not exercised by these ten files), and the `dataset_limits`
