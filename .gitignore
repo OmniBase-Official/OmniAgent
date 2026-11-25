@@ -37,3 +37,10 @@ omniagent.local.toml
 # Trained models, adapters, GGUF and the llama.cpp checkout
 models/
 .superpowers/
+
+# NEXT_CHAT.md must never be created again, in any spelling or case, anywhere
+# (owner ruling 30). Bracket classes because git ignore is case-sensitive, and
+# two patterns because it has no optional character. tests/test_no_next_chat.py
+# is the stronger guard: it also catches repeated or mixed separators.
+[Nn][Ee][Xx][Tt][Cc][Hh][Aa][Tt].[Mm][Dd]
+[Nn][Ee][Xx][Tt][-_][Cc][Hh][Aa][Tt].[Mm][Dd]
