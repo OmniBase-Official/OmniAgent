@@ -3,7 +3,9 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -261,28 +263,6 @@ def capture(args: list[str], timeout: int = TIMEOUT) -> tuple[int, bytes, bytes]
             fail()
 
 
-def docker_cp(container: str, source: str, destination: Path, docker_bin: str = "docker") -> None:
-    """Copy report with an 8 MiB file cap; Docker diagnostics are discarded."""
-    if resource is None:
-        fail()
-    try:
-        result = subprocess.run(  # noqa: S603 - controlled argv; shell=False.
-            [docker_bin, "cp", f"{container}:{source}", str(destination)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=TIMEOUT,
-            check=False,
-            preexec_fn=lambda: set_fsize(MAX_REPORT),
-        )
-        if result.returncode != 0 or not destination.is_file():
-            fail()
-        if destination.stat().st_size > MAX_REPORT:
-            fail()
-    except (OSError, subprocess.TimeoutExpired):
-        fail()
-
-
 def safe_path(value: str) -> bool:
     try:
         encoded = value.encode("utf-8", "strict")
@@ -420,7 +400,9 @@ def scanner_status_consistent(status: int, rows: list[tuple[str, str, str, int]]
     return (status == CLEAN_STATUS and not rows) or (status == FINDINGS_STATUS and bool(rows))
 
 
-def create_scan_container(repo: Path, template: Path, name: str, docker_bin: str) -> None:
+def create_scan_container(
+    repo: Path, template: Path, output_dir: Path, name: str, docker_bin: str
+) -> None:
     args = [
         docker_bin,
         "create",
@@ -433,7 +415,14 @@ def create_scan_container(repo: Path, template: Path, name: str, docker_bin: str
         "--memory=512m",
         "--cpus=1",
         "--pids-limit=64",
-        "--tmpfs=/out:rw,noexec,nosuid,size=8388608",
+        f"--ulimit=fsize={MAX_REPORT}:{MAX_REPORT}",
+        "--volume",
+        f"{output_dir.resolve()}:/out:rw",
+        *(
+            [f"--user={os.getuid()}:{os.getgid()}"]
+            if hasattr(os, "getuid") and hasattr(os, "getgid")
+            else []
+        ),
         "--volume",
         f"{repo.resolve()}:/repo:ro",
         "--volume",
@@ -514,12 +503,28 @@ def verify_scan_summary(
         )
 
 
-def copy_scan_report(name: str, report: Path, docker_bin: str) -> bytes:
+def copy_scan_report(report: Path) -> bytes:
     try:
-        docker_cp(name, "/out/report.tsv", report, docker_bin)
-        return report.read_bytes()
+        initial = report.lstat()
+        if not stat.S_ISREG(initial.st_mode) or initial.st_size > MAX_REPORT:
+            fail()
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(report, flags)
+        with os.fdopen(fd, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_size > MAX_REPORT
+                or (initial.st_dev, initial.st_ino) != (opened.st_dev, opened.st_ino)
+            ):
+                fail()
+            raw = stream.read(MAX_REPORT + 1)
+        if len(raw) > MAX_REPORT:
+            fail()
     except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
         fail_stage("scan_report_copy")
+    else:
+        return raw
 
 
 def parse_scan_report(raw: bytes, scan_status: int, allow_invalid: bool) -> list[FindingRow] | None:
@@ -561,12 +566,12 @@ def scan(
         root = Path(td)
         root.chmod(0o700)
         report = root / "report.tsv"
-        create_scan_container(repo, template, name, docker_bin)
+        create_scan_container(repo, template, root, name, docker_bin)
         try:
             start_status, stdout, stderr = start_scan_container(docker_bin, name)
             scan_status = inspect_scan_container(docker_bin, name, start_status)
             verify_scan_summary(stdout, stderr, expected, scan_status)
-            raw = copy_scan_report(name, report, docker_bin)
+            raw = copy_scan_report(report)
             rows = parse_scan_report(raw, scan_status, allow_invalid)
             if rows is None:
                 return scan_status, [], stdout + stderr, raw

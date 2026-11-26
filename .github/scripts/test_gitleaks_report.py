@@ -18,8 +18,8 @@ from gitleaks_report import (
     contract_canary_scan,
     contract_clean_scan,
     contract_mutant_scan,
+    copy_scan_report,
     create_scan_container,
-    docker_cp,
     fail_stage,
     parse_report,
     render,
@@ -34,11 +34,52 @@ HASH = "0123456789abcdef0123456789abcdef01234567"
 ROW = f'R\t"fixture.txt"\t{HASH}\t1\n'.encode("ascii")
 EXPECTED_COMMIT_COUNT = 270
 EXPECTED_COLUMN_COUNT = 4
+WINDOWS_SYMLINK_PRIVILEGE_ERROR = 1314
 
 
 def expect_equal(actual: object, expected: object) -> None:
     if actual != expected:
         raise AssertionError(f"expected {expected!r}, got {actual!r}")
+
+
+def create_symlink_or_skip(
+    link: Path, target: Path, *, windows: bool = os.name == "nt"
+) -> None:
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        if windows and getattr(exc, "winerror", None) == WINDOWS_SYMLINK_PRIVILEGE_ERROR:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
+
+
+def test_symlink_setup_does_not_skip_unrelated_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_symlink(_path: Path, _target: Path) -> None:
+        raise OSError("unexpected fixture failure")
+
+    def fail_skip(reason: str) -> None:
+        raise AssertionError(f"unexpected skip: {reason}")
+
+    monkeypatch.setattr(Path, "symlink_to", fail_symlink)
+    monkeypatch.setattr(pytest, "skip", fail_skip)
+    with pytest.raises(OSError, match="unexpected fixture failure"):
+        create_symlink_or_skip(tmp_path / "link", tmp_path / "target")
+
+
+def test_symlink_setup_skips_windows_privilege_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    permission_error = OSError("symlink privilege unavailable")
+    permission_error.winerror = WINDOWS_SYMLINK_PRIVILEGE_ERROR
+
+    def fail_symlink(_path: Path, _target: Path) -> None:
+        raise permission_error
+
+    monkeypatch.setattr(Path, "symlink_to", fail_symlink)
+    with pytest.raises(pytest.skip.Exception):
+        create_symlink_or_skip(tmp_path / "link", tmp_path / "target", windows=True)
 
 
 def test_ascii_unicode_quote_round_trip() -> None:
@@ -88,14 +129,10 @@ def test_rejects_malformed_encoding_crlf_quote_columns_hash_and_line(raw: bytes)
         parse_report(raw)
 
 
-@pytest.mark.skipif(os.name != "posix", reason="report copy contract uses POSIX file limits")
 def test_empty_report_is_clean_but_absent_report_fails(tmp_path: Path) -> None:
     expect_equal(parse_report(b""), [])
-    fake = tmp_path / "docker"
-    fake.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n", encoding="utf-8")
-    fake.chmod(0o700)
     with pytest.raises(ScanError):
-        docker_cp("c", "/out/report.tsv", tmp_path / "absent", docker_bin=str(fake))
+        copy_scan_report(tmp_path / "absent")
 
 
 def test_summary_parser_accepts_timestamped_or_bare_and_rejects_malformed() -> None:
@@ -115,9 +152,13 @@ def test_summary_parser_accepts_timestamped_or_bare_and_rejects_malformed() -> N
             summary_count(value)
 
 
-def test_scan_container_disables_colored_logs(
+def test_scan_container_configures_output_mount_and_logs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    if not hasattr(module.os, "getuid"):
+        monkeypatch.setattr(module.os, "getuid", lambda: 1234, raising=False)
+        monkeypatch.setattr(module.os, "getgid", lambda: 5678, raising=False)
+
     captured: list[list[str]] = []
 
     def capture_command(args: list[str]) -> tuple[int, bytes, bytes]:
@@ -125,8 +166,15 @@ def test_scan_container_disables_colored_logs(
         return 0, b"", b""
 
     monkeypatch.setattr(module, "capture", capture_command)
-    create_scan_container(tmp_path, tmp_path / "template", "container", "docker")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    output_dir.chmod(0o700)
+    create_scan_container(tmp_path, tmp_path / "template", output_dir, "container", "docker")
     expect_equal(captured[0].count("--no-color"), 1)
+    expect_equal(f"{output_dir.resolve()}:/out:rw" in captured[0], True)
+    expect_equal(any(arg.startswith("--tmpfs=/out") for arg in captured[0]), False)
+    expect_equal(f"--ulimit=fsize={MAX_REPORT}:{MAX_REPORT}" in captured[0], True)
+    expect_equal(f"--user={module.os.getuid()}:{module.os.getgid()}" in captured[0], True)
 
 
 @pytest.mark.parametrize(
@@ -680,6 +728,8 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
         if args[1] == "create":
             if phase == "docker_create":
                 raise injected
+            out_mount = next(arg for arg in args if arg.endswith(":/out:rw"))
+            (Path(out_mount.removesuffix(":/out:rw")) / "report.tsv").write_bytes(b"")
             return 0, b"", b""
         if args[1] == "start":
             if phase == "docker_start":
@@ -697,13 +747,12 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
             return 0, b"", b""
         raise AssertionError("unexpected synthetic command")
 
-    def copy_for_phase(*args: object) -> None:
+    original_open = os.open
+
+    def open_for_phase(path: str | Path, flags: int, *args: object, **kwargs: object) -> int:
         if phase == "report_copy":
             raise injected
-        destination = args[2]
-        if not isinstance(destination, Path):
-            raise TypeError("synthetic report destination must be a path")
-        destination.write_bytes(b"")
+        return original_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
 
     def parse_for_phase(_raw: bytes) -> list[tuple[str, str, str, int]]:
         if phase == "report_parse":
@@ -711,7 +760,7 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
         return []
 
     monkeypatch.setattr(module, "capture", capture_for_phase)
-    monkeypatch.setattr(module, "docker_cp", copy_for_phase)
+    monkeypatch.setattr(module.os, "open", open_for_phase)
     monkeypatch.setattr(module, "parse_report", parse_for_phase)
     with pytest.raises(StageError) as caught:
         module.scan(tmp_path, tmp_path / "template")
@@ -740,26 +789,47 @@ def test_stdout_capture_is_bounded() -> None:
         capture([sys.executable, "-c", code])
 
 
-@pytest.mark.skipif(os.name != "posix", reason="RLIMIT_FSIZE fixture requires POSIX")
-def test_docker_cp_allows_report_over_256k_and_rejects_over_8m(tmp_path: Path) -> None:
-    payload = tmp_path / "payload"
-    payload.write_bytes(b"x" * (300 * 1024))
-    fake = tmp_path / "docker"
-    fake.write_text(
-        "#!/usr/bin/env python3\n"
-        "import pathlib,sys\n"
-        "if sys.argv[1] != 'cp': raise SystemExit(2)\n"
-        "container, source = sys.argv[2].split(':', 1)\n"
-        "if container != 'unused': raise SystemExit(3)\n"
-        "src=pathlib.Path(source); dst=pathlib.Path(sys.argv[3])\n"
-        "dst.write_bytes(src.read_bytes())\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o700)
-    dest = tmp_path / "copied-report"
-    docker_cp("unused", str(payload), dest, docker_bin=str(fake))
-    expect_equal(dest.stat().st_size, 300 * 1024)
+def test_copy_scan_report_caps_size(tmp_path: Path) -> None:
+    report = tmp_path / "report.tsv"
+    report.write_bytes(b"x" * (300 * 1024))
+    expect_equal(len(copy_scan_report(report)), 300 * 1024)
 
-    payload.write_bytes(b"x" * (MAX_REPORT + 1))
+    report.write_bytes(b"x" * (MAX_REPORT + 1))
     with pytest.raises(ScanError):
-        docker_cp("unused", str(payload), tmp_path / "too-large", docker_bin=str(fake))
+        copy_scan_report(report)
+
+
+def test_copy_scan_report_rejects_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "outside-report"
+    target.write_bytes(b"private fixture")
+    report = tmp_path / "report.tsv"
+    create_symlink_or_skip(report, target)
+
+    with pytest.raises(ScanError):
+        copy_scan_report(report)
+
+
+def test_copy_scan_report_rejects_symlink_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "outside-report"
+    target.write_bytes(b"private fixture")
+    report = tmp_path / "report.tsv"
+    report.write_bytes(b"regular fixture")
+    replacement = tmp_path / "replacement"
+    create_symlink_or_skip(replacement, target)
+
+    original_open = os.open
+    swapped = False
+
+    def swap_before_open(path: str | Path, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal swapped
+        if Path(path) == report:
+            replacement.replace(report)
+            swapped = True
+        return original_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(module.os, "open", swap_before_open)
+    with pytest.raises(ScanError):
+        copy_scan_report(report)
+    expect_equal(swapped, True)
