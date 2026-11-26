@@ -114,50 +114,165 @@ def test_summary_parser_accepts_timestamped_or_bare_and_rejects_malformed() -> N
 
 
 @pytest.mark.parametrize(
-    ("summary", "matches", "parsed"),
+    ("stdout", "stderr", "expected_metrics"),
     [
-        (b"no summary\n", 0, None),
-        (b"INF 1 commits scanned. trailing\n", 0, None),
-        (b"INF 1 commits scanned\nINF 1 commits scanned\n", 2, None),
-        (b"INF 2 commits scanned\n", 1, 2),
+        (b"", b"", (0, 0, 0, None, 0)),
+        (b"commits scanned", b"", (1, 0, 0, None, 0)),
+        (b"", b"diagnostic only", (0, 0, 0, None, 0)),
+        (b"", b"INF 1 commits scanned\nINF 1 commits scanned\n", (0, 2, 2, None, 2)),
+        (b"", b"INF 2 commits scanned\n", (0, 1, 1, 2, 2)),
     ],
-    ids=("missing", "malformed", "multiple", "mismatch"),
+    ids=("no-output", "marker-without-regex-match", "marker-absent", "multiple", "mismatch"),
 )
 def test_summary_verification_reports_safe_numeric_diagnostics(
-    summary: bytes,
-    matches: int,
-    parsed: int | None,
-    tmp_path: Path,
+    stdout: bytes,
+    stderr: bytes,
+    expected_metrics: tuple[int, int, int, int | None, int],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     expected = 1
-    private_path = str(tmp_path / "private-summary-path")
-    canary = "ghp_" + hashlib.sha256(b"summary-diagnostic-canary").hexdigest()[:36]
-    output = summary + f"untrusted {private_path} {canary}\n".encode()
+    stdout_markers, stderr_markers, matches, parsed, scanner_status = expected_metrics
 
     with pytest.raises(StageError) as caught:
-        verify_scan_summary(output, expected)
+        verify_scan_summary(stdout, stderr, expected, scanner_status)
 
     expect_equal(caught.value.stage, "scan_commit_summary")
-    expect_equal(caught.value.summary_matches, matches)
-    expect_equal(caught.value.expected_commits, expected)
-    expect_equal(caught.value.parsed_commits, parsed)
+    expect_equal(
+        caught.value.summary_diagnostics,
+        (
+            len(stdout),
+            len(stderr),
+            stdout_markers,
+            stderr_markers,
+            matches,
+            expected,
+            parsed,
+            scanner_status,
+        ),
+    )
     report_error(caught.value)
     captured = capsys.readouterr()
     parsed_text = "none" if parsed is None else str(parsed)
     expect_equal(
         captured.err,
-        "security scan failed stage=scan_commit_summary "
-        f"summary_matches={matches} expected_commits={expected} "
-        f"parsed_commits={parsed_text}\n",
+        f"security scan failed stage=scan_commit_summary stdout_bytes={len(stdout)} "
+        f"stderr_bytes={len(stderr)} stdout_markers={stdout_markers} "
+        f"stderr_markers={stderr_markers} summary_matches={matches} "
+        f"expected_commits={expected} parsed_commits={parsed_text} "
+        f"scanner_exit_status={scanner_status}\n",
     )
+    expect_equal(captured.out, "")
+
+
+def test_summary_diagnostic_does_not_echo_stream_contents(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    private_path = str(tmp_path / "private-summary-path")
+    canary = "ghp_" + hashlib.sha256(b"summary-diagnostic-canary").hexdigest()[:36]
+    stdout = f"{private_path}:{canary}".encode()
+    stderr = b"untrusted scanner output"
+
+    with pytest.raises(StageError) as caught:
+        verify_scan_summary(stdout, stderr, 1, 0)
+
+    report_error(caught.value)
+    captured = capsys.readouterr()
     expect_equal(captured.out, "")
     expect_equal(private_path in captured.err, False)
     expect_equal(canary in captured.err, False)
+    expect_equal(stderr.decode() in captured.err, False)
 
 
 def test_summary_verification_accepts_matching_count() -> None:
-    verify_scan_summary(b"12:51AM INF 1 commits scanned\n", 1)
+    verify_scan_summary(b"", b"12:51AM INF 1 commits scanned\n", 1, 0)
+
+
+def test_summary_not_formed_across_stdout_stderr_boundary(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stdout = b"INF "
+    stderr = b"1 commits scanned\n"
+
+    with pytest.raises(StageError) as caught:
+        verify_scan_summary(stdout, stderr, 1, 0)
+
+    report_error(caught.value)
+    captured = capsys.readouterr()
+    expect_equal(captured.out, "")
+    expect_equal(
+        captured.err,
+        "security scan failed stage=scan_commit_summary stdout_bytes=4 stderr_bytes=18 "
+        "stdout_markers=0 stderr_markers=1 summary_matches=0 expected_commits=1 "
+        "parsed_commits=none scanner_exit_status=0\n",
+    )
+    expect_equal(stdout.decode() in captured.err, False)
+    expect_equal(stderr.decode() in captured.err, False)
+
+
+def test_summary_diagnostic_bounds_accept_maximum_values() -> None:
+    max_stream_matches = module.MAX_CAPTURE // module.MIN_SUMMARY_LINE_BYTES
+    diagnostics = (
+        module.MAX_CAPTURE,
+        module.MAX_CAPTURE,
+        max_stream_matches,
+        max_stream_matches,
+        2 * max_stream_matches,
+        module.MAX_SUMMARY_COMMIT_COUNT,
+        module.MAX_SUMMARY_COMMIT_COUNT,
+        module.FINDINGS_STATUS,
+    )
+    expect_equal(module.valid_summary_diagnostics(diagnostics), True)
+
+
+@pytest.mark.parametrize(
+    "field_index",
+    range(module.SUMMARY_DIAGNOSTIC_FIELD_COUNT),
+    ids=(
+        "stdout-bytes",
+        "stderr-bytes",
+        "stdout-markers",
+        "stderr-markers",
+        "summary-matches",
+        "expected-commits",
+        "parsed-commits",
+        "scanner-status",
+    ),
+)
+def test_oversized_summary_diagnostic_fields_fall_back_without_raising(
+    field_index: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fields: list[object] = [64, 64, 1, 0, 1, 1, 1, 0]
+    fields[field_index] = 10**5000
+    error = StageError("scan_commit_summary", summary_diagnostics=tuple(fields))  # type: ignore[arg-type]
+
+    report_error(error)
+
+    captured = capsys.readouterr()
+    expect_equal(captured.out, "")
+    expect_equal(captured.err, "security scan failed stage=scan_commit_summary\n")
+
+
+def test_malformed_summary_diagnostics_fall_back_without_raising(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    valid = (64, 64, 1, 0, 1, 1, 1, 0)
+    malformed: tuple[object, ...] = (
+        None,
+        [],
+        valid[:-1],
+        (True, *valid[1:]),
+        (-1, *valid[1:]),
+        (64, 64, 0, 0, 1, 1, 1, 0),
+        (64, 64, 1, 0, 1, 1, True, 0),
+        (*valid[:-1], 1),
+    )
+    for diagnostics in malformed:
+        report_error(
+            StageError("scan_commit_summary", summary_diagnostics=diagnostics)  # type: ignore[arg-type]
+        )
+        captured = capsys.readouterr()
+        expect_equal(captured.out, "")
+        expect_equal(captured.err, "security scan failed stage=scan_commit_summary\n")
 
 
 def test_status_rows_consistency() -> None:
@@ -308,8 +423,8 @@ def test_stage_diagnostics_emit_only_allowlisted_ids(tmp_path: Path) -> None:
             "-c",
             (
                 "import sys; import gitleaks_report as g; "
-                "g.report_error(g.StageError(sys.argv[1], summary_matches=sys.argv[2], "
-                "expected_commits=1)); raise SystemExit(1)"
+                "g.report_error(g.StageError(sys.argv[1], summary_diagnostics=(sys.argv[2], "
+                "0, 0, 0, 0, 1, None, 0))); raise SystemExit(1)"
             ),
             "scan_commit_summary",
             canary,
@@ -510,8 +625,9 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
     captured = capsys.readouterr()
     expect_equal(captured.out, "")
     expected_diagnostic = (
-        "security scan failed stage=scan_commit_summary summary_matches=0 "
-        "expected_commits=1 parsed_commits=none\n"
+        f"security scan failed stage=scan_commit_summary stdout_bytes={len(b'missing summary')} "
+        "stderr_bytes=0 stdout_markers=0 stderr_markers=0 summary_matches=0 "
+        "expected_commits=1 parsed_commits=none scanner_exit_status=0\n"
         if phase == "summary"
         else f"security scan failed stage={expected_stage}\n"
     )

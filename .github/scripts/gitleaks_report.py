@@ -33,12 +33,18 @@ FIELDS = ("RuleID", "File", "Commit", "StartLine")
 SUMMARY = re.compile(
     rb"(?m)^(?:[0-9]{1,2}:[0-9]{2}(?:AM|PM)\s+)?INF\s+([0-9]{1,10})\s+commits scanned\.?\s*$"
 )
+SUMMARY_MARKER = b"commits scanned"
+MIN_SUMMARY_LINE_BYTES = len(b"INF 0 ") + len(SUMMARY_MARKER)
+MAX_DIAGNOSTIC_MARKERS = MAX_CAPTURE // len(SUMMARY_MARKER)
+MAX_DIAGNOSTIC_SUMMARY_MATCHES = 2 * MAX_CAPTURE // MIN_SUMMARY_LINE_BYTES
+MAX_SUMMARY_COMMIT_COUNT = 9_999_999_999
 HASH = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 GENERIC = "security scan failed"
 CLEAN_STATUS = 0
 FINDINGS_STATUS = 2
 CLI_EXIT_FAILURE = 1
 REPORT_FIELD_COUNT = 4
+SUMMARY_DIAGNOSTIC_FIELD_COUNT = 8
 MAX_LINE_NUMBER = 2**31 - 1
 CLI_SCAN_ARGC = 4
 CLI_CONTRACT_ARGC = 4
@@ -79,6 +85,7 @@ ALLOWED_STAGE_IDS = frozenset(
 )
 FindingRow = tuple[str, str, str, int]
 ScanResult = tuple[int, list[FindingRow], bytes, bytes]
+SummaryDiagnostics = tuple[int, int, int, int, int, int, int | None, int]
 
 
 class ScanError(Exception):
@@ -94,15 +101,49 @@ class StageError(ScanError):
         self,
         stage: StageId,
         *,
-        summary_matches: int | None = None,
-        expected_commits: int | None = None,
-        parsed_commits: int | None = None,
+        summary_diagnostics: SummaryDiagnostics | None = None,
     ) -> None:
         super().__init__(GENERIC)
         self.stage = stage
-        self.summary_matches = summary_matches
-        self.expected_commits = expected_commits
-        self.parsed_commits = parsed_commits
+        self.summary_diagnostics = summary_diagnostics
+
+
+def valid_summary_diagnostics(value: object) -> bool:
+    if not isinstance(value, tuple) or len(value) != SUMMARY_DIAGNOSTIC_FIELD_COUNT:
+        return False
+    (
+        stdout_bytes,
+        stderr_bytes,
+        stdout_markers,
+        stderr_markers,
+        matches,
+        expected,
+        parsed,
+        status,
+    ) = value
+    if not all(
+        type(count) is int and count >= 0 for count in (*value[:6], status)
+    ):
+        return False
+    if stdout_bytes > MAX_CAPTURE or stderr_bytes > MAX_CAPTURE:
+        return False
+    if stdout_markers > MAX_DIAGNOSTIC_MARKERS or stderr_markers > MAX_DIAGNOSTIC_MARKERS:
+        return False
+    if stdout_markers > stdout_bytes // len(SUMMARY_MARKER):
+        return False
+    if stderr_markers > stderr_bytes // len(SUMMARY_MARKER):
+        return False
+    if matches > MAX_DIAGNOSTIC_SUMMARY_MATCHES or matches > stdout_markers + stderr_markers:
+        return False
+    if matches > stdout_bytes // MIN_SUMMARY_LINE_BYTES + stderr_bytes // MIN_SUMMARY_LINE_BYTES:
+        return False
+    if not 1 <= expected <= MAX_SUMMARY_COMMIT_COUNT:
+        return False
+    if parsed is not None and (
+        type(parsed) is not int or parsed < 0 or parsed > MAX_SUMMARY_COMMIT_COUNT
+    ):
+        return False
+    return status in (CLEAN_STATUS, FINDINGS_STATUS)
 
 
 def fail_stage(stage: StageId) -> NoReturn:
@@ -120,27 +161,21 @@ def preserve_or_fallback(error: StageError, fallback: StageId) -> NoReturn:
 def report_error(error: ScanError) -> None:
     sys.stdout.buffer.write(b"")
     if isinstance(error, StageError) and error.stage in ALLOWED_STAGE_IDS:
+        diagnostics = error.summary_diagnostics
         if (
             error.stage == "scan_commit_summary"
-            and isinstance(error.summary_matches, int)
-            and not isinstance(error.summary_matches, bool)
-            and error.summary_matches >= 0
-            and isinstance(error.expected_commits, int)
-            and not isinstance(error.expected_commits, bool)
-            and error.expected_commits >= 0
-            and (
-                error.parsed_commits is None
-                or (
-                    isinstance(error.parsed_commits, int)
-                    and not isinstance(error.parsed_commits, bool)
-                    and error.parsed_commits >= 0
-                )
-            )
+            and diagnostics is not None
+            and valid_summary_diagnostics(diagnostics)
         ):
-            parsed = "none" if error.parsed_commits is None else str(error.parsed_commits)
+            stdout_bytes, stderr_bytes, stdout_markers, stderr_markers = diagnostics[:4]
+            matches, expected, parsed_count, scanner_status = diagnostics[4:]
+            parsed = "none" if parsed_count is None else str(parsed_count)
             sys.stderr.write(
-                f"{GENERIC} stage={error.stage} summary_matches={error.summary_matches} "
-                f"expected_commits={error.expected_commits} parsed_commits={parsed}\n"
+                f"{GENERIC} stage={error.stage} stdout_bytes={stdout_bytes} "
+                f"stderr_bytes={stderr_bytes} stdout_markers={stdout_markers} "
+                f"stderr_markers={stderr_markers} summary_matches={matches} "
+                f"expected_commits={expected} parsed_commits={parsed} "
+                f"scanner_exit_status={scanner_status}\n"
             )
             return
         sys.stderr.write(f"{GENERIC} stage={error.stage}\n")
@@ -380,14 +415,30 @@ def inspect_scan_container(docker_bin: str, name: str, start_status: int) -> int
         return scan_status
 
 
-def verify_scan_summary(output: bytes, expected: int) -> None:
-    matches, parsed = summary_metrics(output)
+def verify_scan_summary(
+    stdout: bytes, stderr: bytes, expected: int, scanner_exit_status: int
+) -> None:
+    stdout_matches, stdout_parsed = summary_metrics(stdout)
+    stderr_matches, stderr_parsed = summary_metrics(stderr)
+    matches = stdout_matches + stderr_matches
+    parsed = (
+        stdout_parsed
+        if stdout_matches == 1
+        else stderr_parsed if stderr_matches == 1 else None
+    )
     if matches != 1 or parsed != expected:
         raise StageError(
             "scan_commit_summary",
-            summary_matches=matches,
-            expected_commits=expected,
-            parsed_commits=parsed,
+            summary_diagnostics=(
+                len(stdout),
+                len(stderr),
+                stdout.count(SUMMARY_MARKER),
+                stderr.count(SUMMARY_MARKER),
+                matches,
+                expected,
+                parsed,
+                scanner_exit_status,
+            ),
         )
 
 
@@ -442,8 +493,7 @@ def scan(
         try:
             start_status, stdout, stderr = start_scan_container(docker_bin, name)
             scan_status = inspect_scan_container(docker_bin, name, start_status)
-            output = stdout + b"\n" + stderr
-            verify_scan_summary(output, expected)
+            verify_scan_summary(stdout, stderr, expected, scan_status)
             raw = copy_scan_report(name, report, docker_bin)
             rows = parse_scan_report(raw, scan_status, allow_invalid)
             if rows is None:
