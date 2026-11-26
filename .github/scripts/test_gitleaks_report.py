@@ -18,6 +18,7 @@ from gitleaks_report import (
     contract_canary_scan,
     contract_clean_scan,
     contract_mutant_scan,
+    create_scan_container,
     docker_cp,
     fail_stage,
     parse_report,
@@ -105,12 +106,27 @@ def test_summary_parser_accepts_timestamped_or_bare_and_rejects_malformed() -> N
         (b"no summary" + nl,),
         (b"junk INF 1 commits scanned." + nl,),
         (b"INF 1 commits scanned. trailing" + nl,),
+        (b"INF 1\ncommits scanned\n",),
         (b"12:51AM INF 270 commits scanned" + nl + b"12:52AM INF 270 commits scanned" + nl,),
         (b"12:51AM INF 12345678901 commits scanned" + nl,),
     ]
     for (value,) in invalid:
         with pytest.raises(ScanError):
             summary_count(value)
+
+
+def test_scan_container_disables_colored_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[list[str]] = []
+
+    def capture_command(args: list[str]) -> tuple[int, bytes, bytes]:
+        captured.append(args)
+        return 0, b"", b""
+
+    monkeypatch.setattr(module, "capture", capture_command)
+    create_scan_container(tmp_path, tmp_path / "template", "container", "docker")
+    expect_equal(captured[0].count("--no-color"), 1)
 
 
 @pytest.mark.parametrize(

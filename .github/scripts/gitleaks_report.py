@@ -31,13 +31,14 @@ REDACTED_PATH = "[redacted]"
 TIMEOUT = 120
 FIELDS = ("RuleID", "File", "Commit", "StartLine")
 SUMMARY = re.compile(
-    rb"(?m)^(?:[0-9]{1,2}:[0-9]{2}(?:AM|PM)\s+)?INF\s+([0-9]{1,10})\s+commits scanned\.?\s*$"
+    rb"(?m)^(?:[0-9]{1,2}:[0-9]{2}(?:AM|PM)[ \t]+)?INF[ \t]+([0-9]{1,10})"
+    rb"[ \t]+commits scanned\.?[ \t]*$"
 )
 SUMMARY_MARKER = b"commits scanned"
 SUMMARY_TIMESTAMP_PREFIX = re.compile(rb"^[0-9]{1,2}:[0-9]{2}(?:AM|PM)")
-SUMMARY_INF_PREFIX = re.compile(rb"^INF(?:\s|$)")
+SUMMARY_INF_PREFIX = re.compile(rb"^INF(?:[ \t]|$)")
 SUMMARY_NUMERIC_PREFIX = re.compile(
-    rb"^(?:[0-9]{1,2}:[0-9]{2}(?:AM|PM)\s+)?INF\s+[0-9]+\s+"
+    rb"^(?:[0-9]{1,2}:[0-9]{2}(?:AM|PM)[ \t]+)?INF[ \t]+[0-9]+[ \t]+"
 )
 SUMMARY_ALLOWED_SUFFIX = re.compile(rb"[ \t]*\.?[ \t]*\Z")
 MIN_SUMMARY_LINE_BYTES = len(b"INF 0 ") + len(SUMMARY_MARKER)
@@ -441,6 +442,7 @@ def create_scan_container(repo: Path, template: Path, name: str, docker_bin: str
         "git",
         "--redact=100",
         "--no-banner",
+        "--no-color",
         "--exit-code=2",
         "--report-format=template",
         "--report-template=/template.tmpl",
