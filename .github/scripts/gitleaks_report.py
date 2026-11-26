@@ -683,7 +683,12 @@ def contract_mutant_scan(root: Path, template: Path, canary: bytes) -> tuple[byt
         mutant_status, _, mutant_output, mutant_raw = scan(
             mutant_repo, template, allow_invalid=True
         )
-        if mutant_status != FINDINGS_STATUS or canary not in mutant_raw or canary in mutant_output:
+        if (
+            mutant_status != FINDINGS_STATUS
+            or b"REDACTED" not in mutant_raw
+            or canary in mutant_raw
+            or canary in mutant_output
+        ):
             fail()
         return mutant_raw, root / "mutant-report.tsv"
     except StageError as error:

@@ -856,3 +856,51 @@ def test_copy_scan_report_rejects_symlink_swap(
     with pytest.raises(ScanError):
         copy_scan_report(report)
     expect_equal(swapped, True)
+
+
+@pytest.mark.parametrize(
+    "case", ["redacted", "missing_redaction", "leaked_report", "leaked_output", "clean_status"]
+)
+def test_contract_mutant_scan_requires_redacted_positive_control(
+    case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    canary = hashlib.sha256(b"mutant contract fixture").hexdigest().encode("ascii")
+    raw = b"R\tREDACTED\tfixture\t1\tREDACTED\tREDACTED\n"
+    output = b""
+    status = module.FINDINGS_STATUS
+    if case == "missing_redaction":
+        raw = b"R\tfixture\tfixture\t1\tvalue\tvalue\n"
+    elif case == "leaked_report":
+        raw = canary
+    elif case == "leaked_output":
+        output = canary
+    elif case == "clean_status":
+        status = module.CLEAN_STATUS
+
+    def make_mutant_repo(root: Path, _name: str, _content: bytes) -> Path:
+        return root / "mutant"
+
+    def scan_mutant(
+        _repo: Path, _template: Path, *, allow_invalid: bool = False
+    ) -> tuple[int, list[tuple[str, str, str, int]], bytes, bytes]:
+        expect_equal(allow_invalid, True)
+        return status, [], output, raw
+
+    monkeypatch.setattr(module, "make_repo", make_mutant_repo)
+    monkeypatch.setattr(module, "scan", scan_mutant)
+
+    if case == "redacted":
+        mutant_raw, bad_report = contract_mutant_scan(tmp_path, tmp_path / "template", canary)
+        expect_equal(b"REDACTED" in mutant_raw, True)
+        expect_equal(canary in mutant_raw, False)
+        expect_equal(bad_report.parent, tmp_path)
+        return
+
+    with pytest.raises(StageError) as caught:
+        contract_mutant_scan(tmp_path, tmp_path / "template", canary)
+    expect_equal(caught.value.stage, "contract_mutant_scan")
+    report_error(caught.value)
+    captured = capsys.readouterr()
+    expect_equal(captured.out, "")
+    expect_equal(captured.err, "security scan failed stage=contract_mutant_scan\n")
+    expect_equal(canary.decode("ascii") in captured.err, False)
