@@ -717,6 +717,8 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
     canary = "ghp_" + hashlib.sha256(b"omniagent-scan-stage-canary").hexdigest()[:36]
     private_path = str(tmp_path / "private-scan-path")
     injected = ScanError(f"{private_path}:{canary}:untrusted diagnostic")
+    cleanup_called = False
+    original_copy_scan_report = module.copy_scan_report
     monkeypatch.setattr(module, "count_commits", lambda _repo: (_ for _ in ()).throw(injected))
     if phase != "commit_count":
         monkeypatch.setattr(module, "count_commits", lambda _repo: 1)
@@ -724,6 +726,7 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
     def capture_for_phase(
         args: list[str], timeout: int = module.TIMEOUT
     ) -> tuple[int, bytes, bytes]:
+        nonlocal cleanup_called
         del timeout
         if args[1] == "create":
             if phase == "docker_create":
@@ -742,17 +745,16 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
                 raise injected
             return 0, b"0\n", b""
         if args[1] == "rm":
+            cleanup_called = True
             if phase == "cleanup":
                 raise injected
             return 0, b"", b""
         raise AssertionError("unexpected synthetic command")
 
-    original_open = os.open
-
-    def open_for_phase(path: str | Path, flags: int, *args: object, **kwargs: object) -> int:
+    def copy_for_phase(report: Path) -> bytes:
         if phase == "report_copy":
-            raise injected
-        return original_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+            fail_stage("scan_report_copy")
+        return original_copy_scan_report(report)
 
     def parse_for_phase(_raw: bytes) -> list[tuple[str, str, str, int]]:
         if phase == "report_parse":
@@ -760,7 +762,7 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
         return []
 
     monkeypatch.setattr(module, "capture", capture_for_phase)
-    monkeypatch.setattr(module.os, "open", open_for_phase)
+    monkeypatch.setattr(module, "copy_scan_report", copy_for_phase)
     monkeypatch.setattr(module, "parse_report", parse_for_phase)
     with pytest.raises(StageError) as caught:
         module.scan(tmp_path, tmp_path / "template")
@@ -768,6 +770,7 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
     report_error(caught.value)
     captured = capsys.readouterr()
     expect_equal(captured.out, "")
+    expect_equal(cleanup_called, phase not in {"commit_count", "docker_create"})
     expected_diagnostic = (
         f"security scan failed stage=scan_commit_summary stdout_bytes={len(b'missing summary')} "
         "stderr_bytes=0 stdout_markers=0 stderr_markers=0 summary_matches=0 "
@@ -780,6 +783,26 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
     expect_equal(captured.err, expected_diagnostic)
     expect_equal(canary in captured.err, False)
     expect_equal(private_path in captured.err, False)
+
+
+def test_copy_scan_report_open_error_uses_fixed_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report = tmp_path / "report.tsv"
+    report.write_bytes(b"fixture")
+
+    def fail_open(*_args: object, **_kwargs: object) -> int:
+        raise OSError("untrusted report open failure")
+
+    monkeypatch.setattr(module.os, "open", fail_open)
+    with pytest.raises(StageError) as caught:
+        copy_scan_report(report)
+
+    expect_equal(caught.value.stage, "scan_report_copy")
+    report_error(caught.value)
+    captured = capsys.readouterr()
+    expect_equal(captured.out, "")
+    expect_equal(captured.err, "security scan failed stage=scan_report_copy\n")
 
 
 @pytest.mark.skipif(os.name != "posix", reason="RLIMIT_FSIZE fixture requires POSIX")
