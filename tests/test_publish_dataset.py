@@ -365,6 +365,10 @@ HOSTILE_SIDECARS = {
     "nested-too-deep": ("[" * 3000 + "]" * 3000, "provenance sidecar JSON nesting is too deep"),
     "nested-past-the-limit": ("[" * 150 + "]" * 150, "provenance sidecar JSON nesting is too deep"),
     "not-an-object": ("[1]", "provenance sidecar must contain a JSON object"),
+    "oversized-integer": (
+        '{"examples": ' + "9" * 5000 + "}",
+        "provenance sidecar: JSON contains an invalid or oversized integer",
+    ),
     "over-the-size-cap": (
         " " * (MAX_SIDECAR_BYTES + 1) + "{}",
         f"provenance sidecar exceeds maximum size of {MAX_SIDECAR_BYTES} bytes",

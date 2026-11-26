@@ -23,6 +23,7 @@ from dataset_provenance import (
     prompt_fingerprint,
     read_sidecar,
     render_system_prompt,
+    sidecar_path,
     write_sidecar,
 )
 from tests.fakes import FakeOpenAI
@@ -314,3 +315,33 @@ def test_two_prompts_in_one_line_are_still_a_mixed_dataset(tmp_path: Path) -> No
 
     with pytest.raises(ProvenanceError, match="mixes 2 distinct"):
         dataset_fingerprint(dataset)
+
+
+OVERSIZED_INTEGER = "JSON contains an invalid or oversized integer"
+
+
+def test_an_oversized_integer_in_a_dataset_line_is_refused_with_the_validators_wording(
+    tmp_path: Path,
+) -> None:
+    """A JSON integer of 5,000 digits is past Python's 4,300-digit limit; json.loads raises a
+    bare ValueError for it, which used to leave dataset_fingerprint as a traceback."""
+    dataset = tmp_path / "d.jsonl"
+    dataset.write_text('{"messages": [], "n": ' + "9" * 5000 + "}\n", encoding="utf-8")
+
+    with pytest.raises(ProvenanceError) as refused:
+        dataset_fingerprint(dataset)
+
+    assert str(refused.value) == f"d.jsonl line 1: {OVERSIZED_INTEGER}"
+
+
+def test_an_oversized_integer_in_a_sidecar_is_refused_with_the_validators_wording(
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "d.jsonl"
+    dataset.write_text("{}\n", encoding="utf-8")
+    sidecar_path(dataset).write_text('{"examples": ' + "9" * 5000 + "}", encoding="utf-8")
+
+    with pytest.raises(ProvenanceError) as refused:
+        read_sidecar(dataset)
+
+    assert str(refused.value) == f"provenance sidecar: {OVERSIZED_INTEGER}"

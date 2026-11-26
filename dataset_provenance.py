@@ -63,6 +63,9 @@ def _system_prompt_hashes(raw_line: bytes, dataset: Path, number: int) -> Iterat
     except RecursionError as exc:
         message = f"{dataset.name} line {number} has JSON nesting that is too deep"
         raise ProvenanceError(message) from exc
+    except ValueError as exc:
+        message = f"{dataset.name} line {number}: JSON contains an invalid or oversized integer"
+        raise ProvenanceError(message) from exc
     if not isinstance(example, dict):
         raise ProvenanceError(f"{dataset.name} line {number} is not an object")
     messages = example.get("messages")
@@ -195,6 +198,10 @@ def read_sidecar(dataset: Path) -> dict[str, Any]:
         loaded = json.loads(text)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise ProvenanceError(f"invalid provenance sidecar {path.name}") from exc
+    except ValueError as exc:
+        raise ProvenanceError(
+            "provenance sidecar: JSON contains an invalid or oversized integer"
+        ) from exc
     if not isinstance(loaded, dict):
         raise ProvenanceError("provenance sidecar must contain a JSON object")
     return loaded

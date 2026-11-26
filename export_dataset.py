@@ -123,7 +123,7 @@ def read_records(paths: Iterable[Path]) -> Iterator[dict[str, Any]]:
     yielded = 0
     for path in files:
         try:
-            for _number, raw in iter_dataset_lines(path):
+            for number, raw in iter_dataset_lines(path):
                 stripped = raw.strip()
                 if not stripped:
                     continue
@@ -137,6 +137,10 @@ def read_records(paths: Iterable[Path]) -> Iterator[dict[str, Any]]:
                     record = json.loads(text)
                 except json.JSONDecodeError:
                     continue
+                except ValueError as exc:
+                    raise DatasetError(
+                        f"{path.name} line {number}: JSON contains an invalid or oversized integer"
+                    ) from exc
                 if isinstance(record, dict) and "event" in record:
                     yielded += 1
                     if yielded > MAX_DATASET_EXAMPLES:

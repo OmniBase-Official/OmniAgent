@@ -499,3 +499,34 @@ def test_the_record_limit_counts_every_log_file_together(
     assert len(list(read_records([first]))) == 2
     with pytest.raises(DatasetError, match="over 3 records"):
         list(read_records([first, second]))
+
+
+#: A JSON integer past Python's 4,300-digit limit makes json.loads raise a bare ValueError,
+#: not a JSONDecodeError. validate_dataset words its refusal this way; the readers reuse it.
+BIG_INTEGER = '{"event": "x", "n": ' + "9" * 5000 + "}"
+OVERSIZED_INTEGER = "JSON contains an invalid or oversized integer"
+
+
+def test_a_5000_digit_integer_overflows_the_json_limit_at_its_own_call() -> None:
+    """Without this, the refusal below could pass because nothing ever overflowed."""
+    with pytest.raises(ValueError, match="4300 digits"):
+        json.loads(BIG_INTEGER)
+
+
+def test_an_oversized_integer_in_a_log_is_refused_with_the_validators_wording(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "log.jsonl"
+    log.write_text('{"event": "ok"}\n' + BIG_INTEGER + "\n", encoding="utf-8")
+
+    with pytest.raises(DatasetError) as refused:
+        list(read_records([log]))
+
+    assert str(refused.value) == f"log.jsonl line 2: {OVERSIZED_INTEGER}"
+
+
+def test_a_long_integer_within_the_limit_is_still_read(tmp_path: Path) -> None:
+    log = tmp_path / "log.jsonl"
+    log.write_text('{"event": "x", "n": ' + "9" * 1000 + "}\n", encoding="utf-8")
+
+    assert len(list(read_records([log]))) == 1
