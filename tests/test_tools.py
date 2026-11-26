@@ -149,3 +149,12 @@ def test_an_invented_tool_is_told_that_inventing_it_changed_nothing() -> None:
     assert "cannot find it out" in observation
     # The list of real tools stays, because the next step may well be one.
     assert "search_text" in observation
+
+
+def test_an_expression_past_the_cap_is_refused_before_it_is_parsed() -> None:
+    """The 500-character cap is the bound on the parser's input: a 7,000-term chain would
+    overflow it (brief 45). Checked directly and through the dispatcher."""
+    expression = "+".join(["1"] * 7000)
+
+    assert calculate(expression) == "Error: expression too long (max 500 characters)."
+    assert "RecursionError" not in run_tool("calculate", expression)

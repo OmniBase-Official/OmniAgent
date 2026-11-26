@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import logging
 import os
 import traceback
@@ -12,6 +13,7 @@ from textwrap import dedent
 import pytest
 
 import config_inspection
+import tools
 from agent import AgentConfig, ReActAgent
 from sandbox import Workspace, get_workspace, set_workspace
 from tests.fakes import FakeOpenAI
@@ -681,3 +683,124 @@ def test_nesting_the_parser_already_refuses_stays_a_clean_refusal(
 
     assert result.startswith("Error: cannot inspect config precedence in deep.py: malformed")
     assert "RecursionError" not in result
+
+
+MODEL_CLI_QUESTION = (
+    "Trace the default model and CLI --model override precedence in config.resolve()."
+)
+MODEL_CLI_TOO_DEEP = (
+    "Error: cannot inspect default model and CLI wiring: nesting is too deep to inspect"
+)
+CONFIGURED_TOML = '[defaults]\nmodel = "configured:2b"\n'
+
+#: shape -> (the file it goes in, its text, the call that overflows on it). The same nesting
+#: reaches the parser from main.py and the TOML reader from omniagent.toml; sizes keep each
+#: file under the 16,000-character read cap.
+MODEL_CLI_DEEP = {
+    "main-plus-chain": ("main.py", MODEL_MAIN_SOURCE + f"x = {_terms(7000)}\n", "parse"),
+    "main-attribute-chain": (
+        "main.py",
+        MODEL_MAIN_SOURCE + "a." + ".".join(["b"] * 4000) + "\n",
+        "parse",
+    ),
+    "toml-nested-arrays": (
+        "omniagent.toml",
+        CONFIGURED_TOML + "deep = " + "[" * 3000 + "]" * 3000 + "\n",
+        "loads",
+    ),
+    "toml-nested-inline-tables": (
+        "omniagent.toml",
+        CONFIGURED_TOML + "deep = " + "{a=" * 3000 + "1" + "}" * 3000 + "\n",
+        "loads",
+    ),
+}
+MODEL_CLI_DEEP_SHAPE = pytest.mark.parametrize("shape", list(MODEL_CLI_DEEP))
+
+
+def _model_cli_files(root: Path, **replacements: str) -> None:
+    files = {
+        "agent.py": 'DEFAULT_MODEL = "fallback:1b"\n',
+        "omniagent.toml": CONFIGURED_TOML,
+        "main.py": MODEL_MAIN_SOURCE,
+        **replacements,
+    }
+    for name, text in files.items():
+        (root / name).write_text(text, encoding="utf-8")
+
+
+@MODEL_CLI_DEEP_SHAPE
+def test_each_model_cli_deep_shape_overflows_the_recursion_limit_at_its_own_call(
+    shape: str,
+) -> None:
+    """Without this, the refusals below could pass because nothing ever overflowed."""
+    name, text, site = MODEL_CLI_DEEP[shape]
+    reader = tools._cli_model_lines if name == "main.py" else tools._configured_model
+
+    with pytest.raises(RecursionError) as caught:
+        reader(text)
+
+    assert len(text) < 16_000
+    assert site in [frame.name for frame in traceback.extract_tb(caught.value.__traceback__)]
+
+
+@MODEL_CLI_DEEP_SHAPE
+def test_a_model_cli_source_nested_too_deeply_is_refused_not_raised(
+    config_workspace: Workspace, shape: str
+) -> None:
+    name, text, _site = MODEL_CLI_DEEP[shape]
+    _model_cli_files(config_workspace.root, **{name: text})
+
+    result = inspect_default_model_cli()
+
+    assert result == MODEL_CLI_TOO_DEEP
+    assert "RecursionError" not in result
+
+
+@MODEL_CLI_DEEP_SHAPE
+def test_the_agent_route_returns_normally_when_the_model_cli_source_is_too_deep(
+    config_workspace: Workspace, tmp_path: Path, shape: str
+) -> None:
+    """The fast route calls the tool directly, not through the dispatcher's catch-all, so
+    an exception here used to leave Agent.run altogether."""
+    name, text, _site = MODEL_CLI_DEEP[shape]
+    _model_cli_files(config_workspace.root, **{name: text})
+    telemetry_key = tmp_path / "capture"
+    reset_capture()
+    configure_memory_sink(telemetry_key, level=logging.INFO)
+    try:
+        fake = FakeOpenAI(replies=[])
+        agent = ReActAgent(
+            config=AgentConfig(verbose=False),
+            client=fake.as_client(),
+            printer=lambda _: None,
+        )
+
+        answer = agent.run(MODEL_CLI_QUESTION)
+
+        records = read_lines(telemetry_key)
+    finally:
+        reset_capture()
+
+    assert answer.startswith(MODEL_CLI_TOO_DEEP)
+    assert "RecursionError" not in answer
+    assert fake.calls == []
+    assert "tool.crashed" not in [record["event"] for record in records]
+    results = [record for record in records if record["event"] == "agent.fast_route.result"]
+    assert [record["status"] for record in results] == ["error"]
+
+
+def test_a_long_default_model_line_is_cut_before_it_is_parsed(
+    config_workspace: Workspace,
+) -> None:
+    """search_text cuts a matched line at 200 characters, so the one-line parse of
+    DEFAULT_MODEL never sees a deep tree. Whole, this 14,000-character chain overflows the
+    parser; raising the cut would send it there."""
+    line = 'DEFAULT_MODEL = "a"' + '+"a"' * 3500
+    with pytest.raises(RecursionError):
+        ast.parse(line)
+    _model_cli_files(config_workspace.root, **{"agent.py": line + "\n"})
+
+    result = inspect_default_model_cli()
+
+    assert result.startswith("Error: cannot inspect default model and CLI wiring: ")
+    assert "nesting is too deep" not in result

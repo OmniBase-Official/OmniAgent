@@ -1214,8 +1214,10 @@ def inspect_default_model_cli() -> str:
         TypeError,
         ValueError,
         tomllib.TOMLDecodeError,
+        RecursionError,
     ) as exc:
-        return f"Error: cannot inspect default model and CLI wiring: {exc}"
+        cause = "nesting is too deep to inspect" if isinstance(exc, RecursionError) else exc
+        return f"Error: cannot inspect default model and CLI wiring: {cause}"
 
     return "\n".join(
         [
