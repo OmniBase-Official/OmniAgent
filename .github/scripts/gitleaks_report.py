@@ -34,8 +34,15 @@ SUMMARY = re.compile(
     rb"(?m)^(?:[0-9]{1,2}:[0-9]{2}(?:AM|PM)\s+)?INF\s+([0-9]{1,10})\s+commits scanned\.?\s*$"
 )
 SUMMARY_MARKER = b"commits scanned"
+SUMMARY_TIMESTAMP_PREFIX = re.compile(rb"^[0-9]{1,2}:[0-9]{2}(?:AM|PM)")
+SUMMARY_INF_PREFIX = re.compile(rb"^INF(?:\s|$)")
+SUMMARY_NUMERIC_PREFIX = re.compile(
+    rb"^(?:[0-9]{1,2}:[0-9]{2}(?:AM|PM)\s+)?INF\s+[0-9]+\s+"
+)
+SUMMARY_ALLOWED_SUFFIX = re.compile(rb"[ \t]*\.?[ \t]*\Z")
 MIN_SUMMARY_LINE_BYTES = len(b"INF 0 ") + len(SUMMARY_MARKER)
 MAX_DIAGNOSTIC_MARKERS = MAX_CAPTURE // len(SUMMARY_MARKER)
+MAX_DIAGNOSTIC_CANDIDATE_LINES = 2 * MAX_DIAGNOSTIC_MARKERS
 MAX_DIAGNOSTIC_SUMMARY_MATCHES = 2 * MAX_CAPTURE // MIN_SUMMARY_LINE_BYTES
 MAX_SUMMARY_COMMIT_COUNT = 9_999_999_999
 HASH = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -44,7 +51,7 @@ CLEAN_STATUS = 0
 FINDINGS_STATUS = 2
 CLI_EXIT_FAILURE = 1
 REPORT_FIELD_COUNT = 4
-SUMMARY_DIAGNOSTIC_FIELD_COUNT = 8
+SUMMARY_DIAGNOSTIC_FIELD_COUNT = 14
 MAX_LINE_NUMBER = 2**31 - 1
 CLI_SCAN_ARGC = 4
 CLI_CONTRACT_ARGC = 4
@@ -85,7 +92,9 @@ ALLOWED_STAGE_IDS = frozenset(
 )
 FindingRow = tuple[str, str, str, int]
 ScanResult = tuple[int, list[FindingRow], bytes, bytes]
-SummaryDiagnostics = tuple[int, int, int, int, int, int, int | None, int]
+SummaryDiagnostics = tuple[
+    int, int, int, int, int, int, int | None, int, int, bool, bool, bool, bool, bool
+]
 
 
 class ScanError(Exception):
@@ -109,7 +118,7 @@ class StageError(ScanError):
 
 
 def valid_summary_diagnostics(value: object) -> bool:
-    if not isinstance(value, tuple) or len(value) != SUMMARY_DIAGNOSTIC_FIELD_COUNT:
+    if type(value) is not tuple or len(value) != SUMMARY_DIAGNOSTIC_FIELD_COUNT:
         return False
     (
         stdout_bytes,
@@ -120,6 +129,12 @@ def valid_summary_diagnostics(value: object) -> bool:
         expected,
         parsed,
         status,
+        candidate_lines,
+        inf_prefix,
+        timestamp_prefix,
+        numeric_prefix,
+        ansi,
+        suffix_content,
     ) = value
     if not all(
         type(count) is int and count >= 0 for count in (*value[:6], status)
@@ -139,11 +154,36 @@ def valid_summary_diagnostics(value: object) -> bool:
         return False
     if not 1 <= expected <= MAX_SUMMARY_COMMIT_COUNT:
         return False
+    if not valid_summary_shape(
+        candidate_lines,
+        stdout_markers + stderr_markers,
+        inf_prefix,
+        timestamp_prefix,
+        numeric_prefix,
+        ansi,
+        suffix_content,
+    ):
+        return False
     if parsed is not None and (
         type(parsed) is not int or parsed < 0 or parsed > MAX_SUMMARY_COMMIT_COUNT
     ):
         return False
     return status in (CLEAN_STATUS, FINDINGS_STATUS)
+
+
+def valid_summary_shape(
+    candidate_lines: object, marker_count: int, *flags: object
+) -> bool:
+    if type(candidate_lines) is not int or not (
+        0 <= candidate_lines <= MAX_DIAGNOSTIC_CANDIDATE_LINES
+    ):
+        return False
+    if candidate_lines > marker_count or any(type(flag) is not bool for flag in flags):
+        return False
+    inf_prefix, timestamp_prefix, numeric_prefix, _, _ = flags
+    return (candidate_lines > 0 or not any(flags)) and (
+        not numeric_prefix or inf_prefix or timestamp_prefix
+    )
 
 
 def fail_stage(stage: StageId) -> NoReturn:
@@ -168,14 +208,21 @@ def report_error(error: ScanError) -> None:
             and valid_summary_diagnostics(diagnostics)
         ):
             stdout_bytes, stderr_bytes, stdout_markers, stderr_markers = diagnostics[:4]
-            matches, expected, parsed_count, scanner_status = diagnostics[4:]
+            matches, expected, parsed_count, scanner_status = diagnostics[4:8]
+            candidate_lines, inf_prefix, timestamp_prefix, numeric_prefix, ansi, suffix_content = (
+                diagnostics[8:]
+            )
             parsed = "none" if parsed_count is None else str(parsed_count)
             sys.stderr.write(
                 f"{GENERIC} stage={error.stage} stdout_bytes={stdout_bytes} "
                 f"stderr_bytes={stderr_bytes} stdout_markers={stdout_markers} "
                 f"stderr_markers={stderr_markers} summary_matches={matches} "
                 f"expected_commits={expected} parsed_commits={parsed} "
-                f"scanner_exit_status={scanner_status}\n"
+                f"scanner_exit_status={scanner_status} candidate_lines={candidate_lines} "
+                f"candidate_inf_prefix={int(inf_prefix)} "
+                f"candidate_timestamp_prefix={int(timestamp_prefix)} "
+                f"candidate_numeric_prefix={int(numeric_prefix)} candidate_ansi={int(ansi)} "
+                f"candidate_suffix_content={int(suffix_content)}\n"
             )
             return
         sys.stderr.write(f"{GENERIC} stage={error.stage}\n")
@@ -347,6 +394,27 @@ def summary_metrics(output: bytes) -> tuple[int, int | None]:
         return len(found), None
 
 
+def summary_shape_metrics(stdout: bytes, stderr: bytes) -> tuple[int, bool, bool, bool, bool, bool]:
+    """Return bounded shape flags for marker lines without exposing their contents."""
+    candidates = [
+        line
+        for stream in (stdout, stderr)
+        for line in stream.splitlines()
+        if SUMMARY_MARKER in line
+    ]
+    return (
+        len(candidates),
+        any(SUMMARY_INF_PREFIX.match(line) is not None for line in candidates),
+        any(SUMMARY_TIMESTAMP_PREFIX.match(line) is not None for line in candidates),
+        any(SUMMARY_NUMERIC_PREFIX.match(line) is not None for line in candidates),
+        any(b"\x1b" in line for line in candidates),
+        any(
+            SUMMARY_ALLOWED_SUFFIX.fullmatch(line.partition(SUMMARY_MARKER)[2]) is None
+            for line in candidates
+        ),
+    )
+
+
 def scanner_status_consistent(status: int, rows: list[tuple[str, str, str, int]]) -> bool:
     return (status == CLEAN_STATUS and not rows) or (status == FINDINGS_STATUS and bool(rows))
 
@@ -420,6 +488,7 @@ def verify_scan_summary(
 ) -> None:
     stdout_matches, stdout_parsed = summary_metrics(stdout)
     stderr_matches, stderr_parsed = summary_metrics(stderr)
+    shape_metrics = summary_shape_metrics(stdout, stderr)
     matches = stdout_matches + stderr_matches
     parsed = (
         stdout_parsed
@@ -438,6 +507,7 @@ def verify_scan_summary(
                 expected,
                 parsed,
                 scanner_exit_status,
+                *shape_metrics,
             ),
         )
 

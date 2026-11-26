@@ -116,22 +116,74 @@ def test_summary_parser_accepts_timestamped_or_bare_and_rejects_malformed() -> N
 @pytest.mark.parametrize(
     ("stdout", "stderr", "expected_metrics"),
     [
-        (b"", b"", (0, 0, 0, None, 0)),
-        (b"commits scanned", b"", (1, 0, 0, None, 0)),
-        (b"", b"diagnostic only", (0, 0, 0, None, 0)),
-        (b"", b"INF 1 commits scanned\nINF 1 commits scanned\n", (0, 2, 2, None, 2)),
-        (b"", b"INF 2 commits scanned\n", (0, 1, 1, 2, 2)),
+        (b"", b"", (0, 0, 0, None, 0, 0, False, False, False, False, False)),
+        (b"commits scanned", b"", (1, 0, 0, None, 0, 1, False, False, False, False, False)),
+        (b"", b"diagnostic only", (0, 0, 0, None, 0, 0, False, False, False, False, False)),
+        (
+            b"",
+            b"INF 1 commits scanned\nINF 1 commits scanned\n",
+            (0, 2, 2, None, 2, 2, True, False, True, False, False),
+        ),
+        (
+            b"",
+            b"INF 2 commits scanned\n",
+            (0, 1, 1, 2, 2, 1, True, False, True, False, False),
+        ),
+        (
+            b"",
+            b"INF 1 commits scanned unexpected\n",
+            (0, 1, 0, None, 0, 1, True, False, True, False, True),
+        ),
+        (
+            b"",
+            b"INF 1 commits scanned..\n",
+            (0, 1, 0, None, 0, 1, True, False, True, False, True),
+        ),
+        (
+            b"",
+            b"\x1b[31mINF 1 commits scanned\x1b[0m\n",
+            (0, 1, 0, None, 0, 1, False, False, False, True, True),
+        ),
+        (
+            b"",
+            b"12:51AM INF 2 commits scanned\n",
+            (0, 1, 1, 2, 0, 1, False, True, True, False, False),
+        ),
     ],
-    ids=("no-output", "marker-without-regex-match", "marker-absent", "multiple", "mismatch"),
+    ids=(
+        "no-output",
+        "marker-without-regex-match",
+        "marker-absent",
+        "multiple",
+        "mismatch",
+        "suffix-content",
+        "duplicate-period-suffix",
+        "ansi-markers",
+        "timestamped-prefix",
+    ),
 )
 def test_summary_verification_reports_safe_numeric_diagnostics(
     stdout: bytes,
     stderr: bytes,
-    expected_metrics: tuple[int, int, int, int | None, int],
+    expected_metrics: tuple[
+        int, int, int, int | None, int, int, bool, bool, bool, bool, bool
+    ],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     expected = 1
-    stdout_markers, stderr_markers, matches, parsed, scanner_status = expected_metrics
+    (
+        stdout_markers,
+        stderr_markers,
+        matches,
+        parsed,
+        scanner_status,
+        candidate_lines,
+        inf_prefix,
+        timestamp_prefix,
+        numeric_prefix,
+        ansi,
+        suffix_content,
+    ) = expected_metrics
 
     with pytest.raises(StageError) as caught:
         verify_scan_summary(stdout, stderr, expected, scanner_status)
@@ -148,6 +200,12 @@ def test_summary_verification_reports_safe_numeric_diagnostics(
             expected,
             parsed,
             scanner_status,
+            candidate_lines,
+            inf_prefix,
+            timestamp_prefix,
+            numeric_prefix,
+            ansi,
+            suffix_content,
         ),
     )
     report_error(caught.value)
@@ -159,7 +217,11 @@ def test_summary_verification_reports_safe_numeric_diagnostics(
         f"stderr_bytes={len(stderr)} stdout_markers={stdout_markers} "
         f"stderr_markers={stderr_markers} summary_matches={matches} "
         f"expected_commits={expected} parsed_commits={parsed_text} "
-        f"scanner_exit_status={scanner_status}\n",
+        f"scanner_exit_status={scanner_status} candidate_lines={candidate_lines} "
+        f"candidate_inf_prefix={int(inf_prefix)} "
+        f"candidate_timestamp_prefix={int(timestamp_prefix)} "
+        f"candidate_numeric_prefix={int(numeric_prefix)} candidate_ansi={int(ansi)} "
+        f"candidate_suffix_content={int(suffix_content)}\n",
     )
     expect_equal(captured.out, "")
 
@@ -203,7 +265,9 @@ def test_summary_not_formed_across_stdout_stderr_boundary(
         captured.err,
         "security scan failed stage=scan_commit_summary stdout_bytes=4 stderr_bytes=18 "
         "stdout_markers=0 stderr_markers=1 summary_matches=0 expected_commits=1 "
-        "parsed_commits=none scanner_exit_status=0\n",
+        "parsed_commits=none scanner_exit_status=0 candidate_lines=1 "
+        "candidate_inf_prefix=0 candidate_timestamp_prefix=0 candidate_numeric_prefix=0 "
+        "candidate_ansi=0 candidate_suffix_content=0\n",
     )
     expect_equal(stdout.decode() in captured.err, False)
     expect_equal(stderr.decode() in captured.err, False)
@@ -220,6 +284,12 @@ def test_summary_diagnostic_bounds_accept_maximum_values() -> None:
         module.MAX_SUMMARY_COMMIT_COUNT,
         module.MAX_SUMMARY_COMMIT_COUNT,
         module.FINDINGS_STATUS,
+        2 * max_stream_matches,
+        True,
+        True,
+        True,
+        True,
+        True,
     )
     expect_equal(module.valid_summary_diagnostics(diagnostics), True)
 
@@ -236,12 +306,18 @@ def test_summary_diagnostic_bounds_accept_maximum_values() -> None:
         "expected-commits",
         "parsed-commits",
         "scanner-status",
+        "candidate-lines",
+        "inf-prefix",
+        "timestamp-prefix",
+        "numeric-prefix",
+        "ansi",
+        "suffix-content",
     ),
 )
 def test_oversized_summary_diagnostic_fields_fall_back_without_raising(
     field_index: int, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    fields: list[object] = [64, 64, 1, 0, 1, 1, 1, 0]
+    fields: list[object] = [64, 64, 1, 0, 1, 1, 1, 0, 1, True, False, True, False, False]
     fields[field_index] = 10**5000
     error = StageError("scan_commit_summary", summary_diagnostics=tuple(fields))  # type: ignore[arg-type]
 
@@ -255,15 +331,18 @@ def test_oversized_summary_diagnostic_fields_fall_back_without_raising(
 def test_malformed_summary_diagnostics_fall_back_without_raising(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    valid = (64, 64, 1, 0, 1, 1, 1, 0)
+    valid = (64, 64, 1, 0, 1, 1, 1, 0, 1, True, False, True, False, False)
     malformed: tuple[object, ...] = (
         None,
         [],
         valid[:-1],
         (True, *valid[1:]),
         (-1, *valid[1:]),
-        (64, 64, 0, 0, 1, 1, 1, 0),
-        (64, 64, 1, 0, 1, 1, True, 0),
+        (64, 64, 0, 0, 1, 1, 1, 0, 1, True, False, True, False, False),
+        (64, 64, 1, 0, 1, 1, True, 0, 1, True, False, True, False, False),
+        (*valid[:8], 0, *valid[9:]),
+        (*valid[:8], 0, True, False, True, False, False),
+        (64, 64, 1, 0, 0, 1, None, 0, 1, False, False, True, False, False),
         (*valid[:-1], 1),
     )
     for diagnostics in malformed:
@@ -627,7 +706,9 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
     expected_diagnostic = (
         f"security scan failed stage=scan_commit_summary stdout_bytes={len(b'missing summary')} "
         "stderr_bytes=0 stdout_markers=0 stderr_markers=0 summary_matches=0 "
-        "expected_commits=1 parsed_commits=none scanner_exit_status=0\n"
+        "expected_commits=1 parsed_commits=none scanner_exit_status=0 candidate_lines=0 "
+        "candidate_inf_prefix=0 candidate_timestamp_prefix=0 candidate_numeric_prefix=0 "
+        "candidate_ansi=0 candidate_suffix_content=0\n"
         if phase == "summary"
         else f"security scan failed stage={expected_stage}\n"
     )
