@@ -448,3 +448,32 @@ def test_optional_evaluation_report_is_not_a_promotion_input(
         ]
     ) == 0
     assert not report.exists()
+
+
+#: Nesting a few thousand deep overflows the JSON reader, well under the 1 MiB manifest cap.
+DEEP_MANIFEST = {
+    "nested-arrays": "[" * 3000 + "]" * 3000,
+    "nested-objects": '{"a":' * 3000 + "1" + "}" * 3000,
+}
+DEEP_MANIFEST_SHAPE = pytest.mark.parametrize("shape", list(DEEP_MANIFEST))
+
+
+@DEEP_MANIFEST_SHAPE
+def test_each_deep_manifest_shape_overflows_the_json_reader(shape: str) -> None:
+    """Without this, the refusals below could pass because nothing ever overflowed."""
+    with pytest.raises(RecursionError):
+        json.loads(DEEP_MANIFEST[shape])
+
+    assert len(DEEP_MANIFEST[shape]) < MAX_RUN_MANIFEST_BYTES
+
+
+@DEEP_MANIFEST_SHAPE
+def test_a_manifest_nested_too_deeply_is_refused_not_raised(tmp_path: Path, shape: str) -> None:
+    run = _run_dir(tmp_path)
+    (run / "manifest.json").write_text(DEEP_MANIFEST[shape], encoding="utf-8")
+
+    reasons = check_run(run)
+    binding = verified_run_gguf(run)
+
+    assert reasons == ["manifest.json is unreadable or is not valid JSON"]
+    assert binding == (None, None, "the run manifest cannot bind evaluation to a GGUF")

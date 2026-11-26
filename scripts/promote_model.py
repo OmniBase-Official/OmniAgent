@@ -152,7 +152,7 @@ def verified_run_gguf(run: Path) -> tuple[Path | None, str | None, str | None]:
         return None, None, "the run manifest cannot bind evaluation to a GGUF"
     try:
         manifest = json.loads(manifest_bytes.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError):
+    except (UnicodeError, json.JSONDecodeError, RecursionError):
         return None, None, "the run manifest cannot bind evaluation to a GGUF"
     if not isinstance(manifest, dict):
         return None, None, "the run manifest cannot bind evaluation to a GGUF"
@@ -266,7 +266,7 @@ def check_run(run: Path) -> list[str]:
         return [f"{manifest_path.name} is unreadable or is not valid JSON"]
     try:
         manifest = json.loads(manifest_bytes.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError):
+    except (UnicodeError, json.JSONDecodeError, RecursionError):
         return [f"{manifest_path.name} is unreadable or is not valid JSON"]
     if not isinstance(manifest, dict):
         return [f"{manifest_path.name} must contain a JSON object"]
