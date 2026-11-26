@@ -8,6 +8,8 @@ debug than a silent one.
 
 from __future__ import annotations
 
+import tomllib
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -488,3 +490,54 @@ def test_verbose_and_quiet_cannot_be_used_together(
 
     assert caught.value.code == 2
     assert "not allowed with argument" in capsys.readouterr().err
+
+
+#: Nesting a few thousand deep overflows tomllib's recursive-descent reader. Both shapes stay
+#: small files; no size cap applies before the read, and none is needed for the depth.
+DEEP_TOML = {
+    "nested-arrays": CONFIG + "deep = " + "[" * 3000 + "]" * 3000 + "\n",
+    "nested-inline-tables": CONFIG + "deep = " + "{a=" * 3000 + "1" + "}" * 3000 + "\n",
+}
+DEEP_TOML_SHAPE = pytest.mark.parametrize("shape", list(DEEP_TOML))
+
+
+@DEEP_TOML_SHAPE
+def test_each_deep_toml_shape_overflows_the_reader_at_its_own_call(shape: str) -> None:
+    """Without this, the refusals below could pass because nothing ever overflowed."""
+    with pytest.raises(RecursionError) as caught:
+        tomllib.loads(DEEP_TOML[shape])
+
+    assert "loads" in [frame.name for frame in traceback.extract_tb(caught.value.__traceback__)]
+
+
+@DEEP_TOML_SHAPE
+def test_a_config_file_nested_too_deeply_is_refused_with_a_fixed_message(
+    tmp_path: Path, shape: str
+) -> None:
+    path = tmp_path / "deep.toml"
+    path.write_text(DEEP_TOML[shape], encoding="utf-8")
+
+    with pytest.raises(ConfigError) as refused:
+        settings_at(tmp_path, config_path=path)
+
+    assert str(refused.value) == f"{path} cannot be read: nesting is too deep"
+    assert "RecursionError" not in str(refused.value)
+
+
+@DEEP_TOML_SHAPE
+def test_the_program_prints_a_clean_message_for_a_discovered_config_file_nested_too_deeply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    shape: str,
+) -> None:
+    """The file is found in the working directory, so a repository the user opened can
+    carry it. Before the fix the program died with a traceback thousands of lines long."""
+    (tmp_path / DEFAULT_CONFIG_NAME).write_text(DEEP_TOML[shape], encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    assert cli_main(["--print-config"]) == 2
+
+    captured = capsys.readouterr()
+    assert "cannot be read: nesting is too deep" in captured.out
+    assert "RecursionError" not in captured.out + captured.err

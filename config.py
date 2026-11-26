@@ -161,6 +161,8 @@ def read_config_file(path: Path) -> dict[str, Any]:
         raise ConfigError(f"no such config file: {path}") from exc
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path} is not valid TOML: {exc}") from exc
+    except RecursionError as exc:
+        raise ConfigError(f"{path} cannot be read: nesting is too deep") from exc
     except OSError as exc:
         raise ConfigError(f"could not read {path}: {exc}") from exc
     return data
