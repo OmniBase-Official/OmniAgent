@@ -26,6 +26,7 @@ from gitleaks_report import (
     safe_path,
     scanner_status_consistent,
     summary_count,
+    verify_scan_summary,
 )
 
 HASH = "0123456789abcdef0123456789abcdef01234567"
@@ -110,6 +111,53 @@ def test_summary_parser_accepts_timestamped_or_bare_and_rejects_malformed() -> N
     for (value,) in invalid:
         with pytest.raises(ScanError):
             summary_count(value)
+
+
+@pytest.mark.parametrize(
+    ("summary", "matches", "parsed"),
+    [
+        (b"no summary\n", 0, None),
+        (b"INF 1 commits scanned. trailing\n", 0, None),
+        (b"INF 1 commits scanned\nINF 1 commits scanned\n", 2, None),
+        (b"INF 2 commits scanned\n", 1, 2),
+    ],
+    ids=("missing", "malformed", "multiple", "mismatch"),
+)
+def test_summary_verification_reports_safe_numeric_diagnostics(
+    summary: bytes,
+    matches: int,
+    parsed: int | None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    expected = 1
+    private_path = str(tmp_path / "private-summary-path")
+    canary = "ghp_" + hashlib.sha256(b"summary-diagnostic-canary").hexdigest()[:36]
+    output = summary + f"untrusted {private_path} {canary}\n".encode()
+
+    with pytest.raises(StageError) as caught:
+        verify_scan_summary(output, expected)
+
+    expect_equal(caught.value.stage, "scan_commit_summary")
+    expect_equal(caught.value.summary_matches, matches)
+    expect_equal(caught.value.expected_commits, expected)
+    expect_equal(caught.value.parsed_commits, parsed)
+    report_error(caught.value)
+    captured = capsys.readouterr()
+    parsed_text = "none" if parsed is None else str(parsed)
+    expect_equal(
+        captured.err,
+        "security scan failed stage=scan_commit_summary "
+        f"summary_matches={matches} expected_commits={expected} "
+        f"parsed_commits={parsed_text}\n",
+    )
+    expect_equal(captured.out, "")
+    expect_equal(private_path in captured.err, False)
+    expect_equal(canary in captured.err, False)
+
+
+def test_summary_verification_accepts_matching_count() -> None:
+    verify_scan_summary(b"12:51AM INF 1 commits scanned\n", 1)
 
 
 def test_status_rows_consistency() -> None:
@@ -234,6 +282,7 @@ def test_stage_diagnostics_emit_only_allowlisted_ids(tmp_path: Path) -> None:
         "contract_canary_scan",
         "contract_mutant_scan",
         "contract_cli_validation",
+        "scan_commit_summary",
     )
     for stage_id in stage_ids:
         code = (
@@ -252,6 +301,27 @@ def test_stage_diagnostics_emit_only_allowlisted_ids(tmp_path: Path) -> None:
         expect_equal(diagnostic, f"security scan failed stage={stage_id}\n".encode())
         expect_equal(private_path.encode() in diagnostic, False)
         expect_equal(canary.encode() in diagnostic, False)
+
+    invalid_summary = subprocess.run(  # noqa: S603 - fixed interpreter argv and controlled fixture.
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import gitleaks_report as g; "
+                "g.report_error(g.StageError(sys.argv[1], summary_matches=sys.argv[2], "
+                "expected_commits=1)); raise SystemExit(1)"
+            ),
+            "scan_commit_summary",
+            canary,
+        ],
+        cwd=script_dir,
+        capture_output=True,
+        check=False,
+    )
+    expect_equal(invalid_summary.returncode, 1)
+    invalid_diagnostic = invalid_summary.stderr.replace(b"\r\n", b"\n")
+    expect_equal(invalid_diagnostic, b"security scan failed stage=scan_commit_summary\n")
+    expect_equal(canary.encode() in invalid_diagnostic, False)
 
     invalid_id = f"{private_path}:{canary}"
     with pytest.raises(ScanError) as rejected_stage:
@@ -439,7 +509,13 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
     report_error(caught.value)
     captured = capsys.readouterr()
     expect_equal(captured.out, "")
-    expect_equal(captured.err, f"security scan failed stage={expected_stage}\n")
+    expected_diagnostic = (
+        "security scan failed stage=scan_commit_summary summary_matches=0 "
+        "expected_commits=1 parsed_commits=none\n"
+        if phase == "summary"
+        else f"security scan failed stage={expected_stage}\n"
+    )
+    expect_equal(captured.err, expected_diagnostic)
     expect_equal(canary in captured.err, False)
     expect_equal(private_path in captured.err, False)
 

@@ -90,9 +90,19 @@ def fail() -> NoReturn:
 
 
 class StageError(ScanError):
-    def __init__(self, stage: StageId) -> None:
+    def __init__(
+        self,
+        stage: StageId,
+        *,
+        summary_matches: int | None = None,
+        expected_commits: int | None = None,
+        parsed_commits: int | None = None,
+    ) -> None:
         super().__init__(GENERIC)
         self.stage = stage
+        self.summary_matches = summary_matches
+        self.expected_commits = expected_commits
+        self.parsed_commits = parsed_commits
 
 
 def fail_stage(stage: StageId) -> NoReturn:
@@ -110,6 +120,29 @@ def preserve_or_fallback(error: StageError, fallback: StageId) -> NoReturn:
 def report_error(error: ScanError) -> None:
     sys.stdout.buffer.write(b"")
     if isinstance(error, StageError) and error.stage in ALLOWED_STAGE_IDS:
+        if (
+            error.stage == "scan_commit_summary"
+            and isinstance(error.summary_matches, int)
+            and not isinstance(error.summary_matches, bool)
+            and error.summary_matches >= 0
+            and isinstance(error.expected_commits, int)
+            and not isinstance(error.expected_commits, bool)
+            and error.expected_commits >= 0
+            and (
+                error.parsed_commits is None
+                or (
+                    isinstance(error.parsed_commits, int)
+                    and not isinstance(error.parsed_commits, bool)
+                    and error.parsed_commits >= 0
+                )
+            )
+        ):
+            parsed = "none" if error.parsed_commits is None else str(error.parsed_commits)
+            sys.stderr.write(
+                f"{GENERIC} stage={error.stage} summary_matches={error.summary_matches} "
+                f"expected_commits={error.expected_commits} parsed_commits={parsed}\n"
+            )
+            return
         sys.stderr.write(f"{GENERIC} stage={error.stage}\n")
         return
     sys.stderr.write(GENERIC + "\n")
@@ -263,13 +296,20 @@ def count_commits(repo: Path) -> int:
 
 
 def summary_count(output: bytes) -> int:
+    matches, parsed = summary_metrics(output)
+    if matches != 1 or parsed is None:
+        fail()
+    return parsed
+
+
+def summary_metrics(output: bytes) -> tuple[int, int | None]:
     found = SUMMARY.findall(output)
     if len(found) != 1:
-        fail()
+        return len(found), None
     try:
-        return int(found[0])
+        return len(found), int(found[0])
     except ValueError:
-        fail()
+        return len(found), None
 
 
 def scanner_status_consistent(status: int, rows: list[tuple[str, str, str, int]]) -> bool:
@@ -341,11 +381,14 @@ def inspect_scan_container(docker_bin: str, name: str, start_status: int) -> int
 
 
 def verify_scan_summary(output: bytes, expected: int) -> None:
-    try:
-        if summary_count(output) != expected:
-            fail()
-    except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
-        fail_stage("scan_commit_summary")
+    matches, parsed = summary_metrics(output)
+    if matches != 1 or parsed != expected:
+        raise StageError(
+            "scan_commit_summary",
+            summary_matches=matches,
+            expected_commits=expected,
+            parsed_commits=parsed,
+        )
 
 
 def copy_scan_report(name: str, report: Path, docker_bin: str) -> bytes:
