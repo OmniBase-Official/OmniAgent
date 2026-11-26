@@ -40,7 +40,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
-from dataset_provenance import sidecar_path
+from dataset_provenance import ProvenanceError, read_sidecar, sidecar_path
 
 #: The checksum file, in the format `sha256sum` itself writes and reads.
 SUMS_NAME = "SHA256SUMS"
@@ -173,6 +173,10 @@ def publish(  # noqa: PLR0913 - each argument is a separate fact the manifest ha
             "Run dataset_provenance.write_sidecar first -- a dataset that cannot "
             "say what prompt it was collected under has not been shown to match it."
         )
+    try:
+        recorded = read_sidecar(dataset)
+    except ProvenanceError as exc:
+        raise PublishError(str(exc)) from exc
 
     sources = [dataset, sidecar, *extras]
     missing = [str(path) for path in sources if not path.is_file()]
@@ -205,7 +209,6 @@ def publish(  # noqa: PLR0913 - each argument is a separate fact the manifest ha
         encoding="utf-8",
     )
 
-    recorded = json.loads(sidecar.read_text(encoding="utf-8"))
     manifest: dict[str, object] = {
         "dataset": dataset.name,
         "examples": recorded.get("examples"),

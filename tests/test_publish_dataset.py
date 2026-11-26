@@ -26,7 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import publish_dataset
 from publish_dataset import PublishError, publish, verify
 
-from dataset_provenance import write_sidecar
+from dataset_limits import MAX_SIDECAR_BYTES
+from dataset_provenance import sidecar_path, write_sidecar
 
 
 def _create_junction(link: Path, target: Path) -> None:
@@ -356,3 +357,51 @@ def test_publishing_still_requires_a_dataset_and_a_teacher(tmp_path: Path) -> No
         publish_dataset.main(["--dest", str(tmp_path / "drive")])
 
     assert exit_info.value.code == 2
+
+
+#: sidecar text -> the refusal publish must give. Each used to escape publish() as a raw
+#: exception, after the dataset and its sidecar had already been copied into the destination.
+HOSTILE_SIDECARS = {
+    "nested-too-deep": ("[" * 3000 + "]" * 3000, "provenance sidecar JSON nesting is too deep"),
+    "nested-past-the-limit": ("[" * 150 + "]" * 150, "provenance sidecar JSON nesting is too deep"),
+    "not-an-object": ("[1]", "provenance sidecar must contain a JSON object"),
+    "over-the-size-cap": (
+        " " * (MAX_SIDECAR_BYTES + 1) + "{}",
+        f"provenance sidecar exceeds maximum size of {MAX_SIDECAR_BYTES} bytes",
+    ),
+}
+HOSTILE_SIDECAR = pytest.mark.parametrize("shape", list(HOSTILE_SIDECARS))
+
+
+def test_a_deep_sidecar_overflows_the_json_reader_that_publish_used(tmp_path: Path) -> None:
+    """Without this, the refusals below could pass because nothing ever overflowed."""
+    with pytest.raises(RecursionError):
+        json.loads(HOSTILE_SIDECARS["nested-too-deep"][0])
+
+
+@HOSTILE_SIDECAR
+def test_a_hostile_sidecar_is_refused_before_anything_is_copied(
+    dataset: Path, tmp_path: Path, shape: str
+) -> None:
+    text, refusal = HOSTILE_SIDECARS[shape]
+    sidecar_path(dataset).write_text(text, encoding="utf-8")
+    dest = tmp_path / "drive"
+
+    with pytest.raises(PublishError) as refused:
+        publish(dataset, dest, teacher="t")
+
+    assert str(refused.value) == refusal
+    assert not dest.exists()
+
+
+@HOSTILE_SIDECAR
+def test_the_command_prints_the_refusal_and_exits_one_for_a_hostile_sidecar(
+    dataset: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], shape: str
+) -> None:
+    text, refusal = HOSTILE_SIDECARS[shape]
+    sidecar_path(dataset).write_text(text, encoding="utf-8")
+
+    code = publish_dataset.main([str(dataset), "--dest", str(tmp_path / "drive"), "--teacher", "t"])
+
+    assert code == 1
+    assert f"[!] {refusal}" in capsys.readouterr().err
