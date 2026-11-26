@@ -7,8 +7,11 @@ from pathlib import Path
 import gitleaks_report as module
 import pytest
 from gitleaks_report import (
+    MAX_CANONICAL,
     MAX_CAPTURE,
+    MAX_PATH,
     MAX_REPORT,
+    REDACTED_PATH,
     ScanError,
     StageError,
     capture,
@@ -154,6 +157,47 @@ def test_cli_clean_and_finding_exit_behavior_and_safe_output() -> None:
     expect_equal(len(finding.stdout.rstrip(b"\n").split(b"\t")), EXPECTED_COLUMN_COUNT)
     expect_equal(canary.encode() in finding.stdout, False)
     expect_equal(canary.encode() in finding.stderr, False)
+
+
+def test_render_redacts_nested_untrusted_path_from_report_and_stdout(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    canary = "ghp_" + hashlib.sha256(b"omniagent-private-filename-canary").hexdigest()[:36]
+    private_path = f"nested/π/segment/{canary}\x01\ncontrol"
+    rows = [
+        ("PrivateFinding", private_path, HASH, 3),
+        ("IndependentPositiveControl", "src/normal.py", HASH, 8),
+    ]
+
+    report = render(rows)
+    module.write_stdout(report)
+    output = capsys.readouterr()
+
+    expect_equal(canary.encode("ascii") in report, False)
+    expect_equal(private_path.encode("utf-8") in report, False)
+    expect_equal(canary in output.out, False)
+    expect_equal(private_path in output.out, False)
+    expect_equal(output.err, "")
+    expect_equal(output.out.encode("ascii"), report)
+    expect_equal(REDACTED_PATH.encode("ascii") in report, True)
+    expect_equal(b"IndependentPositiveControl" in report, True)
+    expect_equal(
+        parse_report(report),
+        [
+            ("PrivateFinding", REDACTED_PATH, HASH, 3),
+            ("IndependentPositiveControl", REDACTED_PATH, HASH, 8),
+        ],
+    )
+
+
+def test_parse_report_retains_canonical_size_limit_after_redaction() -> None:
+    path = "a/" + "b" * (MAX_PATH - 2)
+    row = f'R\t"{path}"\t{HASH}\t1\n'.encode("ascii")
+    report = row * (MAX_CANONICAL // len(row) + 1)
+
+    expect_equal(len(report) < MAX_REPORT, True)
+    with pytest.raises(ScanError):
+        parse_report(report)
 
 
 def test_actual_entrypoint_clean_and_invalid_reports(tmp_path: Path) -> None:
