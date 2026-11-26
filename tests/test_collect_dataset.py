@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -198,3 +199,45 @@ def test_distinct_session_ids_export_cleanly(tmp_path: Path) -> None:
 
 # --------------------------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
+
+
+#: A question-bank line is a JSON array when it starts with "[". Nested a few thousand deep it
+#: overflows the JSON reader, from a file with no size cap before the parse.
+DEEP_BANK = "[" * 3000 + "]" * 3000 + "\n"
+
+
+def test_a_deep_question_line_overflows_the_json_reader_at_its_own_call(tmp_path: Path) -> None:
+    """Without this, the refusal below could pass because nothing ever overflowed."""
+    bank = tmp_path / "bank.txt"
+    bank.write_text(DEEP_BANK, encoding="utf-8")
+
+    with pytest.raises(RecursionError) as caught:
+        load_questions(bank)
+
+    frames = traceback.extract_tb(caught.value.__traceback__)
+    assert "raw_decode" in [frame.name for frame in frames]
+
+
+def test_a_question_bank_nested_too_deeply_is_refused_with_the_usual_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bank = tmp_path / "bank.txt"
+    bank.write_text(DEEP_BANK, encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="2"):
+        collect_main(["--dry-run", "--questions", str(bank)])
+
+    error = capsys.readouterr().err
+    assert "the question bank has JSON nesting that is too deep to read" in error
+    assert "RecursionError" not in error
+
+
+def test_a_question_array_within_the_limit_is_still_read(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bank = tmp_path / "bank.txt"
+    bank.write_text('["first", "second"]\n', encoding="utf-8")
+
+    assert collect_main(["--dry-run", "--questions", str(bank)]) == 0
+
+    assert "1 session(s), 2 question(s)" in capsys.readouterr().out

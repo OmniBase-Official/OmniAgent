@@ -191,7 +191,10 @@ def main(argv: list[str] | None = None) -> int:
             "by the privacy policy; use --dry-run to inspect the question bank."
         )
 
-    sessions = load_questions(args.questions) if args.questions else list(SESSIONS)
+    try:
+        sessions = load_questions(args.questions) if args.questions else list(SESSIONS)
+    except RecursionError:
+        parser.error("the question bank has JSON nesting that is too deep to read")
 
     settings, _ = resolve(
         {
