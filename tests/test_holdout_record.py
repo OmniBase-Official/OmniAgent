@@ -309,3 +309,34 @@ def test_the_report_states_the_denominator_it_is_a_baseline_for(
     assert f"bank: {len(verdicts)} questions" in output
     assert f"{sum(v.checkable for v in verdicts)} answer-checked" in output
     assert "not comparable with any figure recorded before 2026-11-22" in output
+
+
+DEEP_RUN_RECORD = "[" * 3_000 + "]" * 3_000
+TOO_DEEP = "run records have JSON nesting that is too deep to read"
+
+
+def test_the_deep_record_really_overflows_the_parser(
+    parsers_overflow_on_hostile_input: None,
+) -> None:
+    """The proving test: without this the guard tests below could be passing on nothing."""
+    with pytest.raises(RecursionError):
+        json.loads(DEEP_RUN_RECORD)
+
+
+@pytest.mark.usefixtures("parsers_overflow_on_hostile_input")
+def test_a_run_record_nested_too_deep_is_refused_with_fixed_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "runs.jsonl"
+    path.write_text(DEEP_RUN_RECORD + "\n", encoding="utf-8")
+    monkeypatch.setattr(holdout_eval, "RUNS_PATH", path)
+
+    with pytest.raises(SystemExit) as direct:
+        holdout_eval._read_run_records(path)
+    with pytest.raises(SystemExit) as entry:
+        main(["--runs-report"])
+
+    assert direct.value.code == entry.value.code == TOO_DEEP
+    captured = capsys.readouterr()
+    assert "RecursionError" not in captured.out + captured.err
+    assert "recursion" not in (captured.out + captured.err).lower()
