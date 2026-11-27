@@ -692,7 +692,8 @@ ruff check . && mypy && pytest
 ## CI
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the same three gates
-on every push and pull request: `ruff check .`, `mypy`, `pytest`, on Python 3.12.
+on every push and pull request to `main` or `integration/canonical-20261122`: `ruff check .`, `mypy`, `pytest`, on
+Python 3.12.
 
 The training extras are deliberately not installed there — torch is gigabytes
 and no test needs it. That difference is itself a thing to get wrong, so the

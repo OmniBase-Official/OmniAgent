@@ -53,11 +53,11 @@ held-out question banks). The repository is public. Search such material by coun
 
 ## Branches and pull requests
 
-Branch from the integration line, `integration/canonical-20261122`, and open a pull request against it. **Which branch is
-the default is not settled today:** the project has two public remotes, and as of this writing one defaults to
-`integration/canonical-20261122` and the other to `main`. That may change, so check the repository page before you branch.
-The hosted CI workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs for `main` only, so run the gates
-yourself.
+Branch from the integration line, `integration/canonical-20261122`, and open a pull request against it. The project's
+public home is [`mntoyg/OmniAgent`](https://github.com/mntoyg/OmniAgent), whose default branch is
+`integration/canonical-20261122`; `OmniBase-Official/OmniAgent` is a mirror. The hosted CI workflow
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs for both `main` and the integration branch. Run the gates
+yourself first all the same.
 
 ## Where things are
 

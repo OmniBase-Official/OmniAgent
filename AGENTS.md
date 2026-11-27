@@ -15,7 +15,7 @@ does not delegate to other agents. The frozen contract is `docs/architecture/sec
 document disagrees with the contract, the contract wins. The tool list, the endpoint policy and the evaluation design
 change only through an amendment the owner has approved.
 Core files: `agent.py`, `tools.py`, `sandbox.py`, `config.py`, `config_inspection.py`, `main.py`, `observability.py`.
-Tests are in `tests/`, scripts in `scripts/`, decisions in `docs/architecture/`, briefs and results in `docs/pm/`.
+Tests are in `tests/`, scripts in `scripts/`, architecture and security documents in `docs/architecture/`; chair briefs are local-only.
 
 ## 2. Commands and the definition of done
 Run from the tree you are working in, with the virtualenv interpreter by full path (Windows: `.venv\Scripts\python.exe`):

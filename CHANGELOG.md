@@ -6,7 +6,8 @@ history of the integration line.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+- The CI workflow now also runs for pushes and pull requests to the integration branch, `integration/canonical-20261122`.
 
 ## [0.1.0]
 
