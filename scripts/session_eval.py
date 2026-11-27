@@ -264,8 +264,11 @@ def record(outcome: Outcome, model: str, arrangement: str, path: Path = RUNS_PAT
 def read_runs(path: Path = RUNS_PATH) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
-    with path.open(encoding="utf-8") as handle:
-        return [json.loads(line) for line in handle if line.strip()]
+    try:
+        with path.open(encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+    except RecursionError:
+        raise SystemExit("run records have JSON nesting that is too deep to read") from None
 
 
 def aggregate(runs: Iterable[Mapping[str, Any]]) -> dict[tuple[str, str], Spread]:

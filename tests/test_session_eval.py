@@ -378,3 +378,33 @@ def test_the_walk_expectations_match_source_and_a_transcript_listing(tmp_path: P
     (data / "collect-run.log").write_text("synthetic run log\n", encoding="utf-8")
     assert listing.expect is not None
     assert listing.expect in "\n".join(sealed_workspace(tmp_path).list_dir("data"))
+
+
+DEEP_RUN_RECORD = "[" * 3_000 + "]" * 3_000
+TOO_DEEP = "run records have JSON nesting that is too deep to read"
+
+
+def test_the_deep_record_really_overflows_the_parser(
+    parsers_overflow_on_hostile_input: None,
+) -> None:
+    """The proving test: without this the guard tests below could be passing on nothing."""
+    with pytest.raises(RecursionError):
+        json.loads(DEEP_RUN_RECORD)
+
+
+@pytest.mark.usefixtures("parsers_overflow_on_hostile_input")
+def test_a_run_record_nested_too_deep_is_refused_with_fixed_text(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "runs.jsonl"
+    path.write_text(DEEP_RUN_RECORD + "\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as direct:
+        read_runs(path)
+    with pytest.raises(SystemExit) as entry:
+        report(path)
+
+    assert direct.value.code == entry.value.code == TOO_DEEP
+    captured = capsys.readouterr()
+    assert "RecursionError" not in captured.out + captured.err
+    assert "recursion" not in (captured.out + captured.err).lower()
