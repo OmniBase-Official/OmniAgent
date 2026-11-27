@@ -377,6 +377,7 @@ HOSTILE_SIDECARS = {
 HOSTILE_SIDECAR = pytest.mark.parametrize("shape", list(HOSTILE_SIDECARS))
 
 
+@pytest.mark.usefixtures("parsers_overflow_on_hostile_input")
 def test_a_deep_sidecar_overflows_the_json_reader_that_publish_used(tmp_path: Path) -> None:
     """Without this, the refusals below could pass because nothing ever overflowed."""
     with pytest.raises(RecursionError):

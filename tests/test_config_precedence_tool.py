@@ -631,6 +631,7 @@ TOO_DEEP = "Error: cannot inspect config precedence in deep.py: nesting is too d
 
 
 @DEEP
+@pytest.mark.usefixtures("parsers_overflow_on_hostile_input")
 def test_each_deep_shape_overflows_the_recursion_limit_at_its_own_call(shape: str) -> None:
     """Without this, the refusals below could pass because nothing ever overflowed."""
     statement, site = DEEP_SHAPES[shape]
@@ -644,6 +645,7 @@ def test_each_deep_shape_overflows_the_recursion_limit_at_its_own_call(shape: st
 
 
 @DEEP
+@pytest.mark.usefixtures("parsers_overflow_on_hostile_input")
 def test_a_source_nested_too_deeply_is_refused_not_crashed(
     config_workspace: Workspace, tmp_path: Path, shape: str
 ) -> None:
@@ -729,6 +731,7 @@ def _model_cli_files(root: Path, **replacements: str) -> None:
 
 
 @MODEL_CLI_DEEP_SHAPE
+@pytest.mark.usefixtures("parsers_overflow_on_hostile_input")
 def test_each_model_cli_deep_shape_overflows_the_recursion_limit_at_its_own_call(
     shape: str,
 ) -> None:
@@ -744,6 +747,7 @@ def test_each_model_cli_deep_shape_overflows_the_recursion_limit_at_its_own_call
 
 
 @MODEL_CLI_DEEP_SHAPE
+@pytest.mark.usefixtures("parsers_overflow_on_hostile_input")
 def test_a_model_cli_source_nested_too_deeply_is_refused_not_raised(
     config_workspace: Workspace, shape: str
 ) -> None:
@@ -757,6 +761,7 @@ def test_a_model_cli_source_nested_too_deeply_is_refused_not_raised(
 
 
 @MODEL_CLI_DEEP_SHAPE
+@pytest.mark.usefixtures("parsers_overflow_on_hostile_input")
 def test_the_agent_route_returns_normally_when_the_model_cli_source_is_too_deep(
     config_workspace: Workspace, tmp_path: Path, shape: str
 ) -> None:
@@ -789,6 +794,7 @@ def test_the_agent_route_returns_normally_when_the_model_cli_source_is_too_deep(
     assert [record["status"] for record in results] == ["error"]
 
 
+@pytest.mark.usefixtures("parsers_overflow_on_hostile_input")
 def test_a_long_default_model_line_is_cut_before_it_is_parsed(
     config_workspace: Workspace,
 ) -> None:

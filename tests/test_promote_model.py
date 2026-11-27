@@ -459,6 +459,7 @@ DEEP_MANIFEST_SHAPE = pytest.mark.parametrize("shape", list(DEEP_MANIFEST))
 
 
 @DEEP_MANIFEST_SHAPE
+@pytest.mark.usefixtures("parsers_overflow_on_hostile_input")
 def test_each_deep_manifest_shape_overflows_the_json_reader(shape: str) -> None:
     """Without this, the refusals below could pass because nothing ever overflowed."""
     with pytest.raises(RecursionError):
@@ -468,6 +469,7 @@ def test_each_deep_manifest_shape_overflows_the_json_reader(shape: str) -> None:
 
 
 @DEEP_MANIFEST_SHAPE
+@pytest.mark.usefixtures("parsers_overflow_on_hostile_input")
 def test_a_manifest_nested_too_deeply_is_refused_not_raised(tmp_path: Path, shape: str) -> None:
     run = _run_dir(tmp_path)
     (run / "manifest.json").write_text(DEEP_MANIFEST[shape], encoding="utf-8")

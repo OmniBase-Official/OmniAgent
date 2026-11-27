@@ -206,6 +206,7 @@ def test_distinct_session_ids_export_cleanly(tmp_path: Path) -> None:
 DEEP_BANK = "[" * 3000 + "]" * 3000 + "\n"
 
 
+@pytest.mark.usefixtures("parsers_overflow_on_hostile_input")
 def test_a_deep_question_line_overflows_the_json_reader_at_its_own_call(tmp_path: Path) -> None:
     """Without this, the refusal below could pass because nothing ever overflowed."""
     bank = tmp_path / "bank.txt"
@@ -218,6 +219,7 @@ def test_a_deep_question_line_overflows_the_json_reader_at_its_own_call(tmp_path
     assert "raw_decode" in [frame.name for frame in frames]
 
 
+@pytest.mark.usefixtures("parsers_overflow_on_hostile_input")
 def test_a_question_bank_nested_too_deeply_is_refused_with_the_usual_usage_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
