@@ -17,11 +17,13 @@ from gitleaks_report import (
     capture,
     contract_canary_scan,
     contract_clean_scan,
+    contract_history_canary_scan,
     contract_mutant_scan,
     copy_scan_report,
     create_scan_container,
     fail_stage,
     parse_report,
+    redact_report_template,
     render,
     report_error,
     safe_path,
@@ -31,6 +33,7 @@ from gitleaks_report import (
 )
 
 HASH = "0123456789abcdef0123456789abcdef01234567"
+VALID_REPORT_TEMPLATE = module.REPORT_TEMPLATE
 ROW = f'R\t"fixture.txt"\t{HASH}\t1\n'.encode("ascii")
 EXPECTED_COMMIT_COUNT = 270
 EXPECTED_COLUMN_COUNT = 4
@@ -40,6 +43,218 @@ WINDOWS_SYMLINK_PRIVILEGE_ERROR = 1314
 def expect_equal(actual: object, expected: object) -> None:
     if actual != expected:
         raise AssertionError(f"expected {expected!r}, got {actual!r}")
+
+
+def git(repo: Path, *args: str) -> bytes:
+    result = subprocess.run(  # noqa: S603 - controlled Git fixture argv.
+        ["git", "-C", str(repo), *args],  # noqa: S607
+        check=True,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=10,
+    )
+    return result.stdout
+
+
+def capture_git_for_test(args: list[str], timeout: int = 10) -> tuple[int, bytes, bytes]:
+    result = subprocess.run(  # noqa: S603 - fixed Git fixture argv, shell=False.
+        args,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
+def init_git_repo(repo: Path) -> None:
+    subprocess.run(  # noqa: S603 - fixed Git fixture command.
+        ["git", "init", "-q", str(repo)], check=True, timeout=10  # noqa: S607
+    )
+    git(repo, "config", "user.name", "Synthetic Fixture")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    git(repo, "branch", "-M", "main")
+
+
+def commit_file(repo: Path, name: str, content: bytes, message: str) -> None:
+    (repo / name).write_bytes(content)
+    git(repo, "add", "--", name)
+    git(repo, "commit", "-qm", message)
+
+
+def test_scanner_summary_can_be_less_than_reachable_commits(tmp_path: Path) -> None:
+    repo = tmp_path / "history"
+    repo.mkdir()
+    init_git_repo(repo)
+    for index in range(4):
+        commit_file(repo, f"fixture-{index}.txt", f"line {index}\n".encode(), "text commit")
+
+    reachable = int(git(repo, "rev-list", "--all", "--count"))
+    summary = b"INF 3 commits scanned\n"
+    expect_equal(reachable > summary_count(summary), True)
+    verify_scan_summary(b"", summary, module.CLEAN_STATUS)
+
+
+def test_full_history_probe_fails_closed_on_shallow_or_git_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(
+        [
+            (0, b"false\n", b""),
+            (0, b"true\n", b""),
+            (1, b"false\n", b""),
+            (0, b"false\n", b"git failure"),
+        ]
+    )
+    monkeypatch.setattr(module, "capture", lambda _args: next(responses))
+    module.ensure_full_history(Path("synthetic"))
+    for _ in range(3):
+        with pytest.raises(ScanError):
+            module.ensure_full_history(Path("synthetic"))
+
+
+def test_git_stream_errors_fail_closed_without_echoing_raw_output(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    private = b"ERR [git] synthetic read failure with private-token"
+    with pytest.raises(StageError) as caught:
+        verify_scan_summary(b"", b"INF 2 commits scanned\n" + private, 0)
+
+    expect_equal(caught.value.stage, "scan_git_stream")
+    report_error(caught.value)
+    diagnostic = capsys.readouterr().err
+    expect_equal(diagnostic, "security scan failed stage=scan_git_stream\n")
+    expect_equal(private.decode() in diagnostic, False)
+
+
+@pytest.mark.parametrize("line_ending", [b"\n", b"\r\n"], ids=("lf", "crlf"))
+def test_report_template_redacts_file_path_before_scanner_writes_report(
+    tmp_path: Path, line_ending: bytes
+) -> None:
+    source = tmp_path / "source-template.tmpl"
+    source.write_bytes(VALID_REPORT_TEMPLATE.replace(b"\n", line_ending))
+
+    redacted = redact_report_template(source, tmp_path)
+
+    expect_equal(redacted.read_bytes(), module.REDACTED_REPORT_TEMPLATE)
+    expect_equal(b".File" in redacted.read_bytes(), False)
+
+
+def test_report_template_rejects_hidden_file_access_in_comment(tmp_path: Path) -> None:
+    source = tmp_path / "source-template.tmpl"
+    source.write_bytes(
+        b'{{- range . -}}\n'
+        b'{{- /* .File */ printf "%s\\t%q\\t%s\\t%d\\n" .RuleID '
+        b'index . "File" .Commit .StartLine -}}\n'
+        b'{{- end -}}\n'
+    )
+
+    with pytest.raises(ScanError):
+        redact_report_template(source, tmp_path)
+
+    expect_equal((tmp_path / "redacted-report-template.tmpl").exists(), False)
+
+
+@pytest.mark.parametrize(
+    "template_bytes",
+    [b"{{ .File }} {{ .File }}", b"missing file field", b"x" * (module.MAX_TEMPLATE + 1)],
+    ids=("duplicate-path-field", "missing-path-field", "oversized-template"),
+)
+def test_report_template_rejects_ambiguous_or_oversized_input(
+    tmp_path: Path, template_bytes: bytes
+) -> None:
+    source = tmp_path / "source-template.tmpl"
+    source.write_bytes(template_bytes)
+
+    with pytest.raises(ScanError):
+        redact_report_template(source, tmp_path)
+
+    expect_equal((tmp_path / "redacted-report-template.tmpl").exists(), False)
+
+
+def test_scan_container_pins_full_history_and_archive_depth_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def record(args: list[str], _timeout: int = module.TIMEOUT) -> tuple[int, bytes, bytes]:
+        calls.append(args)
+        return 0, b"", b""
+
+    monkeypatch.setattr(module, "capture", record)
+    template = tmp_path / "template.tmpl"
+    template.write_bytes(VALID_REPORT_TEMPLATE)
+    create_scan_container(tmp_path, template, tmp_path, "synthetic", "docker")
+    redacted_path = tmp_path / "redacted-report-template.tmpl"
+    expect_equal(b".File" in redacted_path.read_bytes(), False)
+    expect_equal("--log-opts=--all" in calls[0], True)
+    expect_equal("--max-archive-depth=0" in calls[0], True)
+
+
+def test_history_positive_control_targets_old_commit_and_redacts_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canary = hashlib.sha256(b"historical synthetic finding").hexdigest().encode("ascii")
+    old_commit: list[str] = []
+
+    def scan_history(
+        repo: Path, _template: Path
+    ) -> tuple[int, list[tuple[str, str, str, int]], bytes, bytes]:
+        head = git(repo, "rev-parse", "HEAD").decode("ascii").strip()
+        expect_equal(head != old_commit[0], True)
+        path_commit = git(
+            repo,
+            "log",
+            "-1",
+            "--format=%H",
+            "--",
+            "private-" + canary.decode("ascii") + ".txt",
+        ).decode("ascii").strip()
+        return module.FINDINGS_STATUS, [
+            ("fixture-rule", REDACTED_PATH, old_commit[0], 1),
+            ("fixture-rule", REDACTED_PATH, path_commit, 1),
+        ], b"INF 2 commits scanned\n", b"REDACTED"
+
+    original_make_repo = module.make_repo
+
+    monkeypatch.setattr(module, "capture", capture_git_for_test)
+
+    def make_historical_repo(root: Path, name: str, content: bytes) -> Path:
+        repo = original_make_repo(root, name, content)
+        old_commit.append(git(repo, "rev-parse", "HEAD").decode("ascii").strip())
+        return repo
+
+    monkeypatch.setattr(module, "make_repo", make_historical_repo)
+    monkeypatch.setattr(module, "scan", scan_history)
+    contract_history_canary_scan(tmp_path, tmp_path / "template", canary)
+
+
+def test_history_control_fails_when_old_commit_is_not_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    canary = hashlib.sha256(b"historical missing finding").hexdigest().encode("ascii")
+    monkeypatch.setattr(module, "capture", capture_git_for_test)
+    monkeypatch.setattr(
+        module,
+        "scan",
+        lambda *_args: (
+            module.FINDINGS_STATUS,
+            [
+                ("fixture-rule", REDACTED_PATH, "a" * 40, 1),
+                ("fixture-rule", REDACTED_PATH, "b" * 40, 1),
+            ],
+            b"INF 2 commits scanned\n",
+            b"REDACTED",
+        ),
+    )
+    with pytest.raises(StageError) as caught:
+        contract_history_canary_scan(tmp_path, tmp_path / "template", canary)
+    expect_equal(caught.value.stage, "contract_history_canary_scan")
+    report_error(caught.value)
+    expect_equal(
+        capsys.readouterr().err,
+        "security scan failed stage=contract_history_canary_scan\n",
+    )
 
 
 def create_symlink_or_skip(
@@ -169,7 +384,10 @@ def test_scan_container_configures_output_mount_and_logs(
     output_dir = tmp_path / "output"
     output_dir.mkdir()
     output_dir.chmod(0o700)
-    create_scan_container(tmp_path, tmp_path / "template", output_dir, "container", "docker")
+    template = tmp_path / "template.tmpl"
+    template.write_bytes(VALID_REPORT_TEMPLATE)
+    create_scan_container(tmp_path, template, output_dir, "container", "docker")
+    expect_equal((output_dir / "redacted-report-template.tmpl").exists(), True)
     expect_equal(captured[0].count("--no-color"), 1)
     expect_equal(f"{output_dir.resolve()}:/out:rw" in captured[0], True)
     expect_equal(any(arg.startswith("--tmpfs=/out") for arg in captured[0]), False)
@@ -190,11 +408,6 @@ def test_scan_container_configures_output_mount_and_logs(
         ),
         (
             b"",
-            b"INF 2 commits scanned\n",
-            (0, 1, 1, 2, 2, 1, True, False, True, False, False),
-        ),
-        (
-            b"",
             b"INF 1 commits scanned unexpected\n",
             (0, 1, 0, None, 0, 1, True, False, True, False, True),
         ),
@@ -208,22 +421,15 @@ def test_scan_container_configures_output_mount_and_logs(
             b"\x1b[31mINF 1 commits scanned\x1b[0m\n",
             (0, 1, 0, None, 0, 1, False, False, False, True, True),
         ),
-        (
-            b"",
-            b"12:51AM INF 2 commits scanned\n",
-            (0, 1, 1, 2, 0, 1, False, True, True, False, False),
-        ),
     ],
     ids=(
         "no-output",
         "marker-without-regex-match",
         "marker-absent",
         "multiple",
-        "mismatch",
         "suffix-content",
         "duplicate-period-suffix",
         "ansi-markers",
-        "timestamped-prefix",
     ),
 )
 def test_summary_verification_reports_safe_numeric_diagnostics(
@@ -234,7 +440,7 @@ def test_summary_verification_reports_safe_numeric_diagnostics(
     ],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    expected = 1
+    minimum = 1
     (
         stdout_markers,
         stderr_markers,
@@ -250,7 +456,7 @@ def test_summary_verification_reports_safe_numeric_diagnostics(
     ) = expected_metrics
 
     with pytest.raises(StageError) as caught:
-        verify_scan_summary(stdout, stderr, expected, scanner_status)
+        verify_scan_summary(stdout, stderr, scanner_status)
 
     expect_equal(caught.value.stage, "scan_commit_summary")
     expect_equal(
@@ -261,7 +467,7 @@ def test_summary_verification_reports_safe_numeric_diagnostics(
             stdout_markers,
             stderr_markers,
             matches,
-            expected,
+            minimum,
             parsed,
             scanner_status,
             candidate_lines,
@@ -280,7 +486,7 @@ def test_summary_verification_reports_safe_numeric_diagnostics(
         f"security scan failed stage=scan_commit_summary stdout_bytes={len(stdout)} "
         f"stderr_bytes={len(stderr)} stdout_markers={stdout_markers} "
         f"stderr_markers={stderr_markers} summary_matches={matches} "
-        f"expected_commits={expected} parsed_commits={parsed_text} "
+        f"minimum_commits={minimum} parsed_commits={parsed_text} "
         f"scanner_exit_status={scanner_status} candidate_lines={candidate_lines} "
         f"candidate_inf_prefix={int(inf_prefix)} "
         f"candidate_timestamp_prefix={int(timestamp_prefix)} "
@@ -299,7 +505,7 @@ def test_summary_diagnostic_does_not_echo_stream_contents(
     stderr = b"untrusted scanner output"
 
     with pytest.raises(StageError) as caught:
-        verify_scan_summary(stdout, stderr, 1, 0)
+        verify_scan_summary(stdout, stderr, 0)
 
     report_error(caught.value)
     captured = capsys.readouterr()
@@ -309,8 +515,18 @@ def test_summary_diagnostic_does_not_echo_stream_contents(
     expect_equal(stderr.decode() in captured.err, False)
 
 
-def test_summary_verification_accepts_matching_count() -> None:
-    verify_scan_summary(b"", b"12:51AM INF 1 commits scanned\n", 1, 0)
+def test_summary_verification_accepts_positive_scanner_owned_count() -> None:
+    verify_scan_summary(b"", b"12:51AM INF 1 commits scanned\n", 0)
+
+
+def test_summary_verification_accepts_timestamped_positive_summary() -> None:
+    verify_scan_summary(b"", b"12:51AM INF 2 commits scanned\n", 0)
+
+
+def test_summary_verification_rejects_zero_count() -> None:
+    with pytest.raises(StageError) as caught:
+        verify_scan_summary(b"", b"INF 0 commits scanned\n", 0)
+    expect_equal(caught.value.stage, "scan_commit_summary")
 
 
 def test_summary_not_formed_across_stdout_stderr_boundary(
@@ -320,7 +536,7 @@ def test_summary_not_formed_across_stdout_stderr_boundary(
     stderr = b"1 commits scanned\n"
 
     with pytest.raises(StageError) as caught:
-        verify_scan_summary(stdout, stderr, 1, 0)
+        verify_scan_summary(stdout, stderr, 0)
 
     report_error(caught.value)
     captured = capsys.readouterr()
@@ -328,7 +544,7 @@ def test_summary_not_formed_across_stdout_stderr_boundary(
     expect_equal(
         captured.err,
         "security scan failed stage=scan_commit_summary stdout_bytes=4 stderr_bytes=18 "
-        "stdout_markers=0 stderr_markers=1 summary_matches=0 expected_commits=1 "
+        "stdout_markers=0 stderr_markers=1 summary_matches=0 minimum_commits=1 "
         "parsed_commits=none scanner_exit_status=0 candidate_lines=1 "
         "candidate_inf_prefix=0 candidate_timestamp_prefix=0 candidate_numeric_prefix=0 "
         "candidate_ansi=0 candidate_suffix_content=0\n",
@@ -538,9 +754,12 @@ def test_stage_diagnostics_emit_only_allowlisted_ids(tmp_path: Path) -> None:
         "contract_clean_scan_execution",
         "contract_clean_assertions",
         "contract_canary_scan",
+        "contract_history_canary_scan",
         "contract_mutant_scan",
         "contract_cli_validation",
         "scan_commit_summary",
+        "scan_full_history",
+        "scan_git_stream",
     )
     for stage_id in stage_ids:
         code = (
@@ -697,7 +916,7 @@ def test_contract_wrappers_preserve_only_allowlisted_nested_stages(
 @pytest.mark.parametrize(
     ("phase", "expected_stage"),
     [
-        ("commit_count", "scan_commit_count"),
+        ("full_history", "scan_full_history"),
         ("docker_create", "scan_docker_create"),
         ("docker_start", "scan_docker_start"),
         ("docker_inspect", "scan_docker_inspect"),
@@ -715,13 +934,17 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     canary = "ghp_" + hashlib.sha256(b"omniagent-scan-stage-canary").hexdigest()[:36]
+    template = tmp_path / "template.tmpl"
+    template.write_bytes(VALID_REPORT_TEMPLATE)
     private_path = str(tmp_path / "private-scan-path")
     injected = ScanError(f"{private_path}:{canary}:untrusted diagnostic")
     cleanup_called = False
     original_copy_scan_report = module.copy_scan_report
-    monkeypatch.setattr(module, "count_commits", lambda _repo: (_ for _ in ()).throw(injected))
-    if phase != "commit_count":
-        monkeypatch.setattr(module, "count_commits", lambda _repo: 1)
+    monkeypatch.setattr(
+        module, "ensure_full_history", lambda _repo: (_ for _ in ()).throw(injected)
+        if phase == "full_history"
+        else None,
+    )
 
     def capture_for_phase(
         args: list[str], timeout: int = module.TIMEOUT
@@ -765,16 +988,16 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
     monkeypatch.setattr(module, "copy_scan_report", copy_for_phase)
     monkeypatch.setattr(module, "parse_report", parse_for_phase)
     with pytest.raises(StageError) as caught:
-        module.scan(tmp_path, tmp_path / "template")
+        module.scan(tmp_path, template)
     expect_equal(caught.value.stage, expected_stage)
     report_error(caught.value)
     captured = capsys.readouterr()
     expect_equal(captured.out, "")
-    expect_equal(cleanup_called, phase not in {"commit_count", "docker_create"})
+    expect_equal(cleanup_called, phase not in {"full_history", "docker_create"})
     expected_diagnostic = (
         f"security scan failed stage=scan_commit_summary stdout_bytes={len(b'missing summary')} "
         "stderr_bytes=0 stdout_markers=0 stderr_markers=0 summary_matches=0 "
-        "expected_commits=1 parsed_commits=none scanner_exit_status=0 candidate_lines=0 "
+        "minimum_commits=1 parsed_commits=none scanner_exit_status=0 candidate_lines=0 "
         "candidate_inf_prefix=0 candidate_timestamp_prefix=0 candidate_numeric_prefix=0 "
         "candidate_ansi=0 candidate_suffix_content=0\n"
         if phase == "summary"
