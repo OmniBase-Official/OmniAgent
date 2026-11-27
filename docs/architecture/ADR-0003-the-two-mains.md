@@ -19,7 +19,7 @@
   `origin/main` — has not been asked and is not answered here. The inventory
   lists the facts the owner will need and **proposes no push, force-push or
   rename.**
-- **Deliverable of brief 18** (`docs/pm/brief-18-sae-the-two-mains-overlap.md`,
+- **Deliverable of brief 18** (an internal note, not published,
   measure first, merge nothing) and of **brief 19** (the carry-over inventory).
   Neither carried anything: no merge, rebase, cherry-pick or push to either
   `main` was performed for either.
@@ -566,7 +566,7 @@ I only list.**
 
 | document | claim | why it goes stale on G |
 | --- | --- | --- |
-| `release-readiness-2026-11-04.md` | "gate 2 … **enforcement is unassigned**" | **G implements gate 2** — `FIXED_TOOL_ALLOWLIST`, `FIXED_INTERNAL_CAPABILITY_ALLOWLIST`, five guards (§I5) |
+| `release-readiness-2026-11-04.md` (internal note, not published) | "gate 2 … **enforcement is unassigned**" | **G implements gate 2** — `FIXED_TOOL_ALLOWLIST`, `FIXED_INTERNAL_CAPABILITY_ALLOWLIST`, five guards (§I5) |
 | same | "`.github/workflows/ci.yml` only … tests the checkout" | O's `ci.yml` is **byte-identical to base**; G's is **72 lines, changed**, and runs more |
 | same | gates 3 and 4 open | G sanitises operational logging and **refuses a persistent log file outright** |
 | same | "the wheel … squats on eight generic top-level names" | still true on G, and **worse: 11 names**, `config_inspection` and `trajectory_utils` added |

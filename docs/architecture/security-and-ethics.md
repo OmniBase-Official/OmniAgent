@@ -56,7 +56,7 @@ in writing. This document does not override either ruling.
 **What would reverse them is written down and checkable:** the agent gaining a
 tool that writes, or the agent running anywhere other than one person's
 machine. **Public distribution is the second condition**, which is why
-[the release-readiness plan](../pm/release-readiness-2026-11-04.md) says that
+the release-readiness plan (internal note, not published) says that
 going public is itself the decision the contract requires.
 
 ## Evidence ledger

@@ -196,7 +196,7 @@ wheel-import test as the instrument that proves the move behaviour-free.
 What follows from it, in order, with the owner's decisions marked:
 
 1. **Option A is issued now** as
-   `docs/pm/brief-17-the-wheel-ships-what-it-claims.md` — `pyproject.toml`,
+   an internal brief (not published) — `pyproject.toml`,
    `.gitignore` and one new test module, colliding with nothing in flight.
 2. **The CI fix is a separate brief and a separate chair**, because the
    manager found while verifying this ADR that

@@ -47,7 +47,7 @@ Spot-checked at `ae5cd95` rather than taken from the drafts:
 **What is stale is the ground underneath them.** The owner approved
 [the agentic MVP contract](security/agentic-mvp-contract-2026-11-03.md) on
 2026-11-03 (`159af29`) and
-[the release-readiness plan](../pm/release-readiness-2026-11-04.md) landed on
+the release-readiness plan (internal note, not published) landed on
 2026-11-04 (`f6a02dd`). All four drafts predate both, so none of them cites
 the document that now governs — and one of them contradicts the other.
 

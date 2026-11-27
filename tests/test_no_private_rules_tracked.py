@@ -90,8 +90,8 @@ EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-
 
 #: Any address at the first domain (GitHub's commit-identity relay); the other two are used on
 #: purpose: noreply@anthropic.com is the commit trailer's address, and 11434@evil.example is
-#: the port and host of an SSRF-style URL (user-info form) in docs/pm/brief-14 and in
-#: tests/test_endpoint_policy.py, on a reserved .example name. Nothing else is allowed.
+#: the port and host of an SSRF-style URL (user-info form) in the endpoint policy tests
+#: (tests/test_endpoint_policy.py), on a reserved .example name. Nothing else is allowed.
 EMAIL_DOMAIN_ALLOWED = "users.noreply.github.com"
 EMAIL_ADDRESSES_ALLOWED = frozenset({"noreply@anthropic.com", "11434@evil.example"})
 

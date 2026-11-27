@@ -60,7 +60,7 @@ also **static**: the link exists before the walk begins. Nothing races.
 
 **Already defended, as of `e159f53`.** Brief 11's reparse-point check refuses
 it, and I proved the guard is the thing doing the work by removing it and
-watching the outside marker leak (`docs/pm/brief-11-the-walk-stops-paying-for-resolve.md`,
+watching the outside marker leak (an internal brief, not published,
 Ma and Md).
 
 ### 4. A concurrent local process racing the walk
@@ -164,7 +164,7 @@ they are checkable** — the agent gaining a tool that writes, or the agent
 running anywhere other than one person's machine. Whoever next adds a write
 tool to `tools.py` should read this document before they do.
 
-The engineer-hour goes instead to `docs/pm/brief-13-the-junction-refusal-becomes-a-test.md`:
+The engineer-hour goes instead to an internal brief (not published):
 attacker class 3 is the plausible one, it is defended by a single check, and
 that check's only test today is a manager running `mklink /J` by hand.
 
