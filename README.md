@@ -200,7 +200,7 @@ Observation: Error: hidden files and directories (anything starting with '.') ar
 
 Action: read_file
 Action Input: ../../Windows/System32/drivers/etc/hosts
-Observation: Error: path is outside the workspace (D:\code-project\OmniAgent);
+Observation: Error: path is outside the workspace (<workspace root>);
              only files under it can be read
 ```
 

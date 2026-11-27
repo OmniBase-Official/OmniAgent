@@ -40,7 +40,7 @@ dated figure) or **REPORTED** (someone else's claim, not re-derived).
 
 **Where the measuring happened:** two throwaway worktrees detached at `3c76fd2`
 and `5005039`, outside the repository, plus this branch. **The main checkout
-`D:\code-project\OmniAgent` was not read, written or tested** — it is dirty and
+was not read, written or tested** — it is dirty and
 Codex is in it.
 
 **The venv trap, checked per worktree.** From each worktree,
@@ -514,7 +514,7 @@ will answer it from a line count.
   Nothing here is blocked on it.
 - **The POSIX half of gate 5** — the same limitation, and it is the open item
   recorded since 2026-11-04.
-- **The dirty checkout.** `D:\code-project\OmniAgent` holds 54 uncommitted
+- **The dirty checkout.** The main checkout holds 54 uncommitted
   changes on `chore/local-ai-delegate` and Codex is editing it. It is REPORTED
   that some of it is byte-identical to G's files. **I did not read it.** If it is
   committed to a named branch it becomes a third tree and the matrix above must

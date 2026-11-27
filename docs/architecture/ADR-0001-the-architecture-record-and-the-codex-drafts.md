@@ -11,7 +11,7 @@
 
 A Codex session, working without a brief, left four uncommitted documents in a
 worktree at
-`C:/Users/Thanapat Manasom/.codex/worktrees/omniagent-architecture-docs/OmniAgent`,
+`~/.codex/worktrees/omniagent-architecture-docs/OmniAgent`,
 at baseline `f37044d` (2026-11-02):
 
 - `docs/architecture/system-overview.md` (82 lines)

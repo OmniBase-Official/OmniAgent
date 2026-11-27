@@ -2,7 +2,7 @@
 
 **Brief 24, phases 0, 1, 2 and the written half of 3. MEASURED 2026-11-22**
 unless labelled otherwise. Work done in
-`D:\code-project\OmniAgent\.scratch\sae-assembly`, a worktree inside the path.
+`.scratch\sae-assembly` under the repository root, a worktree inside the path.
 
 **The main checkout was not read, written, switched or tested.** It still holds
 54 uncommitted changes on `chore/local-ai-delegate` (REPORTED by the PM, not
@@ -33,7 +33,7 @@ The 18 trees holding uncommitted changes, worst first:
 
 | lines | worktree |
 | --- | --- |
-| 54 * | `D:\code-project\OmniAgent` — the main checkout, `chore/local-ai-delegate` `af99092`. **REPORTED, not measured: I did not read this tree.** |
+| 54 * | the repository root — the main checkout, `chore/local-ai-delegate` `af99092`. **REPORTED, not measured: I did not read this tree.** |
 | 46 | `.scratch\brief16-proposed-tree-20261109` (detached `af99092`) — the twin of the main checkout's privacy/logging work, classified 2026-11-10 |
 | 17 | `~\.codex\visualizations\2026\10\24\…\brief16-operational-telemetry` |
 | 12 | `.scratch\pre-user-dataset-bounds-20261119` |
@@ -161,12 +161,12 @@ wheels, so the regression guard for ADR-0002's defect never runs.**
 **(a) Switch the main checkout — only after Codex's work is on a named branch.**
 
 ```
-git -C D:\code-project\OmniAgent status --short            # expect 54; confirm with Codex first
-git -C D:\code-project\OmniAgent switch -c snapshot/codex-local-ai-delegate-20261122
-git -C D:\code-project\OmniAgent add -A
-git -C D:\code-project\OmniAgent commit -m "snapshot: Codex's in-flight work, unreviewed"
-git -C D:\code-project\OmniAgent push origin snapshot/codex-local-ai-delegate-20261122
-git -C D:\code-project\OmniAgent switch integration/canonical-20261122
+git -C . status --short            # expect 54; confirm with Codex first
+git -C . switch -c snapshot/codex-local-ai-delegate-20261122
+git -C . add -A
+git -C . commit -m "snapshot: Codex's in-flight work, unreviewed"
+git -C . push origin snapshot/codex-local-ai-delegate-20261122
+git -C . switch integration/canonical-20261122
 ```
 
 **The snapshot must exist and be pushed before the switch.** A `switch` with 54
