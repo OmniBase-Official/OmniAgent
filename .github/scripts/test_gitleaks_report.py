@@ -191,6 +191,25 @@ def test_scan_container_pins_full_history_and_archive_depth_zero(
     expect_equal("--max-archive-depth=0" in calls[0], True)
 
 
+def test_canary_contract_accepts_redacted_file_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canary = b"synthetic-positive-control"
+    monkeypatch.setattr(module, "make_repo", lambda *_args: tmp_path)
+    monkeypatch.setattr(
+        module,
+        "scan",
+        lambda *_args: (
+            module.FINDINGS_STATUS,
+            [("fixture-rule", REDACTED_PATH, HASH, 1)],
+            b"INF 1 commits scanned\n",
+            b"fixed-template-report",
+        ),
+    )
+
+    contract_canary_scan(tmp_path, tmp_path / "template", canary)
+
+
 def test_history_positive_control_targets_old_commit_and_redacts_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -720,7 +720,7 @@ def contract_canary_scan(root: Path, template: Path, canary: bytes) -> None:
             or canary in render(rows)
         ):
             fail()
-        if rows[0][1] != "fixture.txt" or rows[0][3] != 1:
+        if rows[0][1] != REDACTED_PATH or rows[0][3] != 1:
             fail()
         if FIELDS != ("RuleID", "File", "Commit", "StartLine"):
             fail()
