@@ -330,8 +330,11 @@ def evaluate_promotion_run(run: Path, report_path: Path | None = None) -> Score:
 def _read_run_records(path: Path) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
-    with path.open(encoding="utf-8") as handle:
-        return [json.loads(line) for line in handle if line.strip()]
+    try:
+        with path.open(encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+    except RecursionError:
+        raise SystemExit("run records have JSON nesting that is too deep to read") from None
 
 
 def _clean_state(record: dict[str, Any]) -> str:
