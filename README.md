@@ -748,6 +748,8 @@ Actions. Add your WakaTime API key as the repository Actions secret
 `WAKATIME_API_KEY` before running it. It displays account-wide, all-time coding
 statistics for up to ten languages.
 
+**Contributing and security:** see [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
 ## License
 
 MIT.
