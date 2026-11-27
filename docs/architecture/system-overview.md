@@ -8,7 +8,7 @@ files, 658 tests passed in 16.48 s.
 
 This page describes **checked-in source**. It is not a statement of approved
 policy — where the two differ,
-[the agentic MVP contract](../pm/agentic-mvp-contract-2026-11-03.md) governs,
+[the agentic MVP contract](security/agentic-mvp-contract-2026-11-03.md) governs,
 and each difference is marked below. It does not claim that the complete
 workflow is offline or that the process is an operating-system security
 boundary.
@@ -108,7 +108,7 @@ subprocesses and external package/model/repository sources.
 
 **Whoever adds a tool that writes must read the threat model first.** Criteria
 1 and 2 of
-[the search-boundary threat model](../pm/threat-model-2026-11-02-the-search-boundary.md)
+[the search-boundary threat model](security/threat-model-2026-11-02-the-search-boundary.md)
 name a write tool as one of the two conditions that reverse its ruling, and
 the contract names a new owner decision as the price.
 

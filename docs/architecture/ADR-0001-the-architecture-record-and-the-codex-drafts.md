@@ -45,7 +45,7 @@ Spot-checked at `ae5cd95` rather than taken from the drafts:
 | the two workflows | `ls .github/workflows/` | `ci.yml`, `waka-readme.yml` |
 
 **What is stale is the ground underneath them.** The owner approved
-[the agentic MVP contract](../pm/agentic-mvp-contract-2026-11-03.md) on
+[the agentic MVP contract](security/agentic-mvp-contract-2026-11-03.md) on
 2026-11-03 (`159af29`) and
 [the release-readiness plan](../pm/release-readiness-2026-11-04.md) landed on
 2026-11-04 (`f6a02dd`). All four drafts predate both, so none of them cites
@@ -126,7 +126,7 @@ parked `secure_search.py` branches.
 1. **Rebaselined** from `f37044d` to `ae5cd95`, with the zero-source-drift
    measurement stated, so the baseline is checkable rather than asserted.
 2. **The contract is cited as governing.** Both documents now point at
-   `docs/pm/agentic-mvp-contract-2026-11-03.md` where they describe current
+   `docs/architecture/security/agentic-mvp-contract-2026-11-03.md` where they describe current
    behaviour that the contract has already frozen differently — logging
    defaults and endpoint enforcement especially. A description of today's
    defaults is not a description of approved policy, and the drafts could not

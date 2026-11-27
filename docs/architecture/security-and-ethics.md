@@ -6,9 +6,9 @@ those commits. Gates re-run at this baseline: `ruff` clean, `mypy` clean over
 45 files, 658 tests passed in 16.48 s.
 
 **Governing documents, in order:**
-[the agentic MVP contract](../pm/agentic-mvp-contract-2026-11-03.md) (owner
+[the agentic MVP contract](security/agentic-mvp-contract-2026-11-03.md) (owner
 approved, 2026-11-03) and
-[the search-boundary threat model](../pm/threat-model-2026-11-02-the-search-boundary.md)
+[the search-boundary threat model](security/threat-model-2026-11-02-the-search-boundary.md)
 (owner approved, with rulings of 2026-11-02 and 2026-11-04). This page is an
 evidence ledger under them, not a policy of its own. **Source inspection is
 not an independent security audit. No legal or safety certification is

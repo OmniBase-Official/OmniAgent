@@ -481,7 +481,7 @@ on 2026-11-02 and again on 2026-11-04 the owner parked `secure_search.py` —
 1,016, 1,199 and 1,069-line variants of raw `ctypes` handle work — **parked,
 not continued and not deleted**, reopening it needing a new owner decision plus
 criteria 1 to 5 answered in writing
-([threat model](../pm/threat-model-2026-11-02-the-search-boundary.md), the
+([threat model](security/threat-model-2026-11-02-the-search-boundary.md), the
 criteria at lines 105–128 and the ruling at 188–192).
 
 **The criteria do not need an argument about resemblance to apply.** Their own

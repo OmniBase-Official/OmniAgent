@@ -2,8 +2,8 @@
 
 The solution architect's documents of record. **These describe the shape of
 the system. They do not approve anything** — the owner-approved documents are
-[the agentic MVP contract](../pm/agentic-mvp-contract-2026-11-03.md) and
-[the search-boundary threat model](../pm/threat-model-2026-11-02-the-search-boundary.md),
+[the agentic MVP contract](security/agentic-mvp-contract-2026-11-03.md) and
+[the search-boundary threat model](security/threat-model-2026-11-02-the-search-boundary.md),
 and where this directory and the contract differ, the contract governs.
 
 | Document | What it is | Status |
@@ -14,6 +14,7 @@ and where this directory and the contract differ, the contract governs.
 | [system-overview.md](system-overview.md) | Data flow, components, trust boundaries, the served model's identity | Current at `ae5cd95` |
 | [security-and-ethics.md](security-and-ethics.md) | Evidence ledger, licensing and provenance inventory, what is missing before a pilot | Current at `ae5cd95` |
 | [repository-map.md](repository-map.md) | What each path is for, and what is deliberately not on `main` | Current at `ae5cd95` |
+| [security/](security/) | The owner-approved security design: [the agentic MVP contract](security/agentic-mvp-contract-2026-11-03.md), [the search-boundary threat model](security/threat-model-2026-11-02-the-search-boundary.md) and the two amendment proposals the contract links to ([endpoint](security/proposed-contract-amendment-endpoint-2026-11-22.md), [seventh tool](security/proposed-contract-amendment-seventh-tool-2026-11-25.md)) | Approved; the contract governs where documents differ |
 
 ## The rules these documents are held to
 
