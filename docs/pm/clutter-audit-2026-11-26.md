@@ -25,7 +25,67 @@
 2. **[MEDIUM, MEASURED] Five `brief16-*` folders hold files that are in no ref.** Three hold generated wheel metadata (one of them also `wheel0/source/tests/test_config.py`); two hold the proposed tree's `archive-source` copies (7 and 2 files). The owner's ruling to delete the three snapshot refs covers the same subject, but I marked them KEEP until the owner says the ruling covers the folders.
 3. **[LOW, MEASURED] 25 empty `pm-*` / `se-brief4x` folders** are the deregistered leftovers; they hold nothing. **Whether the tools can remove them is UNVERIFIED** (I ran no removal).
 4. **[LOW, MEASURED] Living documents still carry facts the register changed:** six tools, `localhost`, the deleted `NEXT_CHAT.md` and demo files. They are my own architecture documents; Part C3 lists the lines.
-5. **[LOW, MEASURED] `scripts/make_demo_svg.py`** reads `docs/demo-script.md` and writes `docs/demo1.svg`; both are gone, and nothing but documents names the script.
+5. **[LOW, MEASURED; CORRECTED by brief 50] `scripts/make_demo_svg.py`** reads `docs/demo-script.md` and writes `docs/demo1.svg`; both are gone. **It is named as data in the sealed source list `ANSWER_KEY` (`scripts/eval_workspace.py:65`), and deleting it fails `tests/test_eval_workspace.py::test_every_sealed_source_path_exists`. The verdict is ASK, not DELETE-SAFE; see "Correction, brief 50" below.**
+
+## Correction, brief 50 (2026-11-27): the PM's check, and proof instead of search
+
+**Added in a second commit. The text above is kept and corrected in place where it was wrong.** MEASURED 2026-11-27 in `.scratch\sae-proof`, a throwaway tree detached at the integration tip **`4d51b7e`** (the brief expected `97fcae2`; the tip moved, see "The tip moved" below), with `agent.__file__` printed inside it. Baseline at `4d51b7e`: ruff clean, mypy clean (64 files), pytest **1,413 passed, 2 skipped**.
+
+### The error
+
+The audit said `scripts/make_demo_svg.py` is "named only in documents" and DELETE-SAFE. **It is also named as data**: `scripts/eval_workspace.py:65` lists it in `ANSWER_KEY`. My search looked for imports and calls, not for paths held as string lists or sealed inventories. Deleting it, with the full gates, gives **1 failed, 1,412 passed, 2 skipped**; the failure is `tests/test_eval_workspace.py::test_every_sealed_source_path_exists` (MEASURED, reproducing the PM's result). **What would have to change with it:** the entry at `scripts/eval_workspace.py:65`, which is a sealed-list change. **Who decides:** AI/ML or the owner. Until then the file stays. **Verdict: ASK** (was DELETE-SAFE).
+
+### Step 1. Proof per item, in the throwaway tree
+
+Each row applied the change, ran pytest in full (and ruff and mypy for the `.py` change), restored the file from a saved copy, and compared blob hashes (`git hash-object`, first 10 hex). A documentation edit cannot change ruff or mypy results, so those two ran for the script deletion only; that is a stated limit, not a measurement of the documents.
+
+| item | change applied | result | blob before / after | verdict |
+| --- | --- | --- | --- | --- |
+| `scripts/make_demo_svg.py` | `git rm` | ruff clean, mypy clean (64 files), **1 failed, 1,412 passed, 2 skipped**: `tests/test_eval_workspace.py::test_every_sealed_source_path_exists` | `3500582b9c` / `3500582b9c`, tree clean | **ASK** (was DELETE-SAFE) |
+| `docs/superpowers/plans/2026-10-06-train-and-deploy.md` | `git rm` | 1,413 passed, 2 skipped | `c9bc2a162e` / `c9bc2a162e`, tree clean | the suite stays green; **ASK stays** (the owner's call, not a test question; ADR-0003 names it) |
+| `docs/architecture/system-overview.md` | six to seven tools (2 lines), `localhost` to `127.0.0.1` (2 lines) | 1,413 passed, 2 skipped | `f674e2d07d` / `f674e2d07d` | **UPDATE**, proved green |
+| `docs/architecture/repository-map.md` | drop the demo-generator row (line 28), drop the `NEXT_CHAT.md` entry (line 37) | 1,413 passed, 2 skipped | `d62f007750` / `d62f007750` | **UPDATE**, proved green. The row names `make_demo_svg.py`, so it must change together with that file's verdict |
+| `docs/architecture/security-and-ethics.md` | `localhost` to `127.0.0.1` (lines 67, 69), drop the demo row (line 190) | 1,413 passed, 2 skipped | `70842a7948` / `70842a7948` | **UPDATE**, proved green (same caveat) |
+| `docs/architecture/ADR-0005-the-graph-runtime.md` | six to seven tools (line 30) | 1,413 passed, 2 skipped | `9916694dba` / `9916694dba` | **UPDATE**, proved green |
+| `docs/architecture/graph-runtime-spec.md` | "the six allowed tools" to "the seven allowed tools" | 1,413 passed, 2 skipped | `caa8393e62` / `caa8393e62` | **UPDATE**, proved green |
+| `docs/architecture/security/agentic-mvp-contract-2026-11-03.md` | line 23 (the stale default-endpoint sentence) replaced by the draft text | 1,413 passed, 2 skipped | `97cf2edebf` / `97cf2edebf` | **UPDATE**, proved green. **Owner-gated: the contract is frozen and only an approved amendment edits it** |
+
+After each row `git status --short` printed nothing. The contract's six-tools sentence (old line 33) no longer exists: the seventh-tool amendment was applied, so that earlier UPDATE is moot.
+
+### Step 2. Paths held as data (names and line numbers only)
+
+Searched with `git grep -n -F` over **every tracked file outside `docs/`** (code, tests, `scripts/`, `pyproject.toml`, `.github/`, every `*.toml`, `*.yml` and `*.json`, `.gitignore`, the sealed lists) for the path, the basename and the stem, at `4d51b7e`:
+
+| candidate | hits outside `docs/` | hits inside `docs/` |
+| --- | --- | --- |
+| `make_demo_svg` (path, basename, stem) | `scripts/eval_workspace.py:65` (the `ANSWER_KEY` entry), `scripts/make_demo_svg.py:14` (itself) | `docs/architecture/ADR-0003-the-two-mains.md`, `repository-map.md`, `security-and-ethics.md` |
+| `demo1.svg` | `scripts/make_demo_svg.py:22` (itself) | the same three documents |
+| `2026-10-06-train-and-deploy` | none | `docs/architecture/ADR-0003-the-two-mains.md` |
+
+`ANSWER_KEY` is defined at `scripts/eval_workspace.py:56`. No other tracked file outside `docs/` names any candidate. Not searched: untracked files.
+
+### The tip moved: items that no longer exist at `4d51b7e`
+
+Commit `0650193` removed the internal process notes (`docs/pm/`) from the public tree and `6d11da3` moved the security documents. Both are older than `4d51b7e`, but this audit's counts were taken at `de0f5c3`. At `4d51b7e` the tracked tree has 109 files and **has no `docs/pm/` files**. Consequences:
+
+- **MOOT (already removed):** the four "unreferenced" records (`audit-2026-11-02-where-the-work-is.md`, `chase-se-2026-11-05.md`, `owner-rulings-2026-11-22.md`, `record-layer-2026-11-23-result.md`), the two files numbered brief 17, and every other `docs/pm/` row in C3. Their ASK and KEEP verdicts no longer apply to the tree. Part C's count of 133 tracked files is the count at `de0f5c3`, not the tip.
+- **A finding about this document:** it lives at `docs/pm/clutter-audit-2026-11-26.md`. Merging it into the integration line would put a `docs/pm/` file back into the public tree. **The owner or PM should say where it goes** (kept off the integration line, or moved under `docs/architecture/`). I did not move it.
+- The README, `CONTRIBUTING.md`, `SECURITY.md` and the other community files from brief 52 are new at the tip and were not audited here.
+
+### Step 3. Spot-check of my own DELETE-SAFE verdicts
+
+Random sample (seed 50), re-measured by a script that does not reuse the earlier verdict logic. Worktrees: clean tree, and HEAD contained in at least one branch on each remote. Plain folders: every file up to 5 MB hashed and found among the objects reachable from every ref (generated `egg-info` and `.tar` files excluded). Branches: `git merge-base --is-ancestor` against the tip on every ref that exists, and `git branch -r --contains` for local-only pointers.
+
+- **Part A: 10 of 10 held.** Five worktrees (`se-brief29a`, `aie-measure-1384d63`, `aie-tool-text`, `aie-holdout-memo`, `sae-seventh-tool`) and five plain folders (`brief16-targeted-20261107b`, `brief16-baseline-20261107`, `tmp-op13-focused-16dc7395…`, `brief16-targeted-20261107`, `brief16-privacy-target`). Four of the five plain folders hold 0 files, so their "held" is trivial; the one with content, `brief16-baseline-20261107`, had 132 files, all reachable.
+- **Part B: 10 of 10 held, with a caveat I should have stated.** Six of the ten (`codex/brief16-operational-telemetry-20261107`, `codex/compare-file-lines-secure-20261102`, `codex/brief16-privacy-fix-20261107`, `codex/sec-search-001-remediation-20261112`, `codex/pre-user-dataset-bounds-20261119`, `codex/brief16-defaults-20261107`) are **not ancestors of the tip**; they held only because the commit is on a remote branch. They are Batch 2b's `git branch -D` pointers, so the word "merged" in the DELETE-SAFE rule does not describe them. **Order still matters:** delete a remote branch that holds such a commit before its local pointer and the commit loses its last name.
+- Not done: a second, independent method for the sample (same repository, same git), and a sample larger than ten of each. 20 of 20 is a result for the sample, not for all 75 and 39 rows.
+
+### Step 4. Verdicts and counts changed by the proof
+
+- **Changed:** `scripts/make_demo_svg.py` DELETE-SAFE to **ASK**. **This is the only verdict the proof changed.**
+- **Part C counts, corrected** (at the tip): DELETE-SAFE **0** (was 1); ASK **2** (the sealed-list script and the training-era plan); UPDATE **5 files proved green** (`system-overview`, `repository-map`, `security-and-ethics`, `ADR-0005`, `graph-runtime-spec`) plus the contract's line 23 (owner-gated); MOOT **8 documents** removed by `0650193`.
+- The Part A and Part B counts are unchanged by this correction (the proof did not touch them). Both were taken at `de0f5c3` and have not been re-taken at `4d51b7e`; the spot-check above is the only re-measurement.
+- **Nothing was executed.** No batch was run, no folder was deleted, no branch was deleted.
 
 ## Part A. `.scratch\` folders and registered worktrees
 
@@ -353,7 +413,7 @@ git push organization --delete se/brief-46-parser-sites
 - `docs/pm/owner-rulings-2026-11-22.md`: **KEEP: the record of rulings 1 to 25; the task register carries the later ones**
 - `docs/pm/record-layer-2026-11-23-result.md`: **KEEP: a result document; the evidence for the record layer**
 
-Every code file is referenced: no module is imported by nothing. **One orphan script exists by a different test:** `scripts/make_demo_svg.py`. It is named only in documents, not imported, not run by a test, not in `pyproject.toml` or CI, and **its two files are gone** (`docs/demo-script.md` is its input, `docs/demo1.svg` its output; neither is tracked at the tip, MEASURED by `git ls-files`). **DELETE-SAFE**; nothing breaks because nothing imports or runs it. The documents that name it need the UPDATE in C3.
+**CORRECTED (brief 50).** The sentence "every code file is referenced" below searched imports and calls only, not paths held as data. The orphan-script finding has the wrong verdict: `scripts/make_demo_svg.py` is named in `scripts/eval_workspace.py:65` (the sealed `ANSWER_KEY`), and a throwaway deletion fails one test (see the correction section). **Verdict: ASK** (the sealed list names it; AI/ML or the owner changes the list, or the file stays). The original text said DELETE-SAFE and is superseded.
 
 **C3. Documents that mislead (lines at the tip, MEASURED by `git grep -n`).**
 
@@ -383,7 +443,7 @@ Every code file is referenced: no module is imported by nothing. **One orphan sc
 | `trajectory_utils.py` (391 B) | imported by `export_dataset.py`, `validate_dataset.py`, `pyproject.toml` | **KEEP** |
 | `dataset_limits.py`, `dataset_provenance.py`, `export_dataset.py`, `validate_dataset.py` | the dataset readers and exporters; tested | **KEEP** |
 | `scripts/smoke_train.py` (6,517 B) | a training smoke script; README and docs name it; no test imports it | **KEEP** (README names it; UNVERIFIED whether anyone runs it) |
-| `scripts/make_demo_svg.py` (5,481 B) | demo generator whose input and output are gone | **DELETE-SAFE** (C2) |
+| `scripts/make_demo_svg.py` (5,481 B) | demo generator whose input and output are gone; **named in the sealed `ANSWER_KEY` (`scripts/eval_workspace.py:65`)** | **ASK** (corrected from DELETE-SAFE: deleting it fails `test_every_sealed_source_path_exists`) |
 | `docs/dataset-bundles.md` (5,027 B) | the dataset publishing note; named by ADR-0003 and brief 19 | **KEEP** |
 | sealed evaluation scripts (`scripts/eval_scoring.py` 5,283 B `8a68cd41`, `eval_workspace.py` 6,429 B `0453be72`, `holdout_eval.py` 20,067 B `76d68a60`, `session_eval.py` 15,167 B `6e92a53e`, `grounding_cohort.py` 31,314 B `f25dd207`) | evaluation; not opened | **KEEP**: ten test files name them |
 
@@ -524,7 +584,7 @@ git branch -D codex/security-bootstrap-20261119   # was 3c76fd2
 
 ### Batch 3. Tracked files and documents (SE; one commit per batch, on a branch)
 
-1. `git rm scripts/make_demo_svg.py` (C2). 2. **UPDATE** the lines in C3 (my architecture documents: SAE drafts, SE or PM commits). 3. ASK items wait for the owner. **One logical change per commit, staged by path, `git diff --cached --stat` read first.**
+1. **NOT `git rm scripts/make_demo_svg.py`** (corrected by brief 50: it fails `tests/test_eval_workspace.py::test_every_sealed_source_path_exists`; ASK). Batch 3 is now only the UPDATE edits in the correction section's proof table, each shown green. 2. **UPDATE** the lines in C3 (my architecture documents: SAE drafts, SE or PM commits). 3. ASK items wait for the owner. **One logical change per commit, staged by path, `git diff --cached --stat` read first.**
 
 **Before and after, all must pass:** `ruff check .`, `mypy`, `pytest`, `tests/test_no_next_chat.py`, `tests/test_no_private_rules_tracked.py` (full venv paths, `agent.__file__` inside the tree). **Undo:** `git revert <commit>`.
 
@@ -553,7 +613,7 @@ The exact commands are in Part B. **Before each:** `git ls-remote <remote> <bran
 - **B. Batch 1a, 1b and 1c** after the owner reads Part A (PM carries out; owner for the OWNER-ONLY folders).
 - **C. The five `brief16-*` folders:** delete them (owner says the snapshot-ref ruling covers them; PM carries out), or keep them.
 - **D. Batch 2** (merged local branches) (SE or PM).
-- **E. Batch 3**: delete `scripts/make_demo_svg.py` and update the stale lines (SAE drafts, SE commits).
+- **E. Batch 3 (corrected)**: update the stale lines (SAE drafts, SE commits); `scripts/make_demo_svg.py` stays until AI/ML or the owner decides about the sealed list.
 - **F. The 41 ASK branches:** a separate owner pass, family by family, starting with the `codex/brief16-*`, `codex/security-remediation-*` and `pm/docs-cleanup-*` families (owner; PM carries out).
 - **G. Batch 4**, remote deletions, one remote first (owner; PM carries out).
 - **H. The 13 Codex trees outside the path and the `%TEMP%` tree** (owner-gated; Codex or PM carries out).
