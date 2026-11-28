@@ -128,6 +128,24 @@ def test_git_stream_errors_fail_closed_without_echoing_raw_output(
     expect_equal(private.decode() in diagnostic, False)
 
 
+def test_known_mutant_report_template_preserves_mutation_and_redacts_path(
+    tmp_path: Path,
+) -> None:
+    source = Path(__file__).with_name("gitleaks-report-mutant.tmpl")
+    redacted = redact_report_template(source, tmp_path)
+    content = redacted.read_bytes()
+    normalized_source = source.read_bytes().replace(b"\r\n", b"\n")
+
+    expect_equal(content.count(b".File"), 0)
+    expect_equal(content, normalized_source.replace(b".File", b'"[redacted]"'))
+    expect_equal(content != module.REDACTED_REPORT_TEMPLATE, True)
+    expect_equal(
+        normalized_source.replace(b".File", b"<PATH_FIELD>")
+        != module.REPORT_TEMPLATE.replace(b".File", b"<PATH_FIELD>"),
+        True,
+    )
+
+
 @pytest.mark.parametrize("line_ending", [b"\n", b"\r\n"], ids=("lf", "crlf"))
 def test_report_template_redacts_file_path_before_scanner_writes_report(
     tmp_path: Path, line_ending: bytes

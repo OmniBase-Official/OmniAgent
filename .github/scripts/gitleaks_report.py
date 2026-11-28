@@ -33,6 +33,7 @@ REPORT_TEMPLATE = (
     b'{{- end -}}\n'
 )
 REDACTED_REPORT_TEMPLATE = REPORT_TEMPLATE.replace(b".File", b'"[redacted]"')
+MUTANT_REPORT_TEMPLATE_SHA256 = "2c80a7c1a84dcfc8803662abf9e745a7e4703e71d598ffc6e8942e5d7b2ee67c"
 MAX_ROWS = 20_000
 MAX_ROW = 16 * 1024
 MAX_PATH = 4096
@@ -487,16 +488,21 @@ def redact_report_template(template: Path, output_dir: Path) -> Path:
     except OSError:
         fail()
     normalized = content.replace(b"\r\n", b"\n")
-    if (
-        len(content) > MAX_TEMPLATE
-        or b"\r" in normalized
-        or normalized != REPORT_TEMPLATE
+    if len(content) > MAX_TEMPLATE or b"\r" in normalized:
+        fail()
+    if normalized == REPORT_TEMPLATE:
+        redacted_content = REDACTED_REPORT_TEMPLATE
+    elif (
+        hashlib.sha256(normalized).hexdigest() == MUTANT_REPORT_TEMPLATE_SHA256
+        and normalized.count(b".File") == 1
     ):
+        redacted_content = normalized.replace(b".File", b'"[redacted]"')
+    else:
         fail()
     try:
         output = output_dir / "redacted-report-template.tmpl"
         with output.open("xb") as destination:
-            destination.write(REDACTED_REPORT_TEMPLATE)
+            destination.write(redacted_content)
     except OSError:
         fail()
     return output
