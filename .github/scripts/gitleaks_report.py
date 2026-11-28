@@ -115,6 +115,34 @@ ScanResult = tuple[int, list[FindingRow], bytes, bytes]
 SummaryDiagnostics = tuple[
     int, int, int, int, int, int, int | None, int, int, bool, bool, bool, bool, bool
 ]
+DockerCreateFailure = Literal[
+    "request_prepare_failed",
+    "capture_failed",
+    "daemon_unavailable",
+    "image_unavailable",
+    "volume_mount_failed",
+    "permission_denied",
+    "invalid_options",
+    "host_resource",
+    "docker_rejected",
+]
+DockerCreateDiagnostics = tuple[int | None, DockerCreateFailure]
+DOCKER_CREATE_DIAGNOSTIC_FIELDS = 2
+DOCKER_CREATE_RETURN_CODE_MIN = -(2**31)
+DOCKER_CREATE_RETURN_CODE_MAX = (2**31) - 1
+ALLOWED_DOCKER_CREATE_FAILURES = frozenset(
+    {
+        "request_prepare_failed",
+        "capture_failed",
+        "daemon_unavailable",
+        "image_unavailable",
+        "volume_mount_failed",
+        "permission_denied",
+        "invalid_options",
+        "host_resource",
+        "docker_rejected",
+    }
+)
 
 
 class ScanError(Exception):
@@ -131,10 +159,12 @@ class StageError(ScanError):
         stage: StageId,
         *,
         summary_diagnostics: SummaryDiagnostics | None = None,
+        docker_create_diagnostics: DockerCreateDiagnostics | None = None,
     ) -> None:
         super().__init__(GENERIC)
         self.stage = stage
         self.summary_diagnostics = summary_diagnostics
+        self.docker_create_diagnostics = docker_create_diagnostics
 
 
 def valid_summary_diagnostics(value: object) -> bool:
@@ -206,10 +236,14 @@ def valid_summary_shape(
     )
 
 
-def fail_stage(stage: StageId) -> NoReturn:
+def fail_stage(
+    stage: StageId,
+    *,
+    docker_create_diagnostics: DockerCreateDiagnostics | None = None,
+) -> NoReturn:
     if stage not in ALLOWED_STAGE_IDS:
         fail()
-    raise StageError(stage)
+    raise StageError(stage, docker_create_diagnostics=docker_create_diagnostics)
 
 
 def preserve_or_fallback(error: StageError, fallback: StageId) -> NoReturn:
@@ -218,9 +252,34 @@ def preserve_or_fallback(error: StageError, fallback: StageId) -> NoReturn:
     fail_stage(fallback)
 
 
+def valid_docker_create_diagnostics(value: object) -> bool:
+    if type(value) is not tuple or len(value) != DOCKER_CREATE_DIAGNOSTIC_FIELDS:
+        return False
+    status, reason = value
+    return (
+        (status is None or (type(status) is int
+            and DOCKER_CREATE_RETURN_CODE_MIN <= status <= DOCKER_CREATE_RETURN_CODE_MAX))
+        and type(reason) is str
+        and reason in ALLOWED_DOCKER_CREATE_FAILURES
+    )
+
+
 def report_error(error: ScanError) -> None:
     sys.stdout.buffer.write(b"")
     if isinstance(error, StageError) and error.stage in ALLOWED_STAGE_IDS:
+        docker_diagnostics = error.docker_create_diagnostics
+        if (
+            error.stage == "scan_docker_create"
+            and docker_diagnostics is not None
+            and valid_docker_create_diagnostics(docker_diagnostics)
+        ):
+            status, reason = docker_diagnostics
+            status_text = "unknown" if status is None else str(status)
+            sys.stderr.write(
+                f"{GENERIC} stage={error.stage} docker_create_status={status_text} "
+                f"docker_create_reason={reason}\n"
+            )
+            return
         diagnostics = error.summary_diagnostics
         if (
             error.stage == "scan_commit_summary"
@@ -443,56 +502,127 @@ def redact_report_template(template: Path, output_dir: Path) -> Path:
     return output
 
 
+def classify_docker_create_failure(stderr: bytes) -> DockerCreateFailure:
+    diagnostic = stderr.lower()
+    if any(
+        marker in diagnostic
+        for marker in (
+            b"cannot connect to the docker daemon",
+            b"is the docker daemon running",
+            b"error during connect",
+        )
+    ):
+        return "daemon_unavailable"
+    if any(
+        marker in diagnostic
+        for marker in (
+            b"pull access denied",
+            b"manifest unknown",
+            b"no matching manifest",
+            b"failed to resolve reference",
+            b"unauthorized:",
+        )
+    ):
+        return "image_unavailable"
+    if any(
+        marker in diagnostic
+        for marker in (
+            b"invalid mount config",
+            b"bind source path does not exist",
+            b"mounts denied",
+            b"not a directory",
+        )
+    ):
+        return "volume_mount_failed"
+    if any(
+        marker in diagnostic
+        for marker in (
+            b"permission denied",
+            b"operation not permitted",
+            b"access is denied",
+        )
+    ):
+        return "permission_denied"
+    if any(
+        marker in diagnostic
+        for marker in (
+            b"unknown flag",
+            b"invalid argument",
+            b"invalid ulimit",
+        )
+    ):
+        return "invalid_options"
+    if any(
+        marker in diagnostic
+        for marker in (
+            b"no space left on device",
+            b"resource temporarily unavailable",
+            b"quota exceeded",
+        )
+    ):
+        return "host_resource"
+    return "docker_rejected"
+
+
 def create_scan_container(
     repo: Path, template: Path, output_dir: Path, name: str, docker_bin: str
 ) -> None:
     try:
         report_template = redact_report_template(template, output_dir)
-    except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
-        fail_stage("scan_docker_create")
-    args = [
-        docker_bin,
-        "create",
-        "--name",
-        name,
-        "--network=none",
-        "--read-only",
-        "--cap-drop=ALL",
-        "--security-opt=no-new-privileges",
-        "--memory=512m",
-        "--cpus=1",
-        "--pids-limit=64",
-        f"--ulimit=fsize={MAX_REPORT}:{MAX_REPORT}",
-        "--volume",
-        f"{output_dir.resolve()}:/out:rw",
-        *(
-            [f"--user={os.getuid()}:{os.getgid()}"]
-            if hasattr(os, "getuid") and hasattr(os, "getgid")
-            else []
-        ),
-        "--volume",
-        f"{repo.resolve()}:/repo:ro",
-        "--volume",
-        f"{report_template.resolve()}:/template.tmpl:ro",
-        IMAGE,
-        "git",
-        "--redact=100",
-        "--no-banner",
-        "--no-color",
-        "--exit-code=2",
-        "--report-format=template",
-        "--report-template=/template.tmpl",
-        "--report-path=/out/report.tsv",
-        "--log-opts=--all",
-        "--max-archive-depth=0",
-        "/repo",
-    ]
+        args = [
+            docker_bin,
+            "create",
+            "--name",
+            name,
+            "--network=none",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--memory=512m",
+            "--cpus=1",
+            "--pids-limit=64",
+            f"--ulimit=fsize={MAX_REPORT}:{MAX_REPORT}",
+            "--volume",
+            f"{output_dir.resolve()}:/out:rw",
+            *(
+                [f"--user={os.getuid()}:{os.getgid()}"]
+                if hasattr(os, "getuid") and hasattr(os, "getgid")
+                else []
+            ),
+            "--volume",
+            f"{repo.resolve()}:/repo:ro",
+            "--volume",
+            f"{report_template.resolve()}:/template.tmpl:ro",
+            IMAGE,
+            "git",
+            "--redact=100",
+            "--no-banner",
+            "--no-color",
+            "--exit-code=2",
+            "--report-format=template",
+            "--report-template=/template.tmpl",
+            "--report-path=/out/report.tsv",
+            "--log-opts=--all",
+            "--max-archive-depth=0",
+            "/repo",
+        ]
+    except Exception:  # noqa: BLE001 - report only fixed diagnostic identifiers.
+        fail_stage(
+            "scan_docker_create",
+            docker_create_diagnostics=(None, "request_prepare_failed"),
+        )
     try:
-        status, _, _ = capture(args)
-        if status != CLEAN_STATUS:
-            fail()
-    except Exception:  # noqa: BLE001 - report only a fixed scan stage identifier.
-        fail_stage("scan_docker_create")
+        status, _, stderr = capture(args)
+    except Exception:  # noqa: BLE001 - report only fixed diagnostic identifiers.
+        fail_stage(
+            "scan_docker_create",
+            docker_create_diagnostics=(None, "capture_failed"),
+        )
+    if status != CLEAN_STATUS:
+        fail_stage(
+            "scan_docker_create",
+            docker_create_diagnostics=(status, classify_docker_create_failure(stderr)),
+        )
 
 
 def start_scan_container(docker_bin: str, name: str) -> tuple[int, bytes, bytes]:

@@ -15,6 +15,7 @@ from gitleaks_report import (
     ScanError,
     StageError,
     capture,
+    classify_docker_create_failure,
     contract_canary_scan,
     contract_clean_scan,
     contract_history_canary_scan,
@@ -412,6 +413,60 @@ def test_scan_container_configures_output_mount_and_logs(
     expect_equal(any(arg.startswith("--tmpfs=/out") for arg in captured[0]), False)
     expect_equal(f"--ulimit=fsize={MAX_REPORT}:{MAX_REPORT}" in captured[0], True)
     expect_equal(f"--user={module.os.getuid()}:{module.os.getgid()}" in captured[0], True)
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected_reason"),
+    [
+        (b"Cannot connect to the Docker daemon", "daemon_unavailable"),
+        (b"manifest unknown", "image_unavailable"),
+        (b"invalid mount config", "volume_mount_failed"),
+        (b"permission denied", "permission_denied"),
+        (b"unknown flag", "invalid_options"),
+        (b"no space left on device", "host_resource"),
+        (b"unclassified diagnostic", "docker_rejected"),
+    ],
+)
+def test_docker_create_failure_is_classified_without_echoing_output(
+    stderr: bytes, expected_reason: str
+) -> None:
+    expect_equal(classify_docker_create_failure(stderr), expected_reason)
+
+
+def test_scan_container_failure_reports_only_allowlisted_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    output_dir.chmod(0o700)
+    template = tmp_path / "template.tmpl"
+    template.write_bytes(VALID_REPORT_TEMPLATE)
+    private_path = str(tmp_path / "private-scan-path")
+    private_marker = "SYNTHETIC_PRIVATE_MARKER"
+    monkeypatch.setattr(
+        module,
+        "capture",
+        lambda _args: (
+            125,
+            b"",
+            f"invalid mount config {private_path} {private_marker}".encode(),
+        ),
+    )
+
+    with pytest.raises(StageError) as caught:
+        create_scan_container(tmp_path, template, output_dir, "container", "docker")
+
+    report_error(caught.value)
+    captured = capsys.readouterr()
+    expect_equal(captured.out, "")
+    expect_equal(caught.value.stage, "scan_docker_create")
+    expect_equal(
+        captured.err,
+        "security scan failed stage=scan_docker_create "
+        "docker_create_status=125 docker_create_reason=volume_mount_failed\n",
+    )
+    expect_equal(private_path in captured.err, False)
+    expect_equal(private_marker in captured.err, False)
 
 
 @pytest.mark.parametrize(
@@ -1020,6 +1075,11 @@ def test_scan_substep_failures_emit_only_fixed_stage_ids(
         "candidate_inf_prefix=0 candidate_timestamp_prefix=0 candidate_numeric_prefix=0 "
         "candidate_ansi=0 candidate_suffix_content=0\n"
         if phase == "summary"
+        else (
+            "security scan failed stage=scan_docker_create "
+            "docker_create_status=unknown docker_create_reason=capture_failed\n"
+        )
+        if phase == "docker_create"
         else f"security scan failed stage={expected_stage}\n"
     )
     expect_equal(captured.err, expected_diagnostic)
