@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 from dataclasses import dataclass
 
 from sandbox import TRUNCATION_NOTE, SandboxError, get_workspace
@@ -82,11 +83,26 @@ def _iterates_name(expression: ast.expr, name: str) -> bool:
     )
 
 
+class _StringLiteralRedactor(ast.NodeTransformer):
+    """Replace embedded string and bytes values before rendering expressions."""
+
+    def visit_Constant(self, node: ast.Constant) -> ast.AST:
+        if isinstance(node.value, str):
+            return ast.copy_location(ast.Constant(value="<string>"), node)
+        if isinstance(node.value, bytes):
+            return ast.copy_location(ast.Constant(value=b"<bytes>"), node)
+        return node
+
+
+def _safe_expression_text(expression: ast.expr) -> str:
+    redacted = _StringLiteralRedactor().visit(copy.deepcopy(expression))
+    return ast.unparse(redacted)
+
+
 def _append_conditions(
     call: ast.AST,
     function: ast.FunctionDef | ast.AsyncFunctionDef,
     parents: dict[ast.AST, ast.AST],
-    source: str,
 ) -> list[str]:
     conditions: list[str] = []
     node: ast.AST = call
@@ -95,8 +111,7 @@ def _append_conditions(
         if parent is None:
             raise ValueError("could not determine the layer append's control flow")
         if isinstance(parent, ast.If):
-            test = ast.get_source_segment(source, parent.test) or ast.unparse(parent.test)
-            test = " ".join(test.split())
+            test = " ".join(_safe_expression_text(parent.test).split())
             if len(test) > _MAX_CONFIG_CONDITION_CHARS:
                 raise ValueError("conditional guard is too long to report safely")
             branch = "if" if node in parent.body else "else" if node in parent.orelse else ""
@@ -275,7 +290,6 @@ def _validate_exit_paths(
     function: ast.FunctionDef,
     outer: ast.For,
     append_calls: list[ast.Call],
-    source: str,
 ) -> list[str]:
     outer_end = outer.end_lineno or outer.lineno
     returns = [node for node in ast.walk(function) if isinstance(node, ast.Return)]
@@ -298,7 +312,7 @@ def _validate_exit_paths(
             raise ValueError(
                 "only the guarded missing-profile validation raise is supported before merge"
             )
-        conditions = _append_conditions(node, function, parents, source)
+        conditions = _append_conditions(node, function, parents)
         if not conditions:
             raise ValueError("pre-merge raise must be under a static guard")
         branch_path = _branch_path(node, parents)
@@ -397,7 +411,6 @@ def _validate_static_calls(function: ast.FunctionDef) -> None:
 class _LayerRowContext:
     function: ast.FunctionDef
     parents: dict[ast.AST, ast.AST]
-    source: str
     constants: dict[str, str]
 
 
@@ -412,20 +425,25 @@ def _layer_row(index: int, call: ast.Call, context: _LayerRowContext) -> str:
     label = _static_layer_label(pair[0], context.constants)
     if not label or len(label) > _MAX_CONFIG_CONDITION_CHARS:
         raise ValueError("layer label is empty or too long to report safely")
-    conditions = _append_conditions(
-        call, context.function, context.parents, context.source
-    )
+    conditions = _append_conditions(call, context.function, context.parents)
     condition_text = "; ".join(conditions) if conditions else "unconditional"
-    if label.casefold() == "environment":
-        kind = "process environment"
-    elif label.casefold().endswith(" file") or label.casefold().startswith("file:"):
-        kind = "file layer"
-    else:
+    folded_label = label.casefold()
+    if folded_label == "environment":
+        display_label = kind = "process environment"
+    elif folded_label == "command line":
+        display_label = "command line"
         kind = "configuration layer"
-    return f"{index}. {label!r} ({kind}), line {call.lineno}; {condition_text}"
+    elif folded_label.startswith("profile:"):
+        display_label = "profile layer"
+        kind = "configuration layer"
+    elif folded_label.endswith(" file") or folded_label.startswith("file:"):
+        display_label = kind = "file layer"
+    else:
+        display_label = kind = "configuration layer"
+    return f"{index}. {display_label!r} ({kind}), line {call.lineno}; {condition_text}"
 
 
-def _layer_rows(function: ast.FunctionDef, source: str, constants: dict[str, str]) -> list[str]:
+def _layer_rows(function: ast.FunctionDef, constants: dict[str, str]) -> list[str]:
     parents = _parent_map(function)
     initializers: list[ast.Assign | ast.AnnAssign] = [
         statement
@@ -474,14 +492,14 @@ def _layer_rows(function: ast.FunctionDef, source: str, constants: dict[str, str
         raise ValueError("all layer appends must precede the merge loop")
     _validate_layer_mutations(function, parents, initializer, append_calls, outer)
 
-    row_context = _LayerRowContext(function, parents, source, constants)
+    row_context = _LayerRowContext(function, parents, constants)
     return [
         _layer_row(index, call, row_context)
         for index, call in enumerate(append_calls, start=1)
     ]
 
 
-def _merge_rows(function: ast.FunctionDef, source: str) -> list[str]:
+def _merge_rows(function: ast.FunctionDef) -> list[str]:
     append_calls = [
         node
         for node in ast.walk(function)
@@ -552,7 +570,7 @@ def _merge_rows(function: ast.FunctionDef, source: str) -> list[str]:
     ):
         raise ValueError("merged must start as an empty dictionary before the loops")
     _validate_merge_loops(function, outer, inner, assignment)
-    abort_rows = _validate_exit_paths(function, outer, append_calls, source)
+    abort_rows = _validate_exit_paths(function, outer, append_calls)
 
     final_return = next(node for node in ast.walk(function) if isinstance(node, ast.Return))
     settings_calls = [
@@ -612,8 +630,8 @@ def _extract_config_precedence(source: str) -> str:
     _validate_static_calls(function)
     lines = [
         "Configuration layers in append order:",
-        *_layer_rows(function, source, _module_string_constants(module)),
-        *_merge_rows(function, source),
+        *_layer_rows(function, _module_string_constants(module)),
+        *_merge_rows(function),
     ]
     rendered = "\n".join(lines)
     if len(rendered) > _MAX_CONFIG_PRECEDENCE_OUTPUT_CHARS:
@@ -627,16 +645,16 @@ def inspect_config_precedence(path: str) -> str:
     try:
         admitted = workspace.resolve(path)
         source = workspace.read_text(workspace.display(admitted))
-    except SandboxError as exc:
-        return f"Error: {exc}"
-    except OSError as exc:
-        return f"Error: could not read {path!r}: {exc.strerror or exc}"
+    except SandboxError:
+        return "Error: configuration file is not accessible."
+    except OSError:
+        return "Error: configuration file could not be read."
 
     truncation_marker = TRUNCATION_NOTE.format(limit=workspace.max_read_chars)
     if truncation_marker in source:
-        return f"Error: {workspace.display(admitted)} is too large to inspect completely."
+        return "Error: configuration file exceeds the configured read limit."
     try:
         report = _extract_config_precedence(source)
     except (TypeError, ValueError) as exc:
-        return f"Error: cannot inspect config precedence in {workspace.display(admitted)}: {exc}."
-    return f"{workspace.display(admitted)}:\n{report}"
+        return f"Error: cannot inspect config precedence: {exc}."
+    return f"Configuration file:\n{report}"

@@ -45,8 +45,11 @@ training = [
 # Flat layout: the agent is a handful of top-level modules, not a package.
 py-modules = [
     "agent",
+    "agent_parser",
+    "calculator",
     "main",
     "tools",
+    "tool_input_values",
     "config_inspection",
     "trajectory_utils",
     "observability",
@@ -170,6 +173,8 @@ ignore = [
 # Notebook cells print, group imports on one line and shell out. Real checks
 # (F, E501, syntax) still apply, and tests/test_notebook.py covers the rest.
 "notebooks/*.ipynb" = ["T20", "E401", "E402", "I001", "S603", "S607", "ANN", "PTH123", "UP017"]
+# AST NodeTransformer visitor names must match the node class spelling.
+"config_inspection.py" = ["N802"]
 # Tests assert, touch private helpers, and hard-code sample values on purpose.
 "tests/*" = ["S101", "SLF001", "PLR2004", "ANN201", "ARG001"]
 
@@ -177,7 +182,7 @@ ignore = [
 ban-relative-imports = "all"
 
 [tool.ruff.lint.isort]
-known-first-party = ["agent", "config", "export_dataset", "main", "observability", "sandbox", "tools", "validate_dataset", "tests"]
+known-first-party = ["agent", "agent_parser", "calculator", "config", "export_dataset", "main", "observability", "sandbox", "tool_input_values", "tools", "validate_dataset", "tests"]
 
 # --------------------------------------------------------------------------- #
 # pytest

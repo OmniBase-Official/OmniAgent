@@ -37,3 +37,6 @@ omniagent.local.toml
 # Trained models, adapters, GGUF and the llama.cpp checkout
 models/
 .superpowers/
+
+# Codex skill junction points to the canonical .claude/skills tree.
+.codex/skills/

@@ -8,7 +8,19 @@ from __future__ import annotations
 
 import pytest
 
-from agent import _parse
+import agent
+import agent_parser
+import tool_input_values
+import tools
+from agent_parser import Step as ParserStep
+from agent_parser import parse_reply as _parse
+
+
+def test_agent_keeps_parser_compatibility_exports() -> None:
+    assert agent.__dict__["Step"] is ParserStep
+    assert agent.__dict__["_parse"] is _parse
+    assert agent_parser.__dict__["NO_ARG_INPUTS"] is tool_input_values.NO_ARG_INPUTS
+    assert tools.NO_ARG_INPUTS is tool_input_values.NO_ARG_INPUTS
 
 
 def test_parse_action() -> None:
