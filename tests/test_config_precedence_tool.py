@@ -94,11 +94,11 @@ def test_config_layer_order_guards_and_merge_overwrite_are_reported(
     report = inspect_config_precedence("config.py")
 
     expected_labels = [
-        "'file:defaults' (file layer)",
-        "'profile:{profile}' (configuration layer)",
-        "'.env file' (file layer)",
-        "'environment' (process environment)",
-        "'command line' (configuration layer)",
+        "1. 'file layer' (file layer)",
+        "2. 'profile layer' (configuration layer)",
+        "3. 'file layer' (file layer)",
+        "4. 'process environment' (process environment)",
+        "5. 'command line' (configuration layer)",
     ]
     positions = [report.index(label) for label in expected_labels]
     assert positions == sorted(positions)
@@ -119,6 +119,62 @@ def test_config_layer_order_guards_and_merge_overwrite_are_reported(
     assert "later layer overrides an earlier value" in report
 
 
+def test_config_precedence_does_not_echo_requested_filename(
+    config_workspace: Workspace,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    filename = "SYNTHETIC_FILENAME_CANARY.py"
+    (config_workspace.root / filename).write_text(RESOLVER_SOURCE, encoding="utf-8")
+
+    report = inspect_config_precedence(filename)
+    denied = inspect_config_precedence(f"../{filename}")
+    captured = capsys.readouterr()
+
+    assert "Configuration file:" in report
+    assert filename not in report
+    assert filename not in denied
+    assert filename not in captured.out
+    assert filename not in captured.err
+
+
+@pytest.mark.parametrize(
+    ("source_fragment", "replacement", "canary"),
+    [
+        (
+            "if use_env_file:",
+            'if use_env_file == "SYNTHETIC_CONDITION_LITERAL_CANARY":',
+            "SYNTHETIC_CONDITION_LITERAL_CANARY",
+        ),
+        (
+            'layers.append(("command line", cli))',
+            'layers.append(("SYNTHETIC_LAYER_LITERAL_CANARY", cli))',
+            "SYNTHETIC_LAYER_LITERAL_CANARY",
+        ),
+    ],
+    ids=["condition", "layer-label"],
+)
+def test_config_precedence_redacts_string_literals_in_report(
+    config_workspace: Workspace,
+    capsys: pytest.CaptureFixture[str],
+    source_fragment: str,
+    replacement: str,
+    canary: str,
+) -> None:
+    source = RESOLVER_SOURCE.replace(source_fragment, replacement, 1)
+    assert source != RESOLVER_SOURCE
+    (config_workspace.root / "config.py").write_text(source, encoding="utf-8")
+
+    report = inspect_config_precedence("config.py")
+    captured = capsys.readouterr()
+
+    assert not report.startswith("Error:")
+    assert "later layer overrides an earlier value" in report
+    assert "configuration layer" in report
+    assert canary not in report
+    assert canary not in captured.out
+    assert canary not in captured.err
+
+
 def test_config_precedence_dispatch_is_registered_and_never_executes_source(
     config_workspace: Workspace,
 ) -> None:
@@ -131,7 +187,7 @@ def test_config_precedence_dispatch_is_registered_and_never_executes_source(
     report = run_tool("inspect_config_precedence", "config.py")
 
     assert not report.startswith("Error:")
-    assert "'command line' (configuration layer)" in report
+    assert "5. 'command line' (configuration layer)" in report
 
 
 def test_config_precedence_request_routes_to_static_tool_in_one_step(
@@ -149,9 +205,9 @@ def test_config_precedence_request_routes_to_static_tool_in_one_step(
     assert fake.calls == []
     assert len(agent.last_trace) == 1
     assert agent.last_trace[0].action == "inspect_config_precedence"
-    assert answer.index("'file:defaults'") < answer.index("'profile:{profile}'")
-    assert answer.index("'.env file'") < answer.index("'environment'")
-    assert answer.index("'environment'") < answer.index("'command line'")
+    assert answer.index("1. 'file layer'") < answer.index("2. 'profile layer'")
+    assert answer.index("3. 'file layer'") < answer.index("4. 'process environment'")
+    assert answer.index("4. 'process environment'") < answer.index("5. 'command line'")
     assert "if file_path is not None" in answer
     assert "if profile" in answer
     assert "if use_env_file" in answer
@@ -398,8 +454,7 @@ def test_config_precedence_respects_workspace_size_limit(
 
     result = inspect_config_precedence("oversized.py")
 
-    assert result.startswith("Error:")
-    assert "over the 100000-byte limit" in result
+    assert result == "Error: configuration file is not accessible."
 
 
 def test_config_precedence_rejects_hard_linked_source(
@@ -415,8 +470,7 @@ def test_config_precedence_rejects_hard_linked_source(
 
     result = inspect_config_precedence("linked.py")
 
-    assert result.startswith("Error:")
-    assert "hard-linked files" in result
+    assert result == "Error: configuration file is not accessible."
 
 
 def test_config_precedence_rejects_malformed_or_unsupported_source(

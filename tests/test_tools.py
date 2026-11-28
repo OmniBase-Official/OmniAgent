@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import pytest
 
+from calculator import CalculationError as CalculatorError
+from calculator import calculate as calculate_expression
 from tools import (
     TOOLS,
     CalculateArgs,
+    CalculationError,
     Tool,
     calculate,
     describe_tools,
@@ -14,6 +17,11 @@ from tools import (
     run_tool,
     tool_names,
 )
+
+
+def test_calculate_is_reexported_from_tools() -> None:
+    assert calculate is calculate_expression
+    assert CalculationError is CalculatorError
 
 
 @pytest.mark.parametrize(
