@@ -86,7 +86,7 @@ def _iterates_name(expression: ast.expr, name: str) -> bool:
 class _StringLiteralRedactor(ast.NodeTransformer):
     """Replace embedded string and bytes values before rendering expressions."""
 
-    def visit_Constant(self, node: ast.Constant) -> ast.AST:  # noqa: N802
+    def visit_Constant(self, node: ast.Constant) -> ast.AST:
         if isinstance(node.value, str):
             return ast.copy_location(ast.Constant(value="<string>"), node)
         if isinstance(node.value, bytes):

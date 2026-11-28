@@ -173,6 +173,8 @@ ignore = [
 # Notebook cells print, group imports on one line and shell out. Real checks
 # (F, E501, syntax) still apply, and tests/test_notebook.py covers the rest.
 "notebooks/*.ipynb" = ["T20", "E401", "E402", "I001", "S603", "S607", "ANN", "PTH123", "UP017"]
+# AST NodeTransformer visitor names must match the node class spelling.
+"config_inspection.py" = ["N802"]
 # Tests assert, touch private helpers, and hard-code sample values on purpose.
 "tests/*" = ["S101", "SLF001", "PLR2004", "ANN201", "ARG001"]
 

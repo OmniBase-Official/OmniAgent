@@ -56,6 +56,7 @@ Improve infrastructure readability and maintainability in an isolated worktree f
 
 ## Next
 - SE read-only review: PASS for the code snapshot with diff fingerprint `60a08d6f5a9d630b55f54946b107bdd1f48bb36d37372a0a69ed2edc44cb0b34`; reviewer confirmed HEAD/tree and hashes unchanged but did not rerun gates.
-- Next, request approval for the final candidate diff before any commit or push; keep PR #10 Draft and unmerged.
-- Trusted workflow enforcement and Gitleaks finding classification remain open pending owner/admin evidence; do not claim either blocker is closed.
-- Keep all work uncommitted/unpushed pending explicit approval for the exact candidate diff SHA; do not touch `main` or merge.
+- Local commit `cc77ecc452a72d2e013a9dcd8adc1177523cab87` is unpushed. The `origin` pre-push hook rejected it because Ruff considered the AST visitor's `N802` noqa unused.
+- Fix: removed the inline noqa and configured `N802` as a file-specific ignore for `config_inspection.py`, with an explanatory comment. Full pytest (865 passed, 2 skipped), Ruff, mypy (49 files), and diff check now pass.
+- `git ls-remote` found no branch ref on either remote; no push completed. This follow-up changes the approved diff, so obtain approval for the refreshed diff fingerprint before committing the follow-up or retrying pushes.
+- Trusted workflow enforcement and Gitleaks finding classification remain open pending owner/admin evidence; do not claim either blocker is closed. PR #10 remains Draft and unmerged; do not touch `main` or merge.
