@@ -45,18 +45,21 @@ Improve infrastructure readability and maintainability in an isolated worktree f
 - Fix: render a deep-copied AST after replacing string/bytes constants, normalize layer labels into safe categories, and omit requested filenames from success/error output. Preserve structural metadata including rule/finding presence, category, and source line.
 - Synthetic-only regressions cover literal-bearing conditions/layer labels and filename markers on successful and denied paths; they assert the marker is absent from report/stdout/stderr while expected metadata remains.
 - Mutation proof: disabling condition/layer redaction and reintroducing the report filename each made its targeted test fail; the saved source SHA matched after restoration. Test output was captured to avoid showing synthetic markers. No real credential was read.
-- SE verified this exact source fingerprint and its relevant tests/docs; reviewer did not rerun gates or mutation checks. Implementer measured all gates passing. Hosted CI has not run on this uncommitted snapshot.
+- SE verified the implementation source fingerprint and relevant tests/docs; reviewer did not rerun gates or mutation checks. The subsequent pushed HEAD is `63d7c95d9d68520802f46c3ce384e7a9baa6ba0d`; hosted CI run #89 later passed on that exact HEAD.
 
 ## Completed slice: agent.py parser boundary
 - ROOT/DESIGN: moved `Step`, parser patterns/constants and pure reply helpers to `agent_parser.py`; `agent.py` keeps compatibility bindings for `Step` and `_parse`.
 - BLAST RADIUS: `agent.py`, `agent_parser.py`, `tool_input_values.py`, `tools.py`, `pyproject.toml`, parser tests and `ARCHITECTURE.md`. ReAct orchestration, prompts, transport, dispatch and logging logic were not redesigned.
 - EDGE CASES: existing parser matrix covers empty/malformed replies, multiline/competing markers, inline calls, quoted/fenced input, marker confusion and Unicode cases.
 - Compatibility tests verify `agent.Step`/`agent._parse` bindings and the shared empty-input constant; AST comparison against the base parser implementation confirmed parser behavior preservation. `pyproject.toml` includes the extracted modules for wheel packaging.
-- Final gates on this snapshot: full pytest 865 passed, 2 skipped; Ruff passed; mypy passed with 49 source files; `git diff --check` passed. No hosted CI has run.
+- Final local gates on the pre-push snapshot: full pytest 865 passed, 2 skipped; Ruff passed; mypy passed with 49 source files; `git diff --check` passed. Hosted CI run #89 later passed on pushed HEAD `63d7c95d9d68520802f46c3ce384e7a9baa6ba0d`.
+
+## Completed, pushed, and hosted-validated
+- Commits `cc77ecc452a72d2e013a9dcd8adc1177523cab87` and `63d7c95d9d68520802f46c3ce384e7a9baa6ba0d` are on `codex/infra-readability-scale-20261128`; the final pushed tree is `315398e6b1b1ca66a28dc0a8b1920f093bf4a927`.
+- `git ls-remote` verified the branch points to `63d7c95d9d68520802f46c3ce384e7a9baa6ba0d` on both `origin` and `organization`. The `origin` pre-push hook initially rejected Ruff's unused noqa; the documented file-specific ignore fixed it. Hook gates then passed Ruff, mypy (49 files), and pytest (865 passed, 2 skipped).
+- Draft PR #12 targets `OmniBase-Official/OmniAgent:main` at the exact pushed HEAD. GitHub Actions CI run #89 completed successfully: Linux Ruff, mypy, pytest and Windows pytest passed. PR #12 remains Draft; PR #10 remains Draft and unmerged. `main` was not changed.
+- SE static review of exact HEAD `63d7c95d9d68520802f46c3ce384e7a9baa6ba0d` passed with no code blockers; SE did not rerun tests. It found one Low documentation-format issue in `PROGRESS.md` (multiple records on one line), corrected in the current uncommitted documentation update. Trusted workflow enforcement and Gitleaks finding classification remain open pending owner/admin evidence.
 
 ## Next
-- SE read-only review: PASS for the code snapshot with diff fingerprint `60a08d6f5a9d630b55f54946b107bdd1f48bb36d37372a0a69ed2edc44cb0b34`; reviewer confirmed HEAD/tree and hashes unchanged but did not rerun gates.
-- Local commit `cc77ecc452a72d2e013a9dcd8adc1177523cab87` is unpushed. The `origin` pre-push hook rejected it because Ruff considered the AST visitor's `N802` noqa unused.
-- Fix: removed the inline noqa and configured `N802` as a file-specific ignore for `config_inspection.py`, with an explanatory comment. Full pytest (865 passed, 2 skipped), Ruff, mypy (49 files), and diff check now pass.
-- `git ls-remote` found no branch ref on either remote; no push completed. This follow-up changes the approved diff, so obtain approval for the refreshed diff fingerprint before committing the follow-up or retrying pushes.
-- Trusted workflow enforcement and Gitleaks finding classification remain open pending owner/admin evidence; do not claim either blocker is closed. PR #10 remains Draft and unmerged; do not touch `main` or merge.
+- Keep trusted workflow enforcement open until owner/admin provides ruleset scope and bypass evidence.
+- Keep the nine Gitleaks findings unresolved until the owner privately classifies them; revoke/rotate any real or uncertain credential before changing scanner policy.
