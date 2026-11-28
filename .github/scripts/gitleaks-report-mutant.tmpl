@@ -1,0 +1,3 @@
+{{- range . -}}
+{{- printf "%s\t%q\t%s\t%d\t%q\t%q\n" .RuleID .File .Commit .StartLine .Secret .Match -}}
+{{- end -}}
